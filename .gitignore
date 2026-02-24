@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Virtual environments
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local test data (keep folder structure only)
+input/images/*
+!input/images/.gitkeep
+input/videos/*
+!input/videos/.gitkeep
+
+# Generated outputs (keep folder structure only)
+output/debug/*
+!output/debug/.gitkeep
+output/images/*
+!output/images/.gitkeep
+output/videos/*
+!output/videos/.gitkeep
+
+# Backend runtime storage (keep folder structure only)
+storage/raw/*
+!storage/raw/.gitkeep
+storage/debug/*
+!storage/debug/.gitkeep
+storage/out/*
+!storage/out/.gitkeep
+storage/report/*
+!storage/report/.gitkeep
+storage/jobs/*
+!storage/jobs/.gitkeep
