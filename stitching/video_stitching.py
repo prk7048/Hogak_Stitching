@@ -12,6 +12,7 @@ from stitching.errors import ErrorCode
 from stitching.image_stitching import (
     StitchConfig,
     StitchingFailure,
+    _estimate_affine_homography,
     _detect_and_match,
     _estimate_homography,
     _prepare_warp_plan,
@@ -130,6 +131,9 @@ def stitch_videos(
 ) -> dict:
     config = config or VideoConfig()
     started_at = time.perf_counter()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
     report = base_report(
         pipeline="video",
         inputs={"left": str(left_path), "right": str(right_path)},
@@ -183,14 +187,29 @@ def stitch_videos(
 
             keypoints_left, keypoints_right, matches = _detect_and_match(frame_left, frame_right, config)
             report["metrics"]["matches_count"] = len(matches)
-            homography, inlier_mask = _estimate_homography(
-                keypoints_left,
-                keypoints_right,
-                matches,
-                config,
-            )
+            used_fallback = False
+            try:
+                homography, inlier_mask = _estimate_homography(
+                    keypoints_left,
+                    keypoints_right,
+                    matches,
+                    config,
+                )
+                plan = _prepare_warp_plan(frame_left.shape[:2], frame_right.shape[:2], homography, config)
+            except StitchingFailure as exc:
+                if exc.code != ErrorCode.HOMOGRAPHY_FAIL:
+                    raise
+                homography, inlier_mask = _estimate_affine_homography(
+                    keypoints_left,
+                    keypoints_right,
+                    matches,
+                    config,
+                )
+                plan = _prepare_warp_plan(frame_left.shape[:2], frame_right.shape[:2], homography, config)
+                used_fallback = True
             report["metrics"]["inliers_count"] = int(inlier_mask.ravel().sum())
-            plan = _prepare_warp_plan(frame_left.shape[:2], frame_right.shape[:2], homography)
+            if used_fallback:
+                report["warnings"].append("homography_unstable_fallback_affine")
 
             debug_matches = cv2.drawMatches(
                 frame_left,
@@ -199,7 +218,7 @@ def stitch_videos(
                 keypoints_right,
                 matches[:200],
                 None,
-                matchesMask=inlier_mask.ravel().astype(bool).tolist()[:200],
+                matchesMask=[int(v) for v in inlier_mask.ravel().tolist()[:200]],
                 flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
             )
             cv2.imwrite(str(debug_dir / "video_inliers.jpg"), debug_matches)
@@ -278,4 +297,3 @@ def stitch_videos(
         write_report(report_path, report)
 
     return report
-

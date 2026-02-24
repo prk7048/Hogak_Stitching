@@ -26,6 +26,10 @@ class StitchConfig:
     ratio_test: float = 0.75
     ransac_reproj_threshold: float = 5.0
     max_features: int = 4000
+    max_output_scale: float = 4.0
+    max_output_pixels: int = 40_000_000
+    ghost_diff_threshold: float = 18.0
+    seam_transition_px: int = 40
 
 
 class StitchingFailure(RuntimeError):
@@ -112,7 +116,42 @@ def _estimate_homography(
     return homography, inlier_mask
 
 
-def _prepare_warp_plan(left_shape: tuple[int, int], right_shape: tuple[int, int], homography: np.ndarray) -> WarpPlan:
+def _estimate_affine_homography(
+    keypoints_left: list[cv2.KeyPoint],
+    keypoints_right: list[cv2.KeyPoint],
+    matches: list[cv2.DMatch],
+    config: StitchConfig,
+) -> tuple[np.ndarray, np.ndarray]:
+    src_points = np.float32([keypoints_right[m.trainIdx].pt for m in matches]).reshape(-1, 2)
+    dst_points = np.float32([keypoints_left[m.queryIdx].pt for m in matches]).reshape(-1, 2)
+    affine, inlier_mask = cv2.estimateAffinePartial2D(
+        src_points,
+        dst_points,
+        method=cv2.RANSAC,
+        ransacReprojThreshold=config.ransac_reproj_threshold,
+    )
+    if affine is None or inlier_mask is None:
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "affine fallback estimation returned null")
+
+    inliers = int(inlier_mask.ravel().sum())
+    min_affine_inliers = max(12, int(config.min_inliers * 0.6))
+    if inliers < min_affine_inliers:
+        raise StitchingFailure(
+            ErrorCode.HOMOGRAPHY_FAIL,
+            f"affine inliers below threshold: {inliers} < {min_affine_inliers}",
+        )
+
+    homography = np.eye(3, dtype=np.float64)
+    homography[:2, :] = affine
+    return homography, inlier_mask.reshape(-1, 1)
+
+
+def _prepare_warp_plan(
+    left_shape: tuple[int, int],
+    right_shape: tuple[int, int],
+    homography: np.ndarray,
+    config: StitchConfig,
+) -> WarpPlan:
     left_h, left_w = left_shape
     right_h, right_w = right_shape
 
@@ -124,12 +163,25 @@ def _prepare_warp_plan(left_shape: tuple[int, int], right_shape: tuple[int, int]
     min_x, min_y = np.floor(all_corners.min(axis=0)).astype(int)
     max_x, max_y = np.ceil(all_corners.max(axis=0)).astype(int)
 
-    tx = -min(0, min_x)
-    ty = -min(0, min_y)
+    # Always shift by min corner so the composed canvas starts at (0, 0).
+    # Using only negative minima can offset content incorrectly when min corner is positive.
+    tx = -min_x
+    ty = -min_y
     width = int(max_x - min_x)
     height = int(max_y - min_y)
     if width <= 0 or height <= 0:
         raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "invalid output geometry")
+    max_dim = int(max(left_w, right_w, left_h, right_h) * config.max_output_scale)
+    if width > max_dim or height > max_dim:
+        raise StitchingFailure(
+            ErrorCode.HOMOGRAPHY_FAIL,
+            f"output geometry too large: {width}x{height}",
+        )
+    if width * height > config.max_output_pixels:
+        raise StitchingFailure(
+            ErrorCode.HOMOGRAPHY_FAIL,
+            f"output pixel count too large: {width * height}",
+        )
 
     translation = np.array([[1, 0, tx], [0, 1, ty], [0, 0, 1]], dtype=np.float64)
     homography_adjusted = translation @ homography
@@ -162,6 +214,77 @@ def _blend_feather(canvas_left: np.ndarray, warped_right: np.ndarray, left_mask:
     return result
 
 
+def _compute_overlap_diff_mean(
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+    overlap: np.ndarray,
+) -> float:
+    if not np.any(overlap):
+        return 0.0
+    gray_left = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(warped_right, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(gray_left, gray_right).astype(np.float32)
+    return float(diff[overlap].mean())
+
+
+def _find_vertical_seam_x(
+    overlap: np.ndarray,
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+) -> int:
+    ys, xs = np.where(overlap)
+    if len(xs) == 0:
+        return canvas_left.shape[1] // 2
+    x_min, x_max = int(xs.min()), int(xs.max())
+    gray_left = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY)
+    gray_right = cv2.cvtColor(warped_right, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(gray_left, gray_right).astype(np.float32)
+
+    best_x = x_min
+    best_cost = float("inf")
+    for x in range(x_min, x_max + 1):
+        col_mask = overlap[:, x]
+        if not np.any(col_mask):
+            continue
+        col_cost = float(diff[:, x][col_mask].mean())
+        if col_cost < best_cost:
+            best_cost = col_cost
+            best_x = x
+    return best_x
+
+
+def _blend_seam_cut(
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+    left_mask: np.ndarray,
+    right_mask: np.ndarray,
+    transition_px: int,
+) -> tuple[np.ndarray, int]:
+    left_valid = left_mask > 0
+    right_valid = right_mask > 0
+    overlap = left_valid & right_valid
+    only_left = left_valid & ~right_valid
+    only_right = right_valid & ~left_valid
+
+    result = np.zeros_like(canvas_left, dtype=np.float32)
+    result[only_left] = canvas_left[only_left]
+    result[only_right] = warped_right[only_right]
+
+    seam_x = _find_vertical_seam_x(overlap, canvas_left, warped_right)
+    if np.any(overlap):
+        transition = max(2, int(transition_px))
+        x_coords = np.arange(canvas_left.shape[1], dtype=np.float32)[None, :]
+        right_w = np.clip((x_coords - (seam_x - transition / 2.0)) / transition, 0.0, 1.0)
+        left_w = 1.0 - right_w
+        blended = (
+            canvas_left.astype(np.float32) * left_w[..., None]
+            + warped_right.astype(np.float32) * right_w[..., None]
+        )
+        result[overlap] = blended[overlap]
+
+    return np.clip(result, 0, 255).astype(np.uint8), seam_x
+
+
 def _crop_to_valid(image: np.ndarray, mask: np.ndarray) -> np.ndarray:
     ys, xs = np.where(mask > 0)
     if len(xs) == 0 or len(ys) == 0:
@@ -182,17 +305,19 @@ def _save_debug_matches(
 ) -> None:
     if not matches:
         return
-    draw_mask = None
+    display_matches = matches[:300]
+    draw_mask: list[int] | None = None
     if mask is not None:
-        draw_mask = mask.ravel().astype(bool).tolist()
+        mask_values = [int(v) for v in mask.ravel().tolist()]
+        draw_mask = mask_values[: len(display_matches)]
     visual = cv2.drawMatches(
         left,
         keypoints_left,
         right,
         keypoints_right,
-        matches[:300],
+        display_matches,
         None,
-        matchesMask=draw_mask[:300] if draw_mask is not None else None,
+        matchesMask=draw_mask,
         flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
     )
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -211,6 +336,9 @@ def stitch_images(
 ) -> dict:
     config = config or StitchConfig()
     started_at = time.perf_counter()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if output_path.exists():
+        output_path.unlink()
 
     report = base_report(
         pipeline="image",
@@ -245,13 +373,30 @@ def stitch_images(
         if status_hook is not None:
             status_hook("homography")
         with StageTimer(stage_times, "homography"):
-            homography, inlier_mask = _estimate_homography(
-                keypoints_left,
-                keypoints_right,
-                matches,
-                config,
-            )
+            used_fallback = False
+            try:
+                homography, inlier_mask = _estimate_homography(
+                    keypoints_left,
+                    keypoints_right,
+                    matches,
+                    config,
+                )
+                plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+            except StitchingFailure as exc:
+                if exc.code != ErrorCode.HOMOGRAPHY_FAIL:
+                    raise
+                homography, inlier_mask = _estimate_affine_homography(
+                    keypoints_left,
+                    keypoints_right,
+                    matches,
+                    config,
+                )
+                plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+                used_fallback = True
+
             report["metrics"]["inliers_count"] = int(inlier_mask.ravel().sum())
+            if used_fallback:
+                report["warnings"].append("homography_unstable_fallback_affine")
             _save_debug_matches(
                 debug_dir / "inliers.jpg",
                 left,
@@ -265,7 +410,6 @@ def stitch_images(
         if status_hook is not None:
             status_hook("stitching")
         with StageTimer(stage_times, "warp_blend"):
-            plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography)
             warped_right = cv2.warpPerspective(right, plan.homography_adjusted, (plan.width, plan.height))
             right_mask = cv2.warpPerspective(
                 np.ones(right.shape[:2], dtype=np.uint8) * 255,
@@ -279,7 +423,26 @@ def stitch_images(
             canvas_left[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = left
             left_mask[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = 255
 
-            stitched = _blend_feather(canvas_left, warped_right, left_mask, right_mask)
+            overlap = (left_mask > 0) & (right_mask > 0)
+            overlap_diff_mean = _compute_overlap_diff_mean(canvas_left, warped_right, overlap)
+            use_seam_cut = used_fallback or overlap_diff_mean >= config.ghost_diff_threshold
+            if use_seam_cut:
+                stitched, seam_x = _blend_seam_cut(
+                    canvas_left,
+                    warped_right,
+                    left_mask,
+                    right_mask,
+                    transition_px=config.seam_transition_px,
+                )
+                report["metrics"]["blend_mode"] = "seam_cut"
+                report["metrics"]["seam_x"] = int(seam_x)
+                if "homography_unstable_fallback_affine" not in report["warnings"]:
+                    report["warnings"].append("high_overlap_difference_seam_cut")
+            else:
+                stitched = _blend_feather(canvas_left, warped_right, left_mask, right_mask)
+                report["metrics"]["blend_mode"] = "feather"
+                report["metrics"]["seam_x"] = None
+            report["metrics"]["overlap_diff_mean"] = round(overlap_diff_mean, 3)
             union_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8) * 255
             stitched = _crop_to_valid(stitched, union_mask)
 
@@ -303,4 +466,3 @@ def stitch_images(
         write_report(report_path, report)
 
     return report
-
