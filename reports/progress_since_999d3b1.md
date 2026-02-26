@@ -1,72 +1,72 @@
-# Progress Report Since Commit `999d3b1`
+# 커밋 `999d3b1` 이후 진행 보고서
 
-Date: 2026-02-26  
-Base commit: `999d3b1` (`Improve ghosting handling and add pair01/pair02 validation report`)
+일자: 2026-02-26  
+기준 커밋: `999d3b1` (`Improve ghosting handling and add pair01/pair02 validation report`)
 
-## 1) Scope
+## 1) 범위
 
-This report summarizes code and pipeline updates after the last pushed commit, including:
+이 보고서는 마지막 푸시 커밋 이후 코드 및 파이프라인 업데이트를 요약합니다.
 
-- quality-focused stitching improvements
-- video sync/blending stabilization changes
-- simplified CLI presets for video runs (`10s`, `30s`, `full`)
-- validation runs and outcomes
+- 품질 중심 스티칭 개선
+- 영상 동기화/블렌딩 안정화
+- 영상 실행용 CLI 프리셋 단순화 (`10s`, `30s`, `full`)
+- 검증 실행 및 결과
 
-## 2) Work Log (Chronological)
+## 2) 작업 로그(시간순)
 
-1. Fixed debug draw pipeline stability (OpenCV `matchesMask` type handling).
-2. Added geometry safety checks to prevent invalid huge canvases.
-3. Added affine fallback when homography is unstable.
-4. Added adaptive seam-cut logic for ghost-prone overlap.
-5. Added sync refinement for videos (coarse offset + local search refinement).
-6. Added exposure compensation (gain/bias) from overlap statistics.
-7. Upgraded seam from fixed vertical cut to row-wise minimal-cost seam path.
-8. Added simplified CLI presets:
+1. 디버그 매칭 렌더링 안정화(OpenCV `matchesMask` 타입 처리 수정)
+2. 비정상 대형 캔버스 방지용 기하 안전장치 추가
+3. 호모그래피 불안정 시 affine fallback 추가
+4. 고스팅 위험 겹침 구간에서 적응형 seam-cut 추가
+5. 영상 동기화 refine 추가(coarse offset + 지역 탐색)
+6. 겹침 통계 기반 노출 보정(gain/bias) 추가
+7. 고정 수직 seam에서 행 단위 최소비용 seam 경로로 업그레이드
+8. CLI 프리셋 명령 추가:
    - `python -m stitching video-10s --pair <name>`
    - `python -m stitching video-30s --pair <name>`
    - `python -m stitching video-full --pair <name>`
-9. Added automatic input/output naming for preset commands.
-10. Added full-mode behavior (`max_duration_sec <= 0` means process full available range).
+9. 프리셋 실행 시 입력/출력 경로 자동 네이밍 추가
+10. full 모드 동작 추가(`max_duration_sec <= 0`이면 가능한 전체 구간 처리)
 
-## 3) Major Technical Changes
+## 3) 주요 기술 변경
 
-### A. Image/Video Quality
+### A. 이미지/영상 품질
 
-- Overlap-based exposure compensation (`exposure_gain`, `exposure_bias` in report)
-- Seam-cut now uses a row-wise dynamic seam path to reduce visible central boundary artifacts
-- Seam blending is kept adaptive by overlap risk metrics
+- 겹침 영역 기반 노출 보정(`exposure_gain`, `exposure_bias` 리포트 기록)
+- seam-cut을 행 단위 동적 seam 경로로 변경해 중앙 경계 가시성 완화
+- 겹침 위험도 메트릭에 따른 적응형 seam 블렌딩 유지
 
-### B. Video Sync
+### B. 영상 동기화
 
-- Coarse sync from luma cross-correlation
-- Local refinement window around coarse offset using quick alignment score
-- Report now includes:
+- luma 상관 기반 coarse 동기화
+- coarse 주변 후보를 정합 점수로 재평가하는 refine 단계 추가
+- 리포트 확장:
   - `coarse_sync_offset_ms`
   - `estimated_sync_offset_ms`
   - `sync_refine_score`
 
-### C. CLI Usability
+### C. CLI 사용성
 
-- Added preset commands with minimal input:
+- 최소 입력으로 실행 가능한 프리셋 명령 추가:
   - `video-10s`, `video-30s`, `video-full`
-- Supports:
-  - `--pair video04` (recommended)
-  - or explicit `--left/--right`
-  - if omitted, latest valid pair in `input/videos` is auto-selected
-- Output filenames are auto-generated:
+- 지원 방식:
+  - `--pair video04` (권장)
+  - 또는 명시적 `--left/--right`
+  - 생략 시 `input/videos`의 최신 유효 pair 자동 선택
+- 출력 파일 자동 생성:
   - `output/videos/{pair}_{preset}_stitched.mp4`
   - `output/videos/{pair}_{preset}_report.json`
   - `output/debug/{pair}_{preset}/`
 
-## 4) Validation Runs
+## 4) 검증 실행
 
-### Preset Command Validation
+### 프리셋 명령 검증
 
 - `python -m stitching video-10s --pair video04` -> succeeded
 - `python -m stitching video-30s --pair video01` -> succeeded
 - `python -m stitching video-full --pair video01` -> succeeded
 
-### Key Result Snapshots
+### 핵심 결과 스냅샷
 
 1. `video04_10s_report.json`
    - status: succeeded
@@ -84,23 +84,23 @@ This report summarizes code and pipeline updates after the last pushed commit, i
 
 3. `video01_full_report.json`
    - status: succeeded
-   - same refined sync/blend profile as above
-   - full range processing confirmed
+   - 위와 동일한 refined sync/blend 프로파일 확인
+   - full 구간 처리 동작 확인
 
-## 5) Dataset Scope Update
+## 5) 데이터셋 범위 업데이트
 
-- `video2` and `video3` are excluded from ongoing project validation by user decision.
-- Current active validation set is based on retained video pairs (e.g., `video01`, `video04`).
+- 사용자 결정으로 `video2`, `video3`는 지속 검증 대상에서 제외
+- 현재 활성 검증 셋은 유지된 영상 pair(`video01`, `video04`) 중심
 
-## 6) Known Limitations (Still Present)
+## 6) 남아 있는 한계
 
-- Large parallax / near 3D object motion still causes visible artifacts despite seam improvements.
-- Single global transform remains a structural quality limit for difficult motion/depth scenes.
-- Full-quality production target likely requires local warp (mesh/APAP-style) and multiband blending.
+- 큰 시차/근거리 3D 객체 이동에서는 seam 개선 후에도 아티팩트가 남음
+- 단일 전역 변환 구조의 품질 한계가 어려운 장면에서 여전히 존재
+- 운영 수준 품질 목표에는 로컬 워프(mesh/APAP 계열) + 멀티밴드 블렌딩이 유력
 
-## 7) Next Recommended Actions
+## 7) 권장 다음 작업
 
-1. Add multiband blending mode on top of current seam path.
-2. Add quality tier metric (`stable/fallback/risky`) using existing report metrics.
-3. Add side-by-side debug mosaic output per run (`left/right/stitched/overlap diff`) for faster review.
+1. 현재 seam 경로 기반 위에 멀티밴드 블렌딩 옵션 추가
+2. 기존 리포트 메트릭 기반 품질 등급(`stable/fallback/risky`) 추가
+3. 리뷰 속도 향상을 위해 `left/right/stitched/overlap diff` 모자이크 디버그 출력 추가
 

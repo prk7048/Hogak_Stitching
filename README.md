@@ -1,14 +1,14 @@
-# Dual Smartphone Stitching PoC
+# 듀얼 스마트폰 스티칭 PoC
 
-This project provides a minimal PoC for:
+이 프로젝트는 다음을 위한 최소 기능 PoC입니다.
 
-- image stitching: `left.jpg + right.jpg -> stitched_image.png`
-- video stitching (offline): `left.mp4 + right.mp4 -> stitched.mp4`
-- backend job flow: API + queue worker + storage
+- 이미지 스티칭: `left.jpg + right.jpg -> stitched_image.png`
+- 영상 스티칭(오프라인): `left.mp4 + right.mp4 -> stitched.mp4`
+- 백엔드 잡 처리: API + 큐 워커 + 스토리지
 
-## 1) Folder Structure (Fixed)
+## 1) 폴더 구조(고정)
 
-Use this structure and naming convention for reproducible tests:
+재현 가능한 테스트를 위해 아래 구조와 네이밍 규칙을 사용합니다.
 
 ```text
 Stitching/
@@ -37,20 +37,20 @@ Stitching/
     jobs/
 ```
 
-Data policy:
+데이터 기준:
 
-- image `10 pairs` means `20 files` (`left/right` x 10)
-- video `3 pairs` means `6 files` (`left/right` x 3)
+- 이미지 `10 pairs` = `20개 파일` (`left/right` x 10)
+- 영상 `3 pairs` = `6개 파일` (`left/right` x 3)
 
-## 2) Install
+## 2) 설치
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-## 3) Run Image Stitching
+## 3) 이미지 스티칭 실행
 
-Example for `pair01`:
+`pair01` 예시:
 
 ```powershell
 python -m stitching image `
@@ -61,20 +61,20 @@ python -m stitching image `
   --debug-dir .\output\debug\pair01
 ```
 
-Expected outputs:
+예상 산출물:
 
 - `output/images/pair01_stitched.png`
 - `output/images/pair01_report.json`
-- debug: `matches.jpg`, `inliers.jpg`, `warp_overlay.png`
+- 디버그: `matches.jpg`, `inliers.jpg`, `warp_overlay.png`
 
-If you currently have only one pair, start with `pair01` only and validate:
+현재 1세트만 있으면 `pair01`부터 실행해서 아래를 확인하세요.
 
-- `status` in `pair01_report.json` is `succeeded` or expected failure code
-- `metrics.matches_count`, `metrics.inliers_count`, and `processing_time_sec` exist
+- `pair01_report.json`의 `status`가 `succeeded` 또는 기대한 실패 코드인지
+- `metrics.matches_count`, `metrics.inliers_count`, `processing_time_sec`가 존재하는지
 
-## 4) Run Video Stitching (Offline)
+## 4) 영상 스티칭 실행(오프라인)
 
-Quick presets (recommended):
+빠른 프리셋(권장):
 
 ```powershell
 python -m stitching video-10s --pair video04
@@ -82,17 +82,17 @@ python -m stitching video-30s --pair video04
 python -m stitching video-full --pair video04
 ```
 
-If `--pair` is omitted, the latest valid `*_left/*_right` pair in `input/videos` is selected automatically.
+`--pair`를 생략하면 `input/videos`에서 최신 유효 `*_left/*_right` 쌍을 자동 선택합니다.
 
-Generated filenames are automatic:
+출력 파일명은 자동 생성됩니다.
 
 - `output/videos/{pair}_10s_stitched.mp4`
 - `output/videos/{pair}_30s_stitched.mp4`
 - `output/videos/{pair}_full_stitched.mp4`
-- corresponding `*_report.json`
-- debug folder: `output/debug/{pair}_{preset}/`
+- 대응하는 `*_report.json`
+- 디버그 폴더: `output/debug/{pair}_{preset}/`
 
-Advanced manual mode (explicit paths):
+수동 모드(경로 직접 지정):
 
 ```powershell
 python -m stitching video `
@@ -105,19 +105,19 @@ python -m stitching video `
   --sync-sample-sec 8
 ```
 
-Expected output:
+예상 산출물:
 
-- stitched video + `report.json`
+- 스티칭 영상 + `report.json`
 
-## 5) Backend API + Worker
+## 5) 백엔드 API + 워커
 
-Run server:
+서버 실행:
 
 ```powershell
 python -m stitching serve --host 127.0.0.1 --port 8080 --storage-dir .\storage
 ```
 
-Submit image job:
+이미지 잡 요청:
 
 ```powershell
 curl -X POST http://127.0.0.1:8080/jobs/image-stitch `
@@ -125,7 +125,7 @@ curl -X POST http://127.0.0.1:8080/jobs/image-stitch `
   -d "{\"left_path\":\"C:/path/to/pair01_left.jpg\",\"right_path\":\"C:/path/to/pair01_right.jpg\"}"
 ```
 
-Submit video job:
+영상 잡 요청:
 
 ```powershell
 curl -X POST http://127.0.0.1:8080/jobs/video-stitch `
@@ -133,7 +133,7 @@ curl -X POST http://127.0.0.1:8080/jobs/video-stitch `
   -d "{\"left_path\":\"C:/path/to/pair01_left.mp4\",\"right_path\":\"C:/path/to/pair01_right.mp4\",\"options\":{\"max_duration_sec\":20}}"
 ```
 
-Check status/report/artifact:
+상태/리포트/아티팩트 조회:
 
 ```powershell
 curl http://127.0.0.1:8080/jobs/{job_id}
@@ -141,7 +141,7 @@ curl http://127.0.0.1:8080/jobs/{job_id}/report
 curl http://127.0.0.1:8080/jobs/{job_id}/artifact
 ```
 
-## 6) Error Codes
+## 6) 에러 코드
 
 - `PROBE_FAIL`
 - `OVERLAP_LOW`
@@ -150,16 +150,17 @@ curl http://127.0.0.1:8080/jobs/{job_id}/artifact
 - `ENCODE_FAIL`
 - `INTERNAL_ERROR`
 
-## 7) report.json (Required)
+## 7) report.json (필수)
 
-`report.json` is generated for both success and failure.
+`report.json`은 성공/실패 모두 생성됩니다.
 
-Required fields:
+필수 필드:
 
-- `status`: `succeeded` or `failed`
+- `status`: `succeeded` 또는 `failed`
 - `error_code`
 - `metrics.matches_count`
 - `metrics.inliers_count`
 - `metrics.processing_time_sec` (stage + total)
 - `metrics.output_resolution`
 - `metrics.estimated_sync_offset_ms` (video)
+
