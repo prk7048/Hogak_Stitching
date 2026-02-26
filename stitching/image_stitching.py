@@ -30,6 +30,11 @@ class StitchConfig:
     max_output_pixels: int = 40_000_000
     ghost_diff_threshold: float = 18.0
     seam_transition_px: int = 40
+    exposure_compensation: bool = True
+    exposure_gain_min: float = 0.7
+    exposure_gain_max: float = 1.4
+    exposure_bias_abs_max: float = 35.0
+    seam_smoothness_penalty: float = 4.0
 
 
 class StitchingFailure(RuntimeError):
@@ -212,6 +217,165 @@ def _blend_feather(canvas_left: np.ndarray, warped_right: np.ndarray, left_mask:
 
     result = np.clip(result, 0, 255).astype(np.uint8)
     return result
+
+
+def _apply_gain_bias(image: np.ndarray, gain: float, bias: float, mask: np.ndarray | None = None) -> np.ndarray:
+    adjusted = image.astype(np.float32) * float(gain) + float(bias)
+    adjusted = np.clip(adjusted, 0, 255).astype(np.uint8)
+    if mask is None:
+        return adjusted
+    out = image.copy()
+    valid = mask > 0
+    out[valid] = adjusted[valid]
+    return out
+
+
+def _compensate_exposure(
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+    overlap: np.ndarray,
+    right_mask: np.ndarray,
+    config: StitchConfig,
+) -> tuple[np.ndarray, float, float]:
+    if not np.any(overlap):
+        return warped_right, 1.0, 0.0
+    gray_left = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray_right = cv2.cvtColor(warped_right, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    left_vals = gray_left[overlap]
+    right_vals = gray_right[overlap]
+    if left_vals.size < 64 or right_vals.size < 64:
+        return warped_right, 1.0, 0.0
+    mean_left = float(left_vals.mean())
+    mean_right = float(right_vals.mean())
+    std_left = float(left_vals.std())
+    std_right = float(right_vals.std())
+    gain = 1.0
+    if std_right > 1e-3:
+        gain = std_left / std_right
+    gain = float(np.clip(gain, config.exposure_gain_min, config.exposure_gain_max))
+    bias = mean_left - gain * mean_right
+    bias = float(np.clip(bias, -config.exposure_bias_abs_max, config.exposure_bias_abs_max))
+    compensated = _apply_gain_bias(warped_right, gain=gain, bias=bias, mask=right_mask)
+    return compensated, gain, bias
+
+
+def _compute_seam_cost_map(canvas_left: np.ndarray, warped_right: np.ndarray, overlap: np.ndarray) -> np.ndarray:
+    gray_left = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    gray_right = cv2.cvtColor(warped_right, cv2.COLOR_BGR2GRAY).astype(np.float32)
+    diff = cv2.absdiff(gray_left, gray_right)
+    # Penalize high-gradient regions so seam avoids sharp edges and text boundaries.
+    grad_x = cv2.Sobel(gray_left, cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(gray_left, cv2.CV_32F, 0, 1, ksize=3)
+    grad_mag = cv2.magnitude(grad_x, grad_y)
+    cost = diff + 0.25 * grad_mag
+    cost[~overlap] = 1e9
+    return cost
+
+
+def _find_seam_path(
+    overlap: np.ndarray,
+    cost_map: np.ndarray,
+    smoothness_penalty: float,
+) -> np.ndarray:
+    h, w = overlap.shape
+    seam_path = np.full(h, -1, dtype=np.int32)
+    ys, xs = np.where(overlap)
+    if len(xs) == 0 or len(ys) == 0:
+        seam_path[:] = w // 2
+        return seam_path
+    x_min, x_max = int(xs.min()), int(xs.max())
+    seam_w = x_max - x_min + 1
+    inf = 1e18
+    dp = np.full((h, seam_w), inf, dtype=np.float64)
+    prev_idx = np.full((h, seam_w), -1, dtype=np.int32)
+
+    first_valid_row = int(ys.min())
+    valid0 = overlap[first_valid_row, x_min : x_max + 1]
+    row0_cost = cost_map[first_valid_row, x_min : x_max + 1]
+    dp[first_valid_row, valid0] = row0_cost[valid0]
+
+    for y in range(first_valid_row + 1, h):
+        valid = overlap[y, x_min : x_max + 1]
+        if not np.any(valid):
+            continue
+        prev_cost = dp[y - 1]
+        row_cost = cost_map[y, x_min : x_max + 1]
+        for x in np.where(valid)[0]:
+            candidates = []
+            for step in (-1, 0, 1):
+                px = x + step
+                if px < 0 or px >= seam_w:
+                    continue
+                p_cost = prev_cost[px]
+                if p_cost >= inf * 0.5:
+                    continue
+                penalty = smoothness_penalty * abs(step)
+                candidates.append((p_cost + penalty, px))
+            if not candidates:
+                candidates.append((row_cost[x], x))
+            best_cost, best_prev = min(candidates, key=lambda t: t[0])
+            dp[y, x] = row_cost[x] + best_cost
+            prev_idx[y, x] = best_prev
+
+    last_row = int(ys.max())
+    valid_last = overlap[last_row, x_min : x_max + 1]
+    if not np.any(valid_last):
+        seam_path[:] = (x_min + x_max) // 2
+        return seam_path
+    last_candidates = np.where(valid_last)[0]
+    best_x_local = int(last_candidates[np.argmin(dp[last_row, last_candidates])])
+    seam_path[last_row] = x_min + best_x_local
+
+    for y in range(last_row, first_valid_row, -1):
+        prev_local = prev_idx[y, seam_path[y] - x_min]
+        if prev_local < 0:
+            seam_path[y - 1] = seam_path[y]
+        else:
+            seam_path[y - 1] = x_min + int(prev_local)
+
+    for y in range(first_valid_row):
+        seam_path[y] = seam_path[first_valid_row]
+    for y in range(first_valid_row, h):
+        if seam_path[y] < 0:
+            seam_path[y] = seam_path[y - 1]
+    return seam_path
+
+
+def _blend_seam_path(
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+    left_mask: np.ndarray,
+    right_mask: np.ndarray,
+    seam_path: np.ndarray,
+    transition_px: int,
+) -> np.ndarray:
+    left_valid = left_mask > 0
+    right_valid = right_mask > 0
+    overlap = left_valid & right_valid
+    only_left = left_valid & ~right_valid
+    only_right = right_valid & ~left_valid
+    result = np.zeros_like(canvas_left, dtype=np.float32)
+    result[only_left] = canvas_left[only_left]
+    result[only_right] = warped_right[only_right]
+
+    if np.any(overlap):
+        transition = max(2, int(transition_px))
+        h, w = overlap.shape
+        x_coords = np.arange(w, dtype=np.float32)
+        for y in range(h):
+            row_overlap = overlap[y]
+            if not np.any(row_overlap):
+                continue
+            seam_x = float(seam_path[y])
+            right_w = np.clip((x_coords - (seam_x - transition / 2.0)) / transition, 0.0, 1.0)
+            left_w = 1.0 - right_w
+            blend_row = (
+                canvas_left[y].astype(np.float32) * left_w[:, None]
+                + warped_right[y].astype(np.float32) * right_w[:, None]
+            )
+            result[y, row_overlap] = blend_row[row_overlap]
+
+    return np.clip(result, 0, 255).astype(np.uint8)
 
 
 def _compute_overlap_diff_mean(
@@ -424,18 +588,35 @@ def stitch_images(
             left_mask[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = 255
 
             overlap = (left_mask > 0) & (right_mask > 0)
+            exposure_gain = 1.0
+            exposure_bias = 0.0
+            if config.exposure_compensation:
+                warped_right, exposure_gain, exposure_bias = _compensate_exposure(
+                    canvas_left=canvas_left,
+                    warped_right=warped_right,
+                    overlap=overlap,
+                    right_mask=right_mask,
+                    config=config,
+                )
             overlap_diff_mean = _compute_overlap_diff_mean(canvas_left, warped_right, overlap)
             use_seam_cut = used_fallback or overlap_diff_mean >= config.ghost_diff_threshold
             if use_seam_cut:
-                stitched, seam_x = _blend_seam_cut(
+                cost_map = _compute_seam_cost_map(canvas_left, warped_right, overlap)
+                seam_path = _find_seam_path(
+                    overlap=overlap,
+                    cost_map=cost_map,
+                    smoothness_penalty=config.seam_smoothness_penalty,
+                )
+                stitched = _blend_seam_path(
                     canvas_left,
                     warped_right,
                     left_mask,
                     right_mask,
+                    seam_path=seam_path,
                     transition_px=config.seam_transition_px,
                 )
                 report["metrics"]["blend_mode"] = "seam_cut"
-                report["metrics"]["seam_x"] = int(seam_x)
+                report["metrics"]["seam_x"] = int(np.median(seam_path))
                 if "homography_unstable_fallback_affine" not in report["warnings"]:
                     report["warnings"].append("high_overlap_difference_seam_cut")
             else:
@@ -443,6 +624,8 @@ def stitch_images(
                 report["metrics"]["blend_mode"] = "feather"
                 report["metrics"]["seam_x"] = None
             report["metrics"]["overlap_diff_mean"] = round(overlap_diff_mean, 3)
+            report["metrics"]["exposure_gain"] = round(float(exposure_gain), 4)
+            report["metrics"]["exposure_bias"] = round(float(exposure_bias), 4)
             union_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8) * 255
             stitched = _crop_to_valid(stitched, union_mask)
 

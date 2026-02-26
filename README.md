@@ -74,23 +74,40 @@ If you currently have only one pair, start with `pair01` only and validate:
 
 ## 4) Run Video Stitching (Offline)
 
-Example for `pair01`:
+Quick presets (recommended):
+
+```powershell
+python -m stitching video-10s --pair video04
+python -m stitching video-30s --pair video04
+python -m stitching video-full --pair video04
+```
+
+If `--pair` is omitted, the latest valid `*_left/*_right` pair in `input/videos` is selected automatically.
+
+Generated filenames are automatic:
+
+- `output/videos/{pair}_10s_stitched.mp4`
+- `output/videos/{pair}_30s_stitched.mp4`
+- `output/videos/{pair}_full_stitched.mp4`
+- corresponding `*_report.json`
+- debug folder: `output/debug/{pair}_{preset}/`
+
+Advanced manual mode (explicit paths):
 
 ```powershell
 python -m stitching video `
-  --left .\input\videos\pair01_left.mp4 `
-  --right .\input\videos\pair01_right.mp4 `
-  --out .\output\videos\pair01_stitched.mp4 `
-  --report .\output\videos\pair01_report.json `
-  --debug-dir .\output\debug\pair01_video `
-  --max-duration-sec 20 `
-  --sync-sample-sec 5
+  --left .\input\videos\video04_left.mp4 `
+  --right .\input\videos\video04_right.mp4 `
+  --out .\output\videos\video04_manual.mp4 `
+  --report .\output\videos\video04_manual_report.json `
+  --debug-dir .\output\debug\video04_manual `
+  --max-duration-sec 30 `
+  --sync-sample-sec 8
 ```
 
-Expected outputs:
+Expected output:
 
-- `output/videos/pair01_stitched.mp4`
-- `output/videos/pair01_report.json`
+- stitched video + `report.json`
 
 ## 5) Backend API + Worker
 
