@@ -1,32 +1,26 @@
-# 듀얼 스마트폰 스티칭 PoC
+# Dual Smartphone Video Stitching PoC
 
-이 프로젝트는 다음을 위한 최소 기능 PoC입니다.
+이 프로젝트는 **이미 시간 동기화가 끝난 두 영상**을 입력으로 받아
+하나의 파노라마 영상으로 합성하는 오프라인 PoC입니다.
 
-- 이미지 스티칭: `left.jpg + right.jpg -> stitched_image.png`
-- 영상 스티칭(오프라인): `left.mp4 + right.mp4 -> stitched.mp4`
-- 백엔드 잡 처리: API + 큐 워커 + 스토리지
+## 핵심 범위
 
-## 1) 폴더 구조(고정)
+- 입력: `left.mp4`, `right.mp4` (이미 동기화 완료 상태)
+- 출력:
+  - `stitched.mp4`
+  - `report.json`
+- 지원: 오프라인 비디오 스티칭 + Job API(비디오 전용)
 
-재현 가능한 테스트를 위해 아래 구조와 네이밍 규칙을 사용합니다.
+## 폴더 구조
 
 ```text
 Stitching/
   input/
-    images/
-      pair01_left.jpg
-      pair01_right.jpg
-      pair02_left.jpg
-      pair02_right.jpg
-      ...
     videos/
-      pair01_left.mp4
-      pair01_right.mp4
-      pair02_left.mp4
-      pair02_right.mp4
+      video00_left.mp4
+      video00_right.mp4
       ...
   output/
-    images/
     videos/
     debug/
   storage/
@@ -37,103 +31,69 @@ Stitching/
     jobs/
 ```
 
-데이터 기준:
-
-- 이미지 `10 pairs` = `20개 파일` (`left/right` x 10)
-- 영상 `3 pairs` = `6개 파일` (`left/right` x 3)
-
-## 2) 설치
+## 설치
 
 ```powershell
 python -m pip install -r requirements.txt
 ```
 
-## 3) 이미지 스티칭 실행
+## 실행 방법
 
-`pair01` 예시:
-
-```powershell
-python -m stitching image `
-  --left .\input\images\pair01_left.jpg `
-  --right .\input\images\pair01_right.jpg `
-  --out .\output\images\pair01_stitched.png `
-  --report .\output\images\pair01_report.json `
-  --debug-dir .\output\debug\pair01
-```
-
-예상 산출물:
-
-- `output/images/pair01_stitched.png`
-- `output/images/pair01_report.json`
-- 디버그: `matches.jpg`, `inliers.jpg`, `warp_overlay.png`
-
-현재 1세트만 있으면 `pair01`부터 실행해서 아래를 확인하세요.
-
-- `pair01_report.json`의 `status`가 `succeeded` 또는 기대한 실패 코드인지
-- `metrics.matches_count`, `metrics.inliers_count`, `processing_time_sec`가 존재하는지
-
-## 4) 영상 스티칭 실행(오프라인)
-
-빠른 프리셋(권장):
+### 1) 프리셋 실행 (권장)
 
 ```powershell
-python -m stitching video-10s --pair video04
-python -m stitching video-30s --pair video04
-python -m stitching video-full --pair video04
+python -m stitching video-10s --pair video10
+python -m stitching video-30s --pair video10
+python -m stitching video-full --pair video10
 ```
 
-`--pair`를 생략하면 `input/videos`에서 최신 유효 `*_left/*_right` 쌍을 자동 선택합니다.
+- `--pair` 생략 시 `input/videos`에서 최신 `*_left/*_right` 쌍을 자동 선택
+- 출력 파일:
+  - `output/videos/{pair}_10s_stitched.mp4`
+  - `output/videos/{pair}_30s_stitched.mp4`
+  - `output/videos/{pair}_full_stitched.mp4`
+  - 대응 `*_report.json`
+  - 디버그: `output/debug/{pair}_{preset}/video_inliers.jpg`
 
-출력 파일명은 자동 생성됩니다.
-
-- `output/videos/{pair}_10s_stitched.mp4`
-- `output/videos/{pair}_30s_stitched.mp4`
-- `output/videos/{pair}_full_stitched.mp4`
-- 대응하는 `*_report.json`
-- 디버그 폴더: `output/debug/{pair}_{preset}/`
-
-수동 모드(경로 직접 지정):
+### 2) 수동 실행
 
 ```powershell
 python -m stitching video `
-  --left .\input\videos\video04_left.mp4 `
-  --right .\input\videos\video04_right.mp4 `
-  --out .\output\videos\video04_manual.mp4 `
-  --report .\output\videos\video04_manual_report.json `
-  --debug-dir .\output\debug\video04_manual `
+  --left .\input\videos\video10_left.mp4 `
+  --right .\input\videos\video10_right.mp4 `
+  --out .\output\videos\video10_manual.mp4 `
+  --report .\output\videos\video10_manual_report.json `
+  --debug-dir .\output\debug\video10_manual `
   --max-duration-sec 30 `
-  --sync-sample-sec 8
+  --calib-start-sec 0 `
+  --calib-end-sec 10 `
+  --calib-step-sec 1
 ```
 
-예상 산출물:
+## 현재 동작 원칙
 
-- 스티칭 영상 + `report.json`
+1. 시간 동기화는 **파이프라인 내부에서 수행하지 않음**
+2. 입력 두 영상은 이미 동기화되어 있다고 가정
+3. 캘리브레이션 구간(`calib-start/end/step`)에서 여러 시점을 평가해
+   가장 안정적인 호모그래피를 선택
 
-## 5) 백엔드 API + 워커
+## API 서버 (비디오 전용)
 
-서버 실행:
+### 서버 실행
 
 ```powershell
 python -m stitching serve --host 127.0.0.1 --port 8080 --storage-dir .\storage
 ```
 
-이미지 잡 요청:
-
-```powershell
-curl -X POST http://127.0.0.1:8080/jobs/image-stitch `
-  -H "Content-Type: application/json" `
-  -d "{\"left_path\":\"C:/path/to/pair01_left.jpg\",\"right_path\":\"C:/path/to/pair01_right.jpg\"}"
-```
-
-영상 잡 요청:
+### 비디오 작업 생성
 
 ```powershell
 curl -X POST http://127.0.0.1:8080/jobs/video-stitch `
   -H "Content-Type: application/json" `
-  -d "{\"left_path\":\"C:/path/to/pair01_left.mp4\",\"right_path\":\"C:/path/to/pair01_right.mp4\",\"options\":{\"max_duration_sec\":20}}"
+  -d "{\"left_path\":\"C:/path/to/video10_left.mp4\",\"right_path\":\"C:/path/to/video10_right.mp4\",\"options\":{\"max_duration_sec\":30}}"
 ```
 
-상태/리포트/아티팩트 조회:
+### 상태/리포트/산출물 조회
 
 ```powershell
 curl http://127.0.0.1:8080/jobs/{job_id}
@@ -141,26 +101,22 @@ curl http://127.0.0.1:8080/jobs/{job_id}/report
 curl http://127.0.0.1:8080/jobs/{job_id}/artifact
 ```
 
-## 6) 에러 코드
+## 에러 코드
 
 - `PROBE_FAIL`
 - `OVERLAP_LOW`
 - `HOMOGRAPHY_FAIL`
-- `SYNC_FAIL`
 - `ENCODE_FAIL`
 - `INTERNAL_ERROR`
 
-## 7) report.json (필수)
+## report.json 핵심 필드
 
-`report.json`은 성공/실패 모두 생성됩니다.
-
-필수 필드:
-
-- `status`: `succeeded` 또는 `failed`
+- `status`: `succeeded` / `failed`
 - `error_code`
 - `metrics.matches_count`
 - `metrics.inliers_count`
-- `metrics.processing_time_sec` (stage + total)
+- `metrics.processing_time_sec`
 - `metrics.output_resolution`
-- `metrics.estimated_sync_offset_ms` (video)
-
+- `metrics.processed_frames`
+- `metrics.calib_used_time_sec`
+- `metrics.overlap_diff_mean`

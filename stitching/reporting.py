@@ -35,6 +35,8 @@ class StageTimer(ContextDecorator):
 def base_report(
     pipeline: str, inputs: dict[str, str], job_id: str | None = None
 ) -> dict[str, Any]:
+    # 모든 파이프라인이 공통으로 가지는 최소 리포트 골격.
+    # 세부 메트릭은 각 파이프라인에서 추가한다.
     return {
         "job_id": job_id,
         "pipeline": pipeline,
@@ -49,7 +51,6 @@ def base_report(
             "inliers_count": 0,
             "processing_time_sec": {},
             "output_resolution": None,
-            "estimated_sync_offset_ms": None,
             "processed_frames": None,
         },
     }
@@ -78,4 +79,3 @@ def write_report(report_path: Path, report: dict[str, Any]) -> None:
         json.dumps(report, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
-

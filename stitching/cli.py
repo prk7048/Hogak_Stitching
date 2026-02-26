@@ -6,20 +6,12 @@ from typing import Tuple
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Dual smartphone stitching MVP")
+    """CLI 인자를 정의한다. (영상 스티칭 전용)"""
+
+    parser = argparse.ArgumentParser(description="Dual smartphone video stitching MVP")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    image_cmd = subparsers.add_parser("image", help="Stitch two images")
-    image_cmd.add_argument("--left", required=True, help="Path to left image")
-    image_cmd.add_argument("--right", required=True, help="Path to right image")
-    image_cmd.add_argument("--out", default="stitched_image.png", help="Output stitched image path")
-    image_cmd.add_argument("--report", default="report.json", help="Output report json path")
-    image_cmd.add_argument("--debug-dir", default="debug", help="Debug artifact directory")
-    image_cmd.add_argument("--min-matches", type=int, default=80)
-    image_cmd.add_argument("--min-inliers", type=int, default=30)
-    image_cmd.add_argument("--ratio-test", type=float, default=0.75)
-    image_cmd.add_argument("--ransac-thresh", type=float, default=5.0)
-
+    # 수동 모드: 입력/출력 파일 경로를 직접 지정한다.
     video_cmd = subparsers.add_parser("video", help="Stitch two videos (offline)")
     video_cmd.add_argument("--left", required=True, help="Path to left video")
     video_cmd.add_argument("--right", required=True, help="Path to right video")
@@ -30,19 +22,12 @@ def parse_args() -> argparse.Namespace:
     video_cmd.add_argument("--min-inliers", type=int, default=30)
     video_cmd.add_argument("--ratio-test", type=float, default=0.75)
     video_cmd.add_argument("--ransac-thresh", type=float, default=5.0)
-    video_cmd.add_argument(
-        "--max-duration-sec",
-        type=float,
-        default=30.0,
-        help="Maximum stitched duration (seconds)",
-    )
-    video_cmd.add_argument(
-        "--sync-sample-sec",
-        type=float,
-        default=5.0,
-        help="Duration to sample for synchronization estimation",
-    )
+    video_cmd.add_argument("--max-duration-sec", type=float, default=30.0, help="Maximum stitched duration")
+    video_cmd.add_argument("--calib-start-sec", type=float, default=0.0)
+    video_cmd.add_argument("--calib-end-sec", type=float, default=10.0)
+    video_cmd.add_argument("--calib-step-sec", type=float, default=1.0)
 
+    # 프리셋 모드: 입력/출력을 자동 naming하고 길이만 다르게 실행한다.
     preset_help = "Preset video stitching with auto input/output naming"
     for preset in ("video-10s", "video-30s", "video-full"):
         preset_cmd = subparsers.add_parser(preset, help=preset_help)
@@ -52,7 +37,9 @@ def parse_args() -> argparse.Namespace:
         preset_cmd.add_argument("--input-dir", default="input/videos")
         preset_cmd.add_argument("--output-dir", default="output/videos")
         preset_cmd.add_argument("--debug-root", default="output/debug")
-        preset_cmd.add_argument("--sync-sample-sec", type=float, default=8.0)
+        preset_cmd.add_argument("--calib-start-sec", type=float, default=0.0)
+        preset_cmd.add_argument("--calib-end-sec", type=float, default=10.0)
+        preset_cmd.add_argument("--calib-step-sec", type=float, default=1.0)
         preset_cmd.add_argument("--min-matches", type=int, default=80)
         preset_cmd.add_argument("--min-inliers", type=int, default=30)
         preset_cmd.add_argument("--ratio-test", type=float, default=0.75)
@@ -75,8 +62,7 @@ def _derive_pair_base(left_path: Path) -> str:
 def _resolve_pair_from_prefix(input_dir: Path, pair: str) -> Tuple[Path, Path]:
     candidates = sorted(input_dir.glob(f"{pair}_left*.*"), key=lambda p: p.stat().st_mtime, reverse=True)
     for left in candidates:
-        right_name = left.name.replace("_left", "_right", 1)
-        right = left.with_name(right_name)
+        right = left.with_name(left.name.replace("_left", "_right", 1))
         if right.exists():
             return left, right
     raise FileNotFoundError(f"cannot find matched left/right for pair '{pair}' in {input_dir}")
@@ -92,6 +78,13 @@ def _resolve_latest_pair(input_dir: Path) -> Tuple[Path, Path]:
 
 
 def _resolve_preset_inputs(args: argparse.Namespace) -> Tuple[Path, Path, str]:
+    """
+    프리셋 모드 입력 해석 우선순위:
+    1) --left/--right 직접 지정
+    2) --pair 지정
+    3) input-dir에서 최신 pair 자동 선택
+    """
+
     input_dir = Path(args.input_dir)
     if args.left and args.right:
         left = Path(args.left)
@@ -117,7 +110,9 @@ def _run_video(
     ratio_test: float,
     ransac_thresh: float,
     max_duration_sec: float,
-    sync_sample_sec: float,
+    calib_start_sec: float,
+    calib_end_sec: float,
+    calib_step_sec: float,
 ) -> None:
     try:
         from stitching.video_stitching import VideoConfig, stitch_videos
@@ -133,7 +128,9 @@ def _run_video(
         ratio_test=ratio_test,
         ransac_reproj_threshold=ransac_thresh,
         max_duration_sec=max_duration_sec,
-        sync_sample_sec=sync_sample_sec,
+        calib_start_sec=calib_start_sec,
+        calib_end_sec=calib_end_sec,
+        calib_step_sec=calib_step_sec,
     )
     stitch_videos(
         left_path=left_path,
@@ -148,31 +145,6 @@ def _run_video(
 def main() -> int:
     args = parse_args()
 
-    if args.command == "image":
-        try:
-            from stitching.image_stitching import StitchConfig, stitch_images
-        except ModuleNotFoundError as exc:
-            if exc.name == "cv2":
-                print("Missing dependency: opencv-python. Install with `python -m pip install -r requirements.txt`.")
-                return 2
-            raise
-
-        config = StitchConfig(
-            min_matches=args.min_matches,
-            min_inliers=args.min_inliers,
-            ratio_test=args.ratio_test,
-            ransac_reproj_threshold=args.ransac_thresh,
-        )
-        stitch_images(
-            left_path=Path(args.left),
-            right_path=Path(args.right),
-            output_path=Path(args.out),
-            report_path=Path(args.report),
-            debug_dir=Path(args.debug_dir),
-            config=config,
-        )
-        return 0
-
     if args.command == "video":
         _run_video(
             left_path=Path(args.left),
@@ -185,7 +157,9 @@ def main() -> int:
             ratio_test=args.ratio_test,
             ransac_thresh=args.ransac_thresh,
             max_duration_sec=args.max_duration_sec,
-            sync_sample_sec=args.sync_sample_sec,
+            calib_start_sec=args.calib_start_sec,
+            calib_end_sec=args.calib_end_sec,
+            calib_step_sec=args.calib_step_sec,
         )
         return 0
 
@@ -193,6 +167,7 @@ def main() -> int:
         left_path, right_path, pair_base = _resolve_preset_inputs(args)
         output_dir = Path(args.output_dir)
         debug_root = Path(args.debug_root)
+
         if args.command == "video-10s":
             preset = "10s"
             max_duration_sec = 10.0
@@ -218,7 +193,9 @@ def main() -> int:
             ratio_test=args.ratio_test,
             ransac_thresh=args.ransac_thresh,
             max_duration_sec=max_duration_sec,
-            sync_sample_sec=args.sync_sample_sec,
+            calib_start_sec=args.calib_start_sec,
+            calib_end_sec=args.calib_end_sec,
+            calib_step_sec=args.calib_step_sec,
         )
         print(f"preset={preset}")
         print(f"left={left_path}")
@@ -236,7 +213,6 @@ def main() -> int:
                 print("Missing dependency: opencv-python. Install with `python -m pip install -r requirements.txt`.")
                 return 2
             raise
-
         run_server(host=args.host, port=args.port, storage_dir=Path(args.storage_dir))
         return 0
 
