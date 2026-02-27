@@ -20,6 +20,23 @@ def _now_iso() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat()
 
 
+def _resolve_perf_profile(perf_mode: str, process_scale: float | None) -> tuple[float, int]:
+    """API 옵션의 perf_mode를 실제 (scale, max_features)로 변환한다."""
+
+    mode = (perf_mode or "quality").lower()
+    profiles = {
+        "quality": (1.0, 4000),
+        "balanced": (0.75, 2800),
+        "fast": (0.5, 1800),
+    }
+    scale, max_features = profiles.get(mode, profiles["quality"])
+    if process_scale is not None:
+        scale = float(process_scale)
+    if scale <= 0:
+        raise ValueError("process_scale must be > 0")
+    return scale, int(max_features)
+
+
 @dataclass(slots=True)
 class JobItem:
     """워커 큐에 들어가는 영상 스티칭 작업 단위."""
@@ -135,6 +152,15 @@ class JobManager:
 
         try:
             out_path = self.out_dir / f"{item.job_id}.mp4"
+
+            perf_mode = str(item.options.get("perf_mode", "quality"))
+            process_scale_opt = item.options.get("process_scale")
+            process_scale = float(process_scale_opt) if process_scale_opt is not None else None
+            scale, max_features = _resolve_perf_profile(perf_mode=perf_mode, process_scale=process_scale)
+
+            homography_file_opt = item.options.get("homography_file")
+            homography_file = Path(homography_file_opt) if isinstance(homography_file_opt, str) and homography_file_opt else None
+
             config = VideoConfig(
                 min_matches=int(item.options.get("min_matches", 80)),
                 min_inliers=int(item.options.get("min_inliers", 30)),
@@ -144,6 +170,11 @@ class JobManager:
                 calib_start_sec=float(item.options.get("calib_start_sec", 0.0)),
                 calib_end_sec=float(item.options.get("calib_end_sec", 10.0)),
                 calib_step_sec=float(item.options.get("calib_step_sec", 1.0)),
+                perf_mode=perf_mode,
+                process_scale=scale,
+                max_features=max_features,
+                homography_mode=str(item.options.get("homography_mode", "off")),
+                homography_file=homography_file,
             )
 
             hook = self._video_status_hook(item.job_id)

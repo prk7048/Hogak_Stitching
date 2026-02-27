@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -36,19 +37,50 @@ from stitching.stitch_core import (
 
 @dataclass(slots=True)
 class VideoConfig(StitchConfig):
-    """영상 스티칭 전용 설정."""
+    """영상 스티칭 설정."""
 
     # 0 또는 음수면 가능한 전체 길이를 모두 출력한다.
     max_duration_sec: float = 30.0
 
-    # 동기화는 외부에서 이미 끝났다고 가정하므로,
-    # 캘리브레이션(어느 시점으로 H를 구할지)만 탐색한다.
+    # H를 추정할 후보 구간(초 단위)
     calib_start_sec: float = 0.0
     calib_end_sec: float = 10.0
     calib_step_sec: float = 1.0
 
-    # 겹침 영역 차이가 크면 feather 대신 seam-cut을 쓴다.
+    # 겹침 영역 차이가 크면 feather 대신 seam-cut을 사용한다.
     video_ghost_diff_threshold: float = 8.0
+
+    # H 저장/재사용 모드
+    # off: 항상 새로 계산, 저장 안 함
+    # auto: 파일 있으면 재사용, 없으면 계산 후 저장
+    # reuse: 파일 반드시 재사용(없으면 실패)
+    # refresh: 항상 새로 계산 후 저장
+    homography_mode: str = "off"
+    homography_file: Path | None = None
+
+    # 성능 모드 파라미터
+    perf_mode: str = "quality"
+    process_scale: float = 1.0
+
+
+def _normalize_homography_mode(mode: str) -> str:
+    normalized = (mode or "off").strip().lower()
+    allowed = {"off", "auto", "reuse", "refresh"}
+    if normalized not in allowed:
+        raise StitchingFailure(
+            ErrorCode.PROBE_FAIL,
+            f"invalid homography_mode: {mode} (allowed: off/auto/reuse/refresh)",
+        )
+    return normalized
+
+
+def _default_homography_path(report_path: Path) -> Path:
+    """리포트 경로를 기준으로 기본 H 파일 경로를 만든다."""
+
+    stem = report_path.stem
+    if stem.endswith("_report"):
+        stem = stem[: -len("_report")]
+    return report_path.with_name(f"{stem}_homography.json")
 
 
 def _open_capture(path: Path) -> cv2.VideoCapture:
@@ -67,7 +99,6 @@ def _probe_video(path: Path) -> dict:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 0)
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 0)
     cap.release()
-
     if fps <= 0 or frame_count <= 0 or width <= 0 or height <= 0:
         raise StitchingFailure(ErrorCode.PROBE_FAIL, f"invalid video metadata: {path}")
     return {
@@ -78,8 +109,23 @@ def _probe_video(path: Path) -> dict:
     }
 
 
-def _read_frame_at(path: Path, index: int) -> np.ndarray | None:
-    """특정 프레임 인덱스를 랜덤 액세스로 읽는다."""
+def _resize_frame(frame: np.ndarray, scale: float) -> np.ndarray:
+    """
+    성능 모드용 스케일러.
+    scale < 1이면 INTER_AREA(다운스케일), scale > 1이면 INTER_LINEAR를 사용한다.
+    """
+
+    if scale == 1.0:
+        return frame
+    h, w = frame.shape[:2]
+    new_w = max(2, int(round(w * scale)))
+    new_h = max(2, int(round(h * scale)))
+    interpolation = cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR
+    return cv2.resize(frame, (new_w, new_h), interpolation=interpolation)
+
+
+def _read_frame_at(path: Path, index: int, scale: float) -> np.ndarray | None:
+    """특정 프레임 인덱스를 랜덤 액세스로 읽고 스케일링한다."""
 
     cap = _open_capture(path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, float(max(0, index)))
@@ -87,7 +133,7 @@ def _read_frame_at(path: Path, index: int) -> np.ndarray | None:
     cap.release()
     if not ok:
         return None
-    return frame
+    return _resize_frame(frame, scale)
 
 
 def _compute_reprojection_error(
@@ -116,7 +162,6 @@ def _build_calibration_offsets(base_fps: float, max_available_frames: int, confi
 
     if max_available_frames <= 1 or base_fps <= 0:
         return [0]
-
     max_offset = max_available_frames - 1
     max_sec = max_offset / base_fps
     start_sec = min(max(config.calib_start_sec, 0.0), max_sec)
@@ -141,7 +186,7 @@ def _evaluate_homography_candidate(
 ) -> dict:
     """
     한 시점(frame pair)에서 H를 추정하고 점수를 계산한다.
-    이 함수 결과를 여러 시점에서 비교해 가장 안정적인 후보를 고른다.
+    이 결과를 여러 시점에서 비교해 가장 안정적인 H를 선택한다.
     """
 
     if frame_right.shape[:2] != frame_left.shape[:2]:
@@ -152,7 +197,6 @@ def _evaluate_homography_candidate(
         )
 
     keypoints_left, keypoints_right, matches = _detect_and_match(frame_left, frame_right, config)
-
     used_fallback = False
     try:
         homography, inlier_mask = _estimate_homography(
@@ -187,6 +231,7 @@ def _evaluate_homography_candidate(
         "keypoints_left": keypoints_left,
         "keypoints_right": keypoints_right,
         "matches": matches,
+        "homography": homography,
         "inlier_mask": inlier_mask,
         "plan": plan,
         "used_fallback": used_fallback,
@@ -197,7 +242,7 @@ def _evaluate_homography_candidate(
 
 
 def _is_better_candidate(new_candidate: dict, best_candidate: dict | None) -> bool:
-    """inlier > reproj_error > matches > fallback 여부 순으로 후보를 비교."""
+    """inlier > reproj_error > matches > fallback 여부 순으로 후보를 비교한다."""
 
     if best_candidate is None:
         return True
@@ -219,7 +264,7 @@ def _select_calibration_candidate(
     max_available_frames: int,
     config: VideoConfig,
 ) -> tuple[dict, list[dict]]:
-    """지정한 구간에서 여러 후보 프레임을 평가해 best H를 선택한다."""
+    """지정한 구간에서 후보 프레임을 평가해 best H를 선택한다."""
 
     offsets = _build_calibration_offsets(base_fps, max_available_frames, config)
     summaries: list[dict] = []
@@ -227,8 +272,8 @@ def _select_calibration_candidate(
     last_failure: StitchingFailure | None = None
 
     for offset in offsets:
-        left_frame = _read_frame_at(left_path, offset)
-        right_frame = _read_frame_at(right_path, offset)
+        left_frame = _read_frame_at(left_path, offset, config.process_scale)
+        right_frame = _read_frame_at(right_path, offset, config.process_scale)
         time_sec = round(offset / base_fps, 3) if base_fps > 0 else 0.0
         if left_frame is None or right_frame is None:
             summaries.append(
@@ -278,10 +323,67 @@ def _select_calibration_candidate(
 
     if best_candidate is None:
         if last_failure is not None:
-            raise StitchingFailure(last_failure.code, f"calibration window failed: {last_failure.detail}")
-        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration window failed: no valid frame candidates")
-
+            raise StitchingFailure(
+                last_failure.code,
+                f"calibration window failed: {last_failure.detail}",
+            )
+        raise StitchingFailure(
+            ErrorCode.HOMOGRAPHY_FAIL,
+            "calibration window failed: no valid frame candidates",
+        )
     return best_candidate, summaries
+
+
+def _compute_inlier_mask_with_loaded_h(
+    keypoints_left: list[cv2.KeyPoint],
+    keypoints_right: list[cv2.KeyPoint],
+    matches: list[cv2.DMatch],
+    homography: np.ndarray,
+    threshold: float,
+) -> np.ndarray:
+    """저장된 H 기준으로 inlier mask를 계산한다."""
+
+    if not matches:
+        return np.zeros((0, 1), dtype=np.uint8)
+
+    src_points = np.float32([keypoints_right[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
+    dst_points = np.float32([keypoints_left[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
+    projected = cv2.perspectiveTransform(src_points, homography)
+    errors = np.linalg.norm(projected.reshape(-1, 2) - dst_points.reshape(-1, 2), axis=1)
+    mask = (errors <= float(threshold)).astype(np.uint8).reshape(-1, 1)
+    return mask
+
+
+def _load_homography_file(path: Path) -> tuple[np.ndarray, dict]:
+    """H 파일을 읽고 유효성 검사 후 반환한다."""
+
+    if not path.exists():
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, f"homography file not found: {path}")
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # pragma: no cover - 파일 파싱 방어
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, f"invalid homography json: {exc}") from exc
+
+    matrix = payload.get("homography")
+    if not isinstance(matrix, list):
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "homography field missing in homography file")
+    homography = np.array(matrix, dtype=np.float64)
+    if homography.shape != (3, 3):
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, f"invalid homography shape: {homography.shape}")
+    return homography, payload
+
+
+def _save_homography_file(path: Path, homography: np.ndarray, metadata: dict) -> None:
+    """H 파일을 JSON으로 저장한다."""
+
+    payload = {
+        "version": 1,
+        "saved_at_epoch_sec": int(time.time()),
+        "homography": homography.tolist(),
+        "metadata": metadata,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
 def stitch_videos(
@@ -296,7 +398,7 @@ def stitch_videos(
 ) -> dict:
     """
     두 영상이 이미 시간 동기화되어 있다고 가정하고 스티칭한다.
-    즉, 본 파이프라인에서는 동기화 추정/보정을 수행하지 않는다.
+    필요 시 H를 파일에 저장하거나 재사용할 수 있다.
     """
 
     config = config or VideoConfig()
@@ -312,6 +414,8 @@ def stitch_videos(
     )
     stage_times: dict[str, float] = {}
     report["metrics"]["processing_time_sec"] = stage_times
+    report["metrics"]["perf_mode"] = config.perf_mode
+    report["metrics"]["processing_scale"] = float(config.process_scale)
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     left_cap: cv2.VideoCapture | None = None
@@ -325,11 +429,17 @@ def stitch_videos(
             left_meta = _probe_video(left_path)
             right_meta = _probe_video(right_path)
 
-        # FPS가 다르면 낮은 FPS를 기준으로 저장한다.
         base_fps = float(min(left_meta["fps"], right_meta["fps"]))
         max_available_frames = min(int(left_meta["frame_count"]), int(right_meta["frame_count"]))
         if max_available_frames <= 0:
             raise StitchingFailure(ErrorCode.PROBE_FAIL, "no overlapping timeline")
+
+        homography_mode = _normalize_homography_mode(config.homography_mode)
+        homography_file = config.homography_file
+        if homography_mode != "off":
+            homography_file = homography_file or _default_homography_path(report_path)
+        report["metrics"]["homography_mode_requested"] = homography_mode
+        report["metrics"]["homography_file"] = str(homography_file) if homography_file else None
 
         if status_hook is not None:
             status_hook("stitching")
@@ -339,51 +449,142 @@ def stitch_videos(
         exposure_bias = 0.0
 
         with StageTimer(stage_times, "homography"):
-            # 한 프레임 고정이 아니라 구간 후보를 평가해 가장 안정적인 H를 선택한다.
-            best_candidate, calib_candidates = _select_calibration_candidate(
-                left_path=left_path,
-                right_path=right_path,
-                base_fps=base_fps,
-                max_available_frames=max_available_frames,
-                config=config,
-            )
-            report["metrics"]["calib_candidates"] = calib_candidates
-            report["metrics"]["calib_candidates_total"] = len(calib_candidates)
-            report["metrics"]["calib_candidates_valid"] = int(
-                sum(1 for item in calib_candidates if item.get("status") == "ok")
-            )
-            report["metrics"]["calib_used_time_sec"] = round(float(best_candidate["time_sec"]), 3)
-            report["metrics"]["calib_best_inliers"] = int(best_candidate["inliers_count"])
-            report["metrics"]["calib_best_reproj_error"] = round(float(best_candidate["reproj_error"]), 3)
+            # 1) 저장된 H 재사용
+            # 2) 없거나 강제 refresh면 새로 계산
+            use_saved = False
+            if homography_mode in {"auto", "reuse"} and homography_file is not None and homography_file.exists():
+                use_saved = True
 
-            frame_left = best_candidate["frame_left"]
-            frame_right = best_candidate["frame_right"]
-            keypoints_left = best_candidate["keypoints_left"]
-            keypoints_right = best_candidate["keypoints_right"]
-            matches = best_candidate["matches"]
-            inlier_mask = best_candidate["inlier_mask"]
-            plan = best_candidate["plan"]
-            used_fallback = bool(best_candidate["used_fallback"])
+            if use_saved:
+                homography, payload = _load_homography_file(homography_file)
+                meta = payload.get("metadata", {})
+                saved_scale = meta.get("process_scale")
+                if saved_scale is not None and abs(float(saved_scale) - float(config.process_scale)) > 1e-6:
+                    raise StitchingFailure(
+                        ErrorCode.HOMOGRAPHY_FAIL,
+                        "saved homography scale mismatch; use same perf mode/scale or refresh",
+                    )
 
-            report["metrics"]["matches_count"] = int(best_candidate["matches_count"])
-            report["metrics"]["inliers_count"] = int(best_candidate["inliers_count"])
-            if used_fallback:
-                report["warnings"].append("homography_unstable_fallback_affine")
+                frame_left = _read_frame_at(left_path, 0, config.process_scale)
+                frame_right = _read_frame_at(right_path, 0, config.process_scale)
+                if frame_left is None or frame_right is None:
+                    raise StitchingFailure(ErrorCode.PROBE_FAIL, "cannot read first frame for saved homography")
+                if frame_right.shape[:2] != frame_left.shape[:2]:
+                    frame_right = cv2.resize(
+                        frame_right,
+                        (frame_left.shape[1], frame_left.shape[0]),
+                        interpolation=cv2.INTER_LINEAR,
+                    )
 
-            # 디버그: 캘리브레이션 시점에서 inlier 매칭을 저장한다.
-            debug_matches = cv2.drawMatches(
-                frame_left,
-                keypoints_left,
-                frame_right,
-                keypoints_right,
-                matches[:200],
-                None,
-                matchesMask=[int(v) for v in inlier_mask.ravel().tolist()[:200]],
-                flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
-            )
-            cv2.imwrite(str(debug_dir / "video_inliers.jpg"), debug_matches)
+                plan = _prepare_warp_plan(frame_left.shape[:2], frame_right.shape[:2], homography, config)
+                try:
+                    keypoints_left, keypoints_right, matches = _detect_and_match(frame_left, frame_right, config)
+                    inlier_mask = _compute_inlier_mask_with_loaded_h(
+                        keypoints_left=keypoints_left,
+                        keypoints_right=keypoints_right,
+                        matches=matches,
+                        homography=homography,
+                        threshold=config.ransac_reproj_threshold,
+                    )
+                    inliers_count = int(inlier_mask.ravel().sum())
+                    reproj_error = _compute_reprojection_error(
+                        keypoints_left=keypoints_left,
+                        keypoints_right=keypoints_right,
+                        matches=matches,
+                        inlier_mask=inlier_mask,
+                        homography=homography,
+                    )
+                except StitchingFailure:
+                    # 저장된 H를 재사용하는 모드에서는 probe 매칭 실패로 전체를 실패시키지 않는다.
+                    keypoints_left, keypoints_right, matches = [], [], []
+                    inlier_mask = np.zeros((0, 1), dtype=np.uint8)
+                    inliers_count = 0
+                    reproj_error = float("nan")
+                    report["warnings"].append("saved_homography_probe_match_skipped")
 
-            # 블렌딩 모드(seam_cut / feather)를 미리 결정하기 위해 probe 프레임을 평가한다.
+                report["metrics"]["matches_count"] = len(matches)
+                report["metrics"]["inliers_count"] = inliers_count
+                report["metrics"]["homography_source"] = "saved"
+                report["metrics"]["calib_candidates"] = None
+                report["metrics"]["calib_candidates_total"] = 0
+                report["metrics"]["calib_candidates_valid"] = 0
+                report["metrics"]["calib_used_time_sec"] = None
+                report["metrics"]["calib_best_inliers"] = None
+                report["metrics"]["calib_best_reproj_error"] = None
+                report["metrics"]["saved_h_reproj_error"] = None if np.isnan(reproj_error) else round(float(reproj_error), 3)
+                if matches and inliers_count < max(8, int(config.min_inliers * 0.4)):
+                    report["warnings"].append("saved_homography_low_inliers")
+                used_fallback = False
+            else:
+                if homography_mode == "reuse":
+                    raise StitchingFailure(
+                        ErrorCode.HOMOGRAPHY_FAIL,
+                        f"reuse mode requested but homography file does not exist: {homography_file}",
+                    )
+                best_candidate, calib_candidates = _select_calibration_candidate(
+                    left_path=left_path,
+                    right_path=right_path,
+                    base_fps=base_fps,
+                    max_available_frames=max_available_frames,
+                    config=config,
+                )
+                report["metrics"]["calib_candidates"] = calib_candidates
+                report["metrics"]["calib_candidates_total"] = len(calib_candidates)
+                report["metrics"]["calib_candidates_valid"] = int(
+                    sum(1 for item in calib_candidates if item.get("status") == "ok")
+                )
+                report["metrics"]["calib_used_time_sec"] = round(float(best_candidate["time_sec"]), 3)
+                report["metrics"]["calib_best_inliers"] = int(best_candidate["inliers_count"])
+                report["metrics"]["calib_best_reproj_error"] = round(float(best_candidate["reproj_error"]), 3)
+
+                frame_left = best_candidate["frame_left"]
+                frame_right = best_candidate["frame_right"]
+                keypoints_left = best_candidate["keypoints_left"]
+                keypoints_right = best_candidate["keypoints_right"]
+                matches = best_candidate["matches"]
+                homography = best_candidate["homography"]
+                inlier_mask = best_candidate["inlier_mask"]
+                plan = best_candidate["plan"]
+                used_fallback = bool(best_candidate["used_fallback"])
+
+                report["metrics"]["matches_count"] = int(best_candidate["matches_count"])
+                report["metrics"]["inliers_count"] = int(best_candidate["inliers_count"])
+                report["metrics"]["homography_source"] = "calibrated"
+                if used_fallback:
+                    report["warnings"].append("homography_unstable_fallback_affine")
+
+                if homography_mode in {"auto", "refresh"} and homography_file is not None:
+                    _save_homography_file(
+                        homography_file,
+                        homography=homography,
+                        metadata={
+                            "left_input": str(left_path),
+                            "right_input": str(right_path),
+                            "left_resolution": left_meta["resolution"],
+                            "right_resolution": right_meta["resolution"],
+                            "process_scale": float(config.process_scale),
+                            "calib_used_time_sec": report["metrics"]["calib_used_time_sec"],
+                        },
+                    )
+                    report["metrics"]["homography_saved"] = True
+                else:
+                    report["metrics"]["homography_saved"] = False
+
+            # 디버그: 매칭/inlier 시각화
+            if matches:
+                debug_matches = cv2.drawMatches(
+                    frame_left,
+                    keypoints_left,
+                    frame_right,
+                    keypoints_right,
+                    matches[:200],
+                    None,
+                    matchesMask=[int(v) for v in inlier_mask.ravel().tolist()[:200]],
+                    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+                )
+                cv2.imwrite(str(debug_dir / "video_inliers.jpg"), debug_matches)
+
+            # 블렌딩 모드 결정용 probe
             warped_right_probe = cv2.warpPerspective(
                 frame_right,
                 plan.homography_adjusted,
@@ -415,7 +616,6 @@ def stitch_videos(
                 warped_right_probe,
                 overlap_probe,
             )
-
             use_seam_cut = used_fallback or overlap_diff_mean >= config.video_ghost_diff_threshold
             if use_seam_cut:
                 cost_map = _compute_seam_cost_map(
@@ -440,13 +640,15 @@ def stitch_videos(
             report["metrics"]["exposure_gain"] = round(float(exposure_gain), 4)
             report["metrics"]["exposure_bias"] = round(float(exposure_bias), 4)
 
-        # 실제 프레임 루프 시작
+        # 프레임 루프 시작
         left_cap = _open_capture(left_path)
         right_cap = _open_capture(right_path)
-        ok_l, first_left = left_cap.read()
-        ok_r, first_right = right_cap.read()
+        ok_l, first_left_raw = left_cap.read()
+        ok_r, first_right_raw = right_cap.read()
         if not ok_l or not ok_r:
             raise StitchingFailure(ErrorCode.PROBE_FAIL, "cannot read first aligned frames")
+        first_left = _resize_frame(first_left_raw, config.process_scale)
+        first_right = _resize_frame(first_right_raw, config.process_scale)
 
         output_path.parent.mkdir(parents=True, exist_ok=True)
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
@@ -512,16 +714,15 @@ def stitch_videos(
                     )
                 else:
                     stitched = _blend_feather(canvas_left, warped_right, left_mask, right_mask)
-
                 writer.write(stitched)
                 processed += 1
 
-                ok_l, next_left = left_cap.read()
-                ok_r, next_right = right_cap.read()
+                ok_l, next_left_raw = left_cap.read()
+                ok_r, next_right_raw = right_cap.read()
                 if not ok_l or not ok_r:
                     break
-                pending_left = next_left
-                pending_right = next_right
+                pending_left = _resize_frame(next_left_raw, config.process_scale)
+                pending_right = _resize_frame(next_right_raw, config.process_scale)
 
         report["metrics"]["processed_frames"] = processed
         report["metrics"]["output_resolution"] = [int(plan.width), int(plan.height)]
