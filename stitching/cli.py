@@ -4,6 +4,8 @@ import argparse
 from pathlib import Path
 from typing import Tuple
 
+from stitching.perf_profiles import resolve_perf_profile
+
 
 def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
     """영상 스티칭 공통 옵션."""
@@ -62,6 +64,8 @@ def parse_args() -> argparse.Namespace:
         preset_cmd.add_argument("--debug-root", default="output/debug")
         _add_video_common_args(preset_cmd)
 
+
+    # 서비스 모드
     serve_cmd = subparsers.add_parser("serve", help="Run local API + worker server")
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8080)
@@ -109,26 +113,6 @@ def _resolve_preset_inputs(args: argparse.Namespace) -> Tuple[Path, Path, str]:
     return left, right, _derive_pair_base(left)
 
 
-def _resolve_perf_profile(perf_mode: str, process_scale: float | None) -> tuple[float, int]:
-    """
-    성능 모드 -> (스케일, max_features)
-    process_scale을 주면 스케일만 수동으로 덮어쓴다.
-    """
-
-    mode = (perf_mode or "quality").lower()
-    profiles = {
-        "quality": (1.0, 4000),
-        "balanced": (0.75, 2800),
-        "fast": (0.5, 1800),
-    }
-    scale, max_features = profiles.get(mode, profiles["quality"])
-    if process_scale is not None:
-        scale = float(process_scale)
-    if scale <= 0:
-        raise ValueError("process_scale must be > 0")
-    return scale, int(max_features)
-
-
 def _run_video(
     left_path: Path,
     right_path: Path,
@@ -156,7 +140,7 @@ def _run_video(
             raise SystemExit(2)
         raise
 
-    scale, max_features = _resolve_perf_profile(perf_mode=perf_mode, process_scale=process_scale)
+    scale, max_features = resolve_perf_profile(perf_mode=perf_mode, process_scale=process_scale)
     homography_path = Path(homography_file) if homography_file else None
 
     config = VideoConfig(
@@ -184,28 +168,48 @@ def _run_video(
     )
 
 
+def _run_video_from_args(
+    args: argparse.Namespace,
+    left_path: Path,
+    right_path: Path,
+    output_path: Path,
+    report_path: Path,
+    debug_dir: Path,
+    max_duration_sec: float,
+) -> None:
+    _run_video(
+        left_path=left_path,
+        right_path=right_path,
+        output_path=output_path,
+        report_path=report_path,
+        debug_dir=debug_dir,
+        min_matches=args.min_matches,
+        min_inliers=args.min_inliers,
+        ratio_test=args.ratio_test,
+        ransac_thresh=args.ransac_thresh,
+        max_duration_sec=max_duration_sec,
+        calib_start_sec=args.calib_start_sec,
+        calib_end_sec=args.calib_end_sec,
+        calib_step_sec=args.calib_step_sec,
+        perf_mode=args.perf_mode,
+        process_scale=args.process_scale,
+        homography_mode=args.homography_mode,
+        homography_file=args.homography_file,
+    )
+
+
 def main() -> int:
     args = parse_args()
 
     if args.command == "video":
-        _run_video(
+        _run_video_from_args(
+            args=args,
             left_path=Path(args.left),
             right_path=Path(args.right),
             output_path=Path(args.out),
             report_path=Path(args.report),
             debug_dir=Path(args.debug_dir),
-            min_matches=args.min_matches,
-            min_inliers=args.min_inliers,
-            ratio_test=args.ratio_test,
-            ransac_thresh=args.ransac_thresh,
             max_duration_sec=args.max_duration_sec,
-            calib_start_sec=args.calib_start_sec,
-            calib_end_sec=args.calib_end_sec,
-            calib_step_sec=args.calib_step_sec,
-            perf_mode=args.perf_mode,
-            process_scale=args.process_scale,
-            homography_mode=args.homography_mode,
-            homography_file=args.homography_file,
         )
         return 0
 
@@ -228,24 +232,14 @@ def main() -> int:
         report_path = output_dir / f"{pair_base}_{preset}_report.json"
         debug_dir = debug_root / f"{pair_base}_{preset}"
 
-        _run_video(
+        _run_video_from_args(
+            args=args,
             left_path=left_path,
             right_path=right_path,
             output_path=output_path,
             report_path=report_path,
             debug_dir=debug_dir,
-            min_matches=args.min_matches,
-            min_inliers=args.min_inliers,
-            ratio_test=args.ratio_test,
-            ransac_thresh=args.ransac_thresh,
             max_duration_sec=max_duration_sec,
-            calib_start_sec=args.calib_start_sec,
-            calib_end_sec=args.calib_end_sec,
-            calib_step_sec=args.calib_step_sec,
-            perf_mode=args.perf_mode,
-            process_scale=args.process_scale,
-            homography_mode=args.homography_mode,
-            homography_file=args.homography_file,
         )
         print(f"preset={preset}")
         print(f"left={left_path}")

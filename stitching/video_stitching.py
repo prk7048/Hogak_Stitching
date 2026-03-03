@@ -18,7 +18,7 @@ from stitching.reporting import (
     mark_succeeded,
     write_report,
 )
-from stitching.stitch_core import (
+from stitching.core import (
     StitchConfig,
     StitchingFailure,
     _apply_gain_bias,
@@ -124,6 +124,15 @@ def _resize_frame(frame: np.ndarray, scale: float) -> np.ndarray:
     return cv2.resize(frame, (new_w, new_h), interpolation=interpolation)
 
 
+def _resize_to_match(frame: np.ndarray, target_shape: tuple[int, int]) -> np.ndarray:
+    """프레임 해상도를 (height, width) 기준으로 맞춘다."""
+
+    target_h, target_w = target_shape
+    if frame.shape[:2] == (target_h, target_w):
+        return frame
+    return cv2.resize(frame, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
+
+
 def _read_frame_at(path: Path, index: int, scale: float) -> np.ndarray | None:
     """특정 프레임 인덱스를 랜덤 액세스로 읽고 스케일링한다."""
 
@@ -189,12 +198,7 @@ def _evaluate_homography_candidate(
     이 결과를 여러 시점에서 비교해 가장 안정적인 H를 선택한다.
     """
 
-    if frame_right.shape[:2] != frame_left.shape[:2]:
-        frame_right = cv2.resize(
-            frame_right,
-            (frame_left.shape[1], frame_left.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
+    frame_right = _resize_to_match(frame_right, frame_left.shape[:2])
 
     keypoints_left, keypoints_right, matches = _detect_and_match(frame_left, frame_right, config)
     used_fallback = False
@@ -469,12 +473,7 @@ def stitch_videos(
                 frame_right = _read_frame_at(right_path, 0, config.process_scale)
                 if frame_left is None or frame_right is None:
                     raise StitchingFailure(ErrorCode.PROBE_FAIL, "cannot read first frame for saved homography")
-                if frame_right.shape[:2] != frame_left.shape[:2]:
-                    frame_right = cv2.resize(
-                        frame_right,
-                        (frame_left.shape[1], frame_left.shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
+                frame_right = _resize_to_match(frame_right, frame_left.shape[:2])
 
                 plan = _prepare_warp_plan(frame_left.shape[:2], frame_right.shape[:2], homography, config)
                 try:
@@ -669,15 +668,7 @@ def stitch_videos(
                 if pending_left is None or pending_right is None:
                     break
 
-                if (pending_right.shape[1], pending_right.shape[0]) != (
-                    pending_left.shape[1],
-                    pending_left.shape[0],
-                ):
-                    pending_right = cv2.resize(
-                        pending_right,
-                        (pending_left.shape[1], pending_left.shape[0]),
-                        interpolation=cv2.INTER_LINEAR,
-                    )
+                pending_right = _resize_to_match(pending_right, pending_left.shape[:2])
 
                 warped_right = cv2.warpPerspective(
                     pending_right,
