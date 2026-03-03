@@ -39,10 +39,13 @@ def _compute_seam_cost_map(
     canvas_left: np.ndarray,
     warped_right: np.ndarray,
     overlap: np.ndarray,
+    prev_canvas_left: np.ndarray | None = None,
+    prev_warped_right: np.ndarray | None = None,
+    motion_weight: float = 0.0,
 ) -> np.ndarray:
     """
     seam-cut 비용맵.
-    밝기 차이 + 경계(gradient) 정보를 합쳐 비용이 낮은 경로를 유도한다.
+    밝기 차이 + 경계(gradient) + 움직임 비용을 합쳐 seam이 정적인 영역을 지나가도록 유도한다.
     """
 
     gray_left = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY).astype(np.float32)
@@ -54,6 +57,21 @@ def _compute_seam_cost_map(
     grad_mag = cv2.magnitude(grad_x, grad_y)
 
     cost = diff + 0.25 * grad_mag
+
+    if (
+        motion_weight > 0.0
+        and prev_canvas_left is not None
+        and prev_warped_right is not None
+        and prev_canvas_left.shape == canvas_left.shape
+        and prev_warped_right.shape == warped_right.shape
+    ):
+        prev_gray_left = cv2.cvtColor(prev_canvas_left, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        prev_gray_right = cv2.cvtColor(prev_warped_right, cv2.COLOR_BGR2GRAY).astype(np.float32)
+        motion_left = cv2.absdiff(gray_left, prev_gray_left)
+        motion_right = cv2.absdiff(gray_right, prev_gray_right)
+        motion = np.maximum(motion_left, motion_right)
+        cost = cost + float(motion_weight) * motion
+
     cost[~overlap] = 1e9
     return cost
 
@@ -62,6 +80,8 @@ def _find_seam_path(
     overlap: np.ndarray,
     cost_map: np.ndarray,
     smoothness_penalty: float,
+    prev_seam_path: np.ndarray | None = None,
+    temporal_penalty: float = 0.0,
 ) -> np.ndarray:
     """동적 계획법으로 상->하 seam 경로를 찾는다."""
 
@@ -77,10 +97,15 @@ def _find_seam_path(
     inf = 1e18
     dp = np.full((h, seam_w), inf, dtype=np.float64)
     prev_idx = np.full((h, seam_w), -1, dtype=np.int32)
+    temporal_penalty = max(0.0, float(temporal_penalty))
+    has_prev_seam = prev_seam_path is not None and prev_seam_path.shape[0] == h
 
     first_valid_row = int(ys.min())
     valid0 = overlap[first_valid_row, x_min : x_max + 1]
     row0_cost = cost_map[first_valid_row, x_min : x_max + 1]
+    if has_prev_seam:
+        row_x = x_min + np.arange(seam_w, dtype=np.float64)
+        row0_cost = row0_cost + temporal_penalty * np.abs(row_x - float(prev_seam_path[first_valid_row]))
     dp[first_valid_row, valid0] = row0_cost[valid0]
 
     for y in range(first_valid_row + 1, h):
@@ -90,6 +115,9 @@ def _find_seam_path(
         prev_cost = dp[y - 1]
         row_cost = cost_map[y, x_min : x_max + 1]
         for x in np.where(valid)[0]:
+            temporal_cost = 0.0
+            if has_prev_seam:
+                temporal_cost = temporal_penalty * abs((x_min + x) - float(prev_seam_path[y]))
             candidates = []
             for step in (-1, 0, 1):
                 px = x + step
@@ -101,9 +129,9 @@ def _find_seam_path(
                 penalty = smoothness_penalty * abs(step)
                 candidates.append((p_cost + penalty, px))
             if not candidates:
-                candidates.append((row_cost[x], x))
+                candidates.append((0.0, x))
             best_cost, best_prev = min(candidates, key=lambda t: t[0])
-            dp[y, x] = row_cost[x] + best_cost
+            dp[y, x] = row_cost[x] + temporal_cost + best_cost
             prev_idx[y, x] = best_prev
 
     last_row = int(ys.max())

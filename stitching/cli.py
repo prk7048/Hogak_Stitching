@@ -36,6 +36,25 @@ def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
         help="off/auto/reuse/refresh",
     )
     cmd.add_argument("--homography-file", default=None, help="Path to homography json")
+    cmd.add_argument(
+        "--adaptive-seam",
+        choices=["on", "off"],
+        default="off",
+        help="Enable adaptive seam update in seam-cut mode",
+    )
+    cmd.add_argument("--seam-update-interval", type=int, default=12, help="Adaptive seam update interval (frames)")
+    cmd.add_argument(
+        "--seam-temporal-penalty",
+        type=float,
+        default=1.5,
+        help="Temporal penalty for seam stabilization",
+    )
+    cmd.add_argument(
+        "--seam-motion-weight",
+        type=float,
+        default=1.5,
+        help="Motion-aware seam cost weight",
+    )
 
 
 def parse_args() -> argparse.Namespace:
@@ -131,6 +150,10 @@ def _run_video(
     process_scale: float | None,
     homography_mode: str,
     homography_file: str | None,
+    adaptive_seam: str,
+    seam_update_interval: int,
+    seam_temporal_penalty: float,
+    seam_motion_weight: float,
 ) -> None:
     try:
         from stitching.video_stitching import VideoConfig, stitch_videos
@@ -157,6 +180,10 @@ def _run_video(
         process_scale=scale,
         homography_mode=homography_mode,
         homography_file=homography_path,
+        adaptive_seam=(adaptive_seam != "off"),
+        seam_update_interval=max(1, int(seam_update_interval)),
+        seam_temporal_penalty=max(0.0, float(seam_temporal_penalty)),
+        seam_motion_weight=max(0.0, float(seam_motion_weight)),
     )
     stitch_videos(
         left_path=left_path,
@@ -195,6 +222,10 @@ def _run_video_from_args(
         process_scale=args.process_scale,
         homography_mode=args.homography_mode,
         homography_file=args.homography_file,
+        adaptive_seam=args.adaptive_seam,
+        seam_update_interval=args.seam_update_interval,
+        seam_temporal_penalty=args.seam_temporal_penalty,
+        seam_motion_weight=args.seam_motion_weight,
     )
 
 

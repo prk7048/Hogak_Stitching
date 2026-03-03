@@ -49,6 +49,12 @@ class VideoConfig(StitchConfig):
 
     # 겹침 영역 차이가 크면 feather 대신 seam-cut을 사용한다.
     video_ghost_diff_threshold: float = 8.0
+    # seam-cut 모드에서 seam을 주기적으로 재탐색해 움직이는 객체 고스팅을 줄인다.
+    adaptive_seam: bool = False
+    seam_update_interval: int = 12
+    seam_temporal_penalty: float = 1.5
+    # seam 비용에서 움직임 항의 가중치(클수록 움직이는 객체를 피하려고 함)
+    seam_motion_weight: float = 1.5
 
     # H 저장/재사용 모드
     # off: 항상 새로 계산, 저장 안 함
@@ -420,6 +426,13 @@ def stitch_videos(
     report["metrics"]["processing_time_sec"] = stage_times
     report["metrics"]["perf_mode"] = config.perf_mode
     report["metrics"]["processing_scale"] = float(config.process_scale)
+    seam_update_interval = max(1, int(config.seam_update_interval))
+    seam_temporal_penalty = max(0.0, float(config.seam_temporal_penalty))
+    report["metrics"]["adaptive_seam_enabled"] = bool(config.adaptive_seam)
+    report["metrics"]["seam_update_interval"] = seam_update_interval
+    report["metrics"]["seam_temporal_penalty"] = round(seam_temporal_penalty, 3)
+    report["metrics"]["seam_motion_weight"] = round(float(config.seam_motion_weight), 3)
+    report["metrics"]["seam_updates"] = 0
     debug_dir.mkdir(parents=True, exist_ok=True)
 
     left_cap: cv2.VideoCapture | None = None
@@ -449,6 +462,7 @@ def stitch_videos(
             status_hook("stitching")
 
         seam_path: np.ndarray | None = None
+        seam_x_initial: int | None = None
         exposure_gain = 1.0
         exposure_bias = 0.0
 
@@ -628,12 +642,15 @@ def stitch_videos(
                     smoothness_penalty=config.seam_smoothness_penalty,
                 )
                 report["metrics"]["blend_mode"] = "seam_cut"
-                report["metrics"]["seam_x"] = int(np.median(seam_path))
+                seam_x_initial = int(np.median(seam_path))
+                report["metrics"]["seam_x"] = seam_x_initial
+                report["metrics"]["seam_x_initial"] = seam_x_initial
                 if "homography_unstable_fallback_affine" not in report["warnings"]:
                     report["warnings"].append("high_overlap_difference_seam_cut")
             else:
                 report["metrics"]["blend_mode"] = "feather"
                 report["metrics"]["seam_x"] = None
+                report["metrics"]["seam_x_initial"] = None
 
             report["metrics"]["overlap_diff_mean"] = round(float(overlap_diff_mean), 3)
             report["metrics"]["exposure_gain"] = round(float(exposure_gain), 4)
@@ -660,6 +677,12 @@ def stitch_videos(
         else:
             max_frames = min(max_available_frames, int(config.max_duration_sec * base_fps))
         processed = 0
+        active_seam_path = seam_path
+        seam_updates = 0
+        prev_canvas_left_for_seam: np.ndarray | None = None
+        prev_warped_right_for_seam: np.ndarray | None = None
+        seam_shift_accum = 0.0
+        seam_shift_count = 0
 
         with StageTimer(stage_times, "frame_loop"):
             pending_left = first_left
@@ -694,13 +717,35 @@ def stitch_videos(
                         mask=right_mask,
                     )
 
-                if report["metrics"].get("blend_mode") == "seam_cut" and seam_path is not None:
+                if report["metrics"].get("blend_mode") == "seam_cut" and active_seam_path is not None:
+                    if config.adaptive_seam and processed > 0 and (processed % seam_update_interval == 0):
+                        overlap_frame = (left_mask > 0) & (right_mask > 0)
+                        prev_seam_median = int(np.median(active_seam_path))
+                        cost_map_frame = _compute_seam_cost_map(
+                            canvas_left=canvas_left,
+                            warped_right=warped_right,
+                            overlap=overlap_frame,
+                            prev_canvas_left=prev_canvas_left_for_seam,
+                            prev_warped_right=prev_warped_right_for_seam,
+                            motion_weight=config.seam_motion_weight,
+                        )
+                        active_seam_path = _find_seam_path(
+                            overlap=overlap_frame,
+                            cost_map=cost_map_frame,
+                            smoothness_penalty=config.seam_smoothness_penalty,
+                            prev_seam_path=active_seam_path,
+                            temporal_penalty=seam_temporal_penalty,
+                        )
+                        new_seam_median = int(np.median(active_seam_path))
+                        seam_shift_accum += abs(new_seam_median - prev_seam_median)
+                        seam_shift_count += 1
+                        seam_updates += 1
                     stitched = _blend_seam_path(
                         canvas_left,
                         warped_right,
                         left_mask,
                         right_mask,
-                        seam_path=seam_path,
+                        seam_path=active_seam_path,
                         transition_px=config.seam_transition_px,
                     )
                 else:
@@ -714,7 +759,18 @@ def stitch_videos(
                     break
                 pending_left = _resize_frame(next_left_raw, config.process_scale)
                 pending_right = _resize_frame(next_right_raw, config.process_scale)
+                prev_canvas_left_for_seam = canvas_left
+                prev_warped_right_for_seam = warped_right
 
+        report["metrics"]["seam_updates"] = int(seam_updates)
+        report["metrics"]["seam_shift_abs_mean"] = (
+            round(float(seam_shift_accum / seam_shift_count), 3) if seam_shift_count > 0 else 0.0
+        )
+        if report["metrics"].get("blend_mode") == "seam_cut" and active_seam_path is not None:
+            report["metrics"]["seam_x_final"] = int(np.median(active_seam_path))
+            report["metrics"]["seam_x"] = report["metrics"]["seam_x_final"]
+        else:
+            report["metrics"]["seam_x_final"] = None
         report["metrics"]["processed_frames"] = processed
         report["metrics"]["output_resolution"] = [int(plan.width), int(plan.height)]
         if processed <= 0:

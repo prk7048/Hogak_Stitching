@@ -128,11 +128,31 @@ class JobManager:
             self._process_job(item)
 
     @staticmethod
+    def _parse_bool_option(value: Any, default: bool) -> bool:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "on", "yes", "y"}:
+                return True
+            if normalized in {"0", "false", "off", "no", "n"}:
+                return False
+        return default
+
+    @staticmethod
     def _build_video_config(options: dict[str, Any]) -> VideoConfig:
         perf_mode = str(options.get("perf_mode", "quality"))
         process_scale_opt = options.get("process_scale")
         process_scale = float(process_scale_opt) if process_scale_opt is not None else None
         scale, max_features = resolve_perf_profile(perf_mode=perf_mode, process_scale=process_scale)
+        adaptive_seam = JobManager._parse_bool_option(options.get("adaptive_seam"), default=False)
+        seam_update_interval = max(1, int(options.get("seam_update_interval", 12)))
+        seam_temporal_penalty = max(0.0, float(options.get("seam_temporal_penalty", 1.5)))
+        seam_motion_weight = max(0.0, float(options.get("seam_motion_weight", 1.5)))
 
         homography_file_opt = options.get("homography_file")
         homography_file = (
@@ -155,6 +175,10 @@ class JobManager:
             max_features=max_features,
             homography_mode=str(options.get("homography_mode", "off")),
             homography_file=homography_file,
+            adaptive_seam=adaptive_seam,
+            seam_update_interval=seam_update_interval,
+            seam_temporal_penalty=seam_temporal_penalty,
+            seam_motion_weight=seam_motion_weight,
         )
 
     def _process_job(self, item: JobItem) -> None:
