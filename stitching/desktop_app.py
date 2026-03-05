@@ -36,6 +36,8 @@ class DesktopConfig:
     stitch_every_n: int = 3
     max_features: int = 1200
     stitch_output_scale: float = 0.6
+    gpu_mode: str = "off"  # off | auto | on
+    gpu_device: int = 0
 
 
 class RtspReader:
@@ -143,6 +145,7 @@ class RtspReader:
 
 class DesktopStitcher:
     def __init__(self, config: DesktopConfig) -> None:
+        self._desktop_cfg = config
         self._stitch_every_n = max(1, int(config.stitch_every_n))
         self._cfg = StitchConfig(
             min_matches=int(config.min_matches),
@@ -158,12 +161,56 @@ class DesktopStitcher:
         self._last_status = "calibration pending"
         self._last_stitched: np.ndarray | None = None
         self._frame_index = 0
+        self._right_mask_template: np.ndarray | None = None
 
         self._matches_last = 0
         self._inliers_last = 0
         self._stitched_count = 0
         self._reused_count = 0
         self._stitch_timestamps: deque[float] = deque(maxlen=240)
+        self._gpu_enabled = False
+        self._gpu_reason = "gpu disabled"
+        self._gpu_warp_count = 0
+        self._cpu_warp_count = 0
+        self._gpu_errors = 0
+        self._resolve_gpu_mode()
+
+    def _resolve_gpu_mode(self) -> None:
+        mode = str(self._desktop_cfg.gpu_mode).strip().lower()
+        if mode not in {"off", "auto", "on"}:
+            mode = "off"
+        if mode == "off":
+            self._gpu_enabled = False
+            self._gpu_reason = "gpu mode off"
+            return
+
+        if not hasattr(cv2, "cuda"):
+            self._gpu_enabled = False
+            self._gpu_reason = "opencv has no cuda module"
+            return
+        try:
+            count = int(cv2.cuda.getCudaEnabledDeviceCount())
+        except Exception as exc:
+            self._gpu_enabled = False
+            self._gpu_reason = f"cuda detection failed: {exc}"
+            return
+        if count <= 0:
+            self._gpu_enabled = False
+            self._gpu_reason = "no cuda device"
+            return
+
+        device = max(0, int(self._desktop_cfg.gpu_device))
+        if device >= count:
+            device = 0
+        try:
+            cv2.cuda.setDevice(device)
+        except Exception as exc:
+            self._gpu_enabled = False
+            self._gpu_reason = f"setDevice failed: {exc}"
+            return
+
+        self._gpu_enabled = True
+        self._gpu_reason = f"cuda device {device}"
 
     def _need_recalibration(self, left: np.ndarray, right: np.ndarray) -> bool:
         if self._plan is None:
@@ -194,6 +241,12 @@ class DesktopStitcher:
             self._plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, self._cfg)
             self._left_shape = left.shape[:2]
             self._right_shape = right.shape[:2]
+            right_mask = np.ones(right.shape[:2], dtype=np.uint8) * 255
+            self._right_mask_template = cv2.warpPerspective(
+                right_mask,
+                self._plan.homography_adjusted,
+                (self._plan.width, self._plan.height),
+            )
             self._matches_last = int(len(matches))
             self._inliers_last = int(inlier_mask.ravel().sum()) if inlier_mask is not None else 0
             self._last_status = "calibrated"
@@ -217,16 +270,40 @@ class DesktopStitcher:
             return self._last_stitched, "stitching (reused)"
 
         try:
-            right_warped = cv2.warpPerspective(
-                right,
-                self._plan.homography_adjusted,
-                (self._plan.width, self._plan.height),
-            )
-            right_mask = cv2.warpPerspective(
-                np.ones(right.shape[:2], dtype=np.uint8) * 255,
-                self._plan.homography_adjusted,
-                (self._plan.width, self._plan.height),
-            )
+            if self._gpu_enabled:
+                try:
+                    gpu_in = cv2.cuda_GpuMat()
+                    gpu_in.upload(right)
+                    gpu_warped = cv2.cuda.warpPerspective(
+                        gpu_in,
+                        self._plan.homography_adjusted,
+                        (self._plan.width, self._plan.height),
+                    )
+                    right_warped = gpu_warped.download()
+                    self._gpu_warp_count += 1
+                except Exception:
+                    self._gpu_errors += 1
+                    right_warped = cv2.warpPerspective(
+                        right,
+                        self._plan.homography_adjusted,
+                        (self._plan.width, self._plan.height),
+                    )
+                    self._cpu_warp_count += 1
+            else:
+                right_warped = cv2.warpPerspective(
+                    right,
+                    self._plan.homography_adjusted,
+                    (self._plan.width, self._plan.height),
+                )
+                self._cpu_warp_count += 1
+
+            right_mask = self._right_mask_template
+            if right_mask is None:
+                right_mask = cv2.warpPerspective(
+                    np.ones(right.shape[:2], dtype=np.uint8) * 255,
+                    self._plan.homography_adjusted,
+                    (self._plan.width, self._plan.height),
+                )
             left_canvas = np.zeros((self._plan.height, self._plan.width, 3), dtype=np.uint8)
             left_mask = np.zeros((self._plan.height, self._plan.width), dtype=np.uint8)
             lh, lw = left.shape[:2]
@@ -259,6 +336,11 @@ class DesktopStitcher:
             "stitched_count": int(self._stitched_count),
             "reused_count": int(self._reused_count),
             "stitch_fps": float(stitch_fps),
+            "gpu_enabled": bool(self._gpu_enabled),
+            "gpu_reason": self._gpu_reason,
+            "gpu_warp_count": int(self._gpu_warp_count),
+            "cpu_warp_count": int(self._cpu_warp_count),
+            "gpu_errors": int(self._gpu_errors),
         }
 
 
@@ -458,6 +540,8 @@ def run_desktop(config: DesktopConfig) -> int:
                 f"status={metrics.get('status', stitch_status)}  frame={int(metrics.get('frame_index', 0))}  display_fps={display_fps:.2f}",
                 f"matches={int(metrics.get('matches', 0))}  inliers={int(metrics.get('inliers', 0))}  stitch_fps={float(metrics.get('stitch_fps', 0.0)):.2f}  worker_fps={float(metrics.get('worker_fps', 0.0)):.2f}",
                 f"stitched_count={int(metrics.get('stitched_count', 0))}  reused_count={int(metrics.get('reused_count', 0))}  stitch_every_n={int(config.stitch_every_n)}",
+                f"gpu_enabled={bool(metrics.get('gpu_enabled', False))}  gpu_reason={metrics.get('gpu_reason', '-')}",
+                f"gpu_warp={int(metrics.get('gpu_warp_count', 0))}  cpu_warp={int(metrics.get('cpu_warp_count', 0))}  gpu_errors={int(metrics.get('gpu_errors', 0))}",
                 f"left_frames={int(left_stats['frames_total'])}  right_frames={int(right_stats['frames_total'])}",
                 f"left_err={left_stats['last_error'] or '-'}",
                 f"right_err={right_stats['last_error'] or '-'}",

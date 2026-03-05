@@ -179,6 +179,8 @@ def parse_args() -> argparse.Namespace:
         default=0.6,
         help="Scale factor for stitched panel output",
     )
+    desktop_cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="off")
+    desktop_cmd.add_argument("--gpu-device", type=int, default=0)
     return parser.parse_args()
 
 
@@ -465,6 +467,8 @@ def main() -> int:
             stitch_every_n=max(1, int(args.stitch_every_n)),
             max_features=max(500, int(args.max_features)),
             stitch_output_scale=max(0.1, float(args.stitch_output_scale)),
+            gpu_mode=args.gpu_mode,
+            gpu_device=max(0, int(args.gpu_device)),
         )
         return int(run_desktop(cfg))
 
