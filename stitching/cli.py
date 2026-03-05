@@ -83,12 +83,81 @@ def parse_args() -> argparse.Namespace:
         preset_cmd.add_argument("--debug-root", default="output/debug")
         _add_video_common_args(preset_cmd)
 
+    # RTSP 실시간 모드
+    live_cmd = subparsers.add_parser("live", help="Stitch two RTSP streams (live/offline capture)")
+    live_cmd.add_argument("--left-rtsp", required=True, help="Left RTSP URL")
+    live_cmd.add_argument("--right-rtsp", required=True, help="Right RTSP URL")
+    live_cmd.add_argument("--out", default="output/videos/live_stitched.mp4")
+    live_cmd.add_argument("--report", default="output/videos/live_report.json")
+    live_cmd.add_argument("--debug-dir", default="output/debug/live")
+    live_cmd.add_argument(
+        "--max-duration-sec",
+        type=float,
+        default=0.0,
+        help="Target output duration in seconds (0 means run until stopped)",
+    )
+    live_cmd.add_argument("--output-fps", type=float, default=20.0)
+    live_cmd.add_argument("--calib-max-attempts", type=int, default=180)
+    live_cmd.add_argument("--max-read-failures", type=int, default=45)
+    live_cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
+    live_cmd.add_argument(
+        "--rtsp-transport",
+        choices=["tcp", "udp"],
+        default="tcp",
+        help="RTSP transport protocol (tcp recommended for stability)",
+    )
+    live_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+    live_cmd.add_argument(
+        "--sync-buffer-sec",
+        type=float,
+        default=2.0,
+        help="Per-stream frame buffer length in seconds for software sync",
+    )
+    live_cmd.add_argument(
+        "--sync-match-max-delta-ms",
+        type=float,
+        default=80.0,
+        help="Max allowed residual time delta for left/right frame pairing",
+    )
+    live_cmd.add_argument(
+        "--sync-manual-offset-ms",
+        type=float,
+        default=0.0,
+        help="Manual offset applied to right stream timestamp target",
+    )
+    live_cmd.add_argument(
+        "--sync-no-pair-timeout-sec",
+        type=float,
+        default=8.0,
+        help="Fail if no matched frame pair is produced for this long",
+    )
+    live_cmd.add_argument(
+        "--sync-pair-mode",
+        choices=["latest", "oldest"],
+        default="latest",
+        help="Frame pairing policy for left stream reference",
+    )
+    live_cmd.add_argument(
+        "--max-live-lag-sec",
+        type=float,
+        default=1.0,
+        help="If lag exceeds this, skip middle frames and catch up to near-live",
+    )
+    live_cmd.add_argument("--preview", action="store_true", help="Show live preview window (press q to stop)")
+    _add_video_common_args(live_cmd)
+
 
     # 서비스 모드
     serve_cmd = subparsers.add_parser("serve", help="Run local API + worker server")
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8080)
     serve_cmd.add_argument("--storage-dir", default="storage")
+
+    # GUI 모드
+    gui_cmd = subparsers.add_parser("gui", help="Run local GUI app")
+    gui_cmd.add_argument("--host", default="127.0.0.1")
+    gui_cmd.add_argument("--port", type=int, default=7860)
+    gui_cmd.add_argument("--share", action="store_true")
     return parser.parse_args()
 
 
@@ -229,6 +298,52 @@ def _run_video_from_args(
     )
 
 
+def _run_live_from_args(args: argparse.Namespace) -> None:
+    try:
+        from stitching.live_stitching import LiveConfig, stitch_live_rtsp
+    except ModuleNotFoundError as exc:
+        if exc.name == "cv2":
+            print("Missing dependency: opencv-python. Install with `python -m pip install -r requirements.txt`.")
+            raise SystemExit(2)
+        raise
+
+    scale, max_features = resolve_perf_profile(perf_mode=args.perf_mode, process_scale=args.process_scale)
+    config = LiveConfig(
+        min_matches=args.min_matches,
+        min_inliers=args.min_inliers,
+        ratio_test=args.ratio_test,
+        ransac_reproj_threshold=args.ransac_thresh,
+        max_features=max_features,
+        process_scale=scale,
+        max_duration_sec=args.max_duration_sec,
+        output_fps=args.output_fps,
+        calib_max_attempts=args.calib_max_attempts,
+        max_read_failures=args.max_read_failures,
+        reconnect_cooldown_sec=args.reconnect_cooldown_sec,
+        rtsp_transport=args.rtsp_transport,
+        rtsp_timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
+        sync_buffer_sec=max(0.5, float(args.sync_buffer_sec)),
+        sync_match_max_delta_ms=max(1.0, float(args.sync_match_max_delta_ms)),
+        sync_manual_offset_ms=float(args.sync_manual_offset_ms),
+        sync_no_pair_timeout_sec=max(1.0, float(args.sync_no_pair_timeout_sec)),
+        sync_pair_mode=args.sync_pair_mode,
+        max_live_lag_sec=max(0.0, float(args.max_live_lag_sec)),
+        adaptive_seam=(args.adaptive_seam != "off"),
+        seam_update_interval=max(1, int(args.seam_update_interval)),
+        seam_temporal_penalty=max(0.0, float(args.seam_temporal_penalty)),
+        seam_motion_weight=max(0.0, float(args.seam_motion_weight)),
+        preview=bool(args.preview),
+    )
+    stitch_live_rtsp(
+        left_rtsp=args.left_rtsp,
+        right_rtsp=args.right_rtsp,
+        output_path=Path(args.out),
+        report_path=Path(args.report),
+        debug_dir=Path(args.debug_dir),
+        config=config,
+    )
+
+
 def main() -> int:
     args = parse_args()
 
@@ -289,6 +404,21 @@ def main() -> int:
                 return 2
             raise
         run_server(host=args.host, port=args.port, storage_dir=Path(args.storage_dir))
+        return 0
+
+    if args.command == "gui":
+        try:
+            from stitching.gui_app import run_gui
+        except ModuleNotFoundError as exc:
+            if exc.name == "gradio":
+                print("Missing dependency: gradio. Install with `python -m pip install -r requirements.txt`.")
+                return 2
+            raise
+        run_gui(host=args.host, port=args.port, share=bool(args.share))
+        return 0
+
+    if args.command == "live":
+        _run_live_from_args(args)
         return 0
 
     return 1
