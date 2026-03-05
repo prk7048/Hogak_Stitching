@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from pathlib import Path
@@ -8,7 +8,7 @@ from stitching.perf_profiles import resolve_perf_profile
 
 
 def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
-    """영상 스티칭 공통 옵션."""
+    """ì˜ìƒ ìŠ¤í‹°ì¹­ ê³µí†µ ì˜µì…˜."""
 
     cmd.add_argument("--min-matches", type=int, default=80)
     cmd.add_argument("--min-inliers", type=int, default=30)
@@ -18,17 +18,17 @@ def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--calib-end-sec", type=float, default=10.0)
     cmd.add_argument("--calib-step-sec", type=float, default=1.0)
 
-    # 성능 모드: 사용자가 속도/품질을 쉽게 선택할 수 있게 단순화
+    # ì„±ëŠ¥ ëª¨ë“œ: ì‚¬ìš©ìžê°€ ì†ë„/í’ˆì§ˆì„ ì‰½ê²Œ ì„ íƒí•  ìˆ˜ ìžˆê²Œ ë‹¨ìˆœí™”
     cmd.add_argument(
         "--perf-mode",
         choices=["quality", "balanced", "fast"],
         default="quality",
-        help="quality(기본), balanced, fast",
+        help="quality(ê¸°ë³¸), balanced, fast",
     )
-    # 필요 시 perf-mode 위에 덮어쓰는 수동 스케일
+    # í•„ìš” ì‹œ perf-mode ìœ„ì— ë®ì–´ì“°ëŠ” ìˆ˜ë™ ìŠ¤ì¼€ì¼
     cmd.add_argument("--process-scale", type=float, default=None, help="Optional manual scale (e.g. 0.5)")
 
-    # H 저장/재사용 모드
+    # H ì €ìž¥/ìž¬ì‚¬ìš© ëª¨ë“œ
     cmd.add_argument(
         "--homography-mode",
         choices=["off", "auto", "reuse", "refresh"],
@@ -61,7 +61,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dual smartphone video stitching MVP")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    # 수동 모드
+    # ìˆ˜ë™ ëª¨ë“œ
     video_cmd = subparsers.add_parser("video", help="Stitch two videos (offline)")
     video_cmd.add_argument("--left", required=True, help="Path to left video")
     video_cmd.add_argument("--right", required=True, help="Path to right video")
@@ -71,7 +71,7 @@ def parse_args() -> argparse.Namespace:
     video_cmd.add_argument("--max-duration-sec", type=float, default=30.0, help="Maximum stitched duration")
     _add_video_common_args(video_cmd)
 
-    # 프리셋 모드
+    # í”„ë¦¬ì…‹ ëª¨ë“œ
     preset_help = "Preset video stitching with auto input/output naming"
     for preset in ("video-10s", "video-30s", "video-full"):
         preset_cmd = subparsers.add_parser(preset, help=preset_help)
@@ -83,7 +83,7 @@ def parse_args() -> argparse.Namespace:
         preset_cmd.add_argument("--debug-root", default="output/debug")
         _add_video_common_args(preset_cmd)
 
-    # RTSP 실시간 모드
+    # RTSP ì‹¤ì‹œê°„ ëª¨ë“œ
     live_cmd = subparsers.add_parser("live", help="Stitch two RTSP streams (live/offline capture)")
     live_cmd.add_argument("--left-rtsp", required=True, help="Left RTSP URL")
     live_cmd.add_argument("--right-rtsp", required=True, help="Right RTSP URL")
@@ -147,17 +147,38 @@ def parse_args() -> argparse.Namespace:
     _add_video_common_args(live_cmd)
 
 
-    # 서비스 모드
+    # ì„œë¹„ìŠ¤ ëª¨ë“œ
     serve_cmd = subparsers.add_parser("serve", help="Run local API + worker server")
     serve_cmd.add_argument("--host", default="127.0.0.1")
     serve_cmd.add_argument("--port", type=int, default=8080)
     serve_cmd.add_argument("--storage-dir", default="storage")
 
-    # GUI 모드
+    # GUI ëª¨ë“œ
     gui_cmd = subparsers.add_parser("gui", help="Run local GUI app")
     gui_cmd.add_argument("--host", default="127.0.0.1")
     gui_cmd.add_argument("--port", type=int, default=7860)
     gui_cmd.add_argument("--share", action="store_true")
+    # Desktop RTSP live stitching preview mode
+    desktop_cmd = subparsers.add_parser("desktop", help="Run desktop RTSP live stitching preview")
+    desktop_cmd.add_argument("--left-rtsp", default="", help="Left RTSP URL")
+    desktop_cmd.add_argument("--right-rtsp", default="", help="Right RTSP URL")
+    desktop_cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
+    desktop_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+    desktop_cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
+    desktop_cmd.add_argument("--max-display-width", type=int, default=2880)
+    desktop_cmd.add_argument("--process-scale", type=float, default=1.0, help="Preview processing scale (e.g. 0.5)")
+    desktop_cmd.add_argument("--min-matches", type=int, default=20)
+    desktop_cmd.add_argument("--min-inliers", type=int, default=10)
+    desktop_cmd.add_argument("--ratio-test", type=float, default=0.75)
+    desktop_cmd.add_argument("--ransac-thresh", type=float, default=5.0)
+    desktop_cmd.add_argument("--stitch-every-n", type=int, default=3, help="Run stitching every N frames")
+    desktop_cmd.add_argument("--max-features", type=int, default=1200, help="ORB feature count for stitching")
+    desktop_cmd.add_argument(
+        "--stitch-output-scale",
+        type=float,
+        default=0.6,
+        help="Scale factor for stitched panel output",
+    )
     return parser.parse_args()
 
 
@@ -420,5 +441,31 @@ def main() -> int:
     if args.command == "live":
         _run_live_from_args(args)
         return 0
+
+    if args.command == "desktop":
+        try:
+            from stitching.desktop_app import DesktopConfig, run_desktop
+        except ModuleNotFoundError as exc:
+            if exc.name == "cv2":
+                print("Missing dependency: opencv-python. Install with `python -m pip install -r requirements.txt`.")
+                return 2
+            raise
+        cfg = DesktopConfig(
+            left_rtsp=args.left_rtsp,
+            right_rtsp=args.right_rtsp,
+            rtsp_transport=args.rtsp_transport,
+            rtsp_timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
+            reconnect_cooldown_sec=max(0.2, float(args.reconnect_cooldown_sec)),
+            max_display_width=max(640, int(args.max_display_width)),
+            process_scale=max(0.1, float(args.process_scale)),
+            min_matches=max(8, int(args.min_matches)),
+            min_inliers=max(6, int(args.min_inliers)),
+            ratio_test=float(args.ratio_test),
+            ransac_thresh=float(args.ransac_thresh),
+            stitch_every_n=max(1, int(args.stitch_every_n)),
+            max_features=max(500, int(args.max_features)),
+            stitch_output_scale=max(0.1, float(args.stitch_output_scale)),
+        )
+        return int(run_desktop(cfg))
 
     return 1

@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -55,7 +57,7 @@ def _resolve_pair_from_prefix(input_dir: Path, pair: str) -> tuple[Path, Path]:
         right = left.with_name(left.name.replace("_left", "_right", 1))
         if right.exists():
             return left, right
-    raise FileNotFoundError(f"pair '{pair}' left/right 파일을 찾을 수 없습니다: {input_dir}")
+    raise FileNotFoundError(f"pair '{pair}' left/right files not found: {input_dir}")
 
 
 def _resolve_latest_pair(input_dir: Path) -> tuple[Path, Path]:
@@ -64,7 +66,7 @@ def _resolve_latest_pair(input_dir: Path) -> tuple[Path, Path]:
         right = left.with_name(left.name.replace("_left", "_right", 1))
         if right.exists():
             return left, right
-    raise FileNotFoundError(f"*_left/*_right 페어를 찾을 수 없습니다: {input_dir}")
+    raise FileNotFoundError(f"cannot find matched *_left/*_right pair in: {input_dir}")
 
 
 def _build_video_config(
@@ -136,7 +138,7 @@ def run_offline_video(
         left_path = Path(left)
         right_path = Path(right)
         if not left_path.exists() or not right_path.exists():
-            return "실패: left/right 경로를 확인하세요.", "", None
+            return "failed: check left/right paths", "", None
 
         out_path = Path(out)
         report_path = Path(report)
@@ -172,9 +174,9 @@ def run_offline_video(
             debug_dir=debug_path,
             config=config,
         )
-        return f"완료: {out_path}", _read_text(report_path), str(out_path)
+        return f"done: {out_path}", _read_text(report_path), str(out_path)
     except Exception as exc:  # pragma: no cover - GUI guard
-        return f"실패: {exc}", "", None
+        return f"failed: {exc}", "", None
 
 
 def run_preset_video(
@@ -261,9 +263,9 @@ def run_preset_video(
             debug_dir=debug_dir,
             config=config,
         )
-        return f"완료: {out_path}", _read_text(report_path), str(out_path)
+        return f"done: {out_path}", _read_text(report_path), str(out_path)
     except Exception as exc:  # pragma: no cover - GUI guard
-        return f"실패: {exc}", "", None
+        return f"failed: {exc}", "", None
 
 
 @dataclass
@@ -325,77 +327,101 @@ class LiveSession:
     ) -> str:
         with self._lock:
             if self._running:
-                return "이미 실행 중입니다."
+                return "already running"
             self._running = True
             self._status = "starting"
             self._stop_event.clear()
             self._latest_left = None
             self._latest_right = None
             self._latest_stitched = None
-            self._report_text = ""
+            self._report_text = '{"mode":"rtsp_preview","stitching":false}'
             self._out_path = str(Path(out)) if out else str(OUTPUT_VIDEOS / f"live_gui_{_now_tag()}.mp4")
             self._report_path = str(Path(report)) if report else str(OUTPUT_VIDEOS / f"live_gui_{_now_tag()}_report.json")
 
-        scale, max_features = resolve_perf_profile(perf_mode=perf_mode, process_scale=process_scale)
-        cfg = LiveConfig(
-            min_matches=int(min_matches),
-            min_inliers=int(min_inliers),
-            ratio_test=float(ratio_test),
-            ransac_reproj_threshold=float(ransac_thresh),
-            max_features=int(max_features),
-            process_scale=float(scale),
-            max_duration_sec=float(max_duration_sec),
-            output_fps=float(output_fps),
-            calib_max_attempts=int(calib_max_attempts),
-            max_read_failures=int(max_read_failures),
-            reconnect_cooldown_sec=float(reconnect_cooldown_sec),
-            rtsp_transport=str(rtsp_transport),
-            rtsp_timeout_sec=max(0.1, float(rtsp_timeout_sec)),
-            sync_buffer_sec=max(0.5, float(sync_buffer_sec)),
-            sync_match_max_delta_ms=max(1.0, float(sync_match_max_delta_ms)),
-            sync_manual_offset_ms=float(sync_manual_offset_ms),
-            sync_no_pair_timeout_sec=max(1.0, float(sync_no_pair_timeout_sec)),
-            sync_pair_mode=str(sync_pair_mode),
-            max_live_lag_sec=max(0.0, float(max_live_lag_sec)),
-            adaptive_seam=_bool_from_onoff(adaptive_seam),
-            seam_update_interval=max(1, int(seam_update_interval)),
-            seam_temporal_penalty=max(0.0, float(seam_temporal_penalty)),
-            seam_motion_weight=max(0.0, float(seam_motion_weight)),
-            preview=False,
-        )
-        out_path = Path(self._out_path)
-        report_path = Path(self._report_path)
-        debug_path = Path(debug_dir) if debug_dir else (OUTPUT_DEBUG / f"live_gui_{_now_tag()}")
+        reconnect_delay = max(0.2, float(reconnect_cooldown_sec))
+        timeout_us = max(1, int(max(0.1, float(rtsp_timeout_sec)) * 1_000_000))
+        transport = str(rtsp_transport).strip().lower()
+        if transport not in {"tcp", "udp"}:
+            transport = "tcp"
 
-        def frame_hook(left: np.ndarray, right: np.ndarray, stitched: np.ndarray) -> None:
-            with self._lock:
-                self._latest_left = _to_rgb(left)
-                self._latest_right = _to_rgb(right)
-                self._latest_stitched = _to_rgb(stitched)
+        def _open_capture(url: str) -> cv2.VideoCapture:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+                f"rtsp_transport;{transport}|stimeout;{timeout_us}|fflags;nobuffer|flags;low_delay"
+            )
+            cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return cap
+            cap.release()
+            cap = cv2.VideoCapture(url)
+            if cap.isOpened():
+                cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+                return cap
+            cap.release()
+            raise RuntimeError(f"cannot open stream: {url}")
 
-        def status_hook(stage: str) -> None:
-            with self._lock:
-                self._status = stage
+        def _reader_loop(slot: str, url: str) -> None:
+            cap: cv2.VideoCapture | None = None
+            try:
+                while not self._stop_event.is_set():
+                    try:
+                        if cap is None:
+                            cap = _open_capture(url)
+                        ok = cap.grab()
+                        if not ok:
+                            cap.release()
+                            cap = None
+                            time.sleep(reconnect_delay)
+                            continue
+                        ok, frame = cap.retrieve()
+                        if not ok or frame is None:
+                            continue
+
+                        rgb = _to_rgb(frame)
+                        with self._lock:
+                            if slot == "left":
+                                self._latest_left = rgb
+                            else:
+                                self._latest_right = rgb
+                    except Exception:
+                        if cap is not None:
+                            cap.release()
+                            cap = None
+                        time.sleep(reconnect_delay)
+            finally:
+                if cap is not None:
+                    cap.release()
 
         def run() -> None:
+            workers: list[threading.Thread] = []
             try:
-                stitch_live_rtsp(
-                    left_rtsp=left_rtsp,
-                    right_rtsp=right_rtsp,
-                    output_path=out_path,
-                    report_path=report_path,
-                    debug_dir=debug_path,
-                    config=cfg,
-                    frame_hook=frame_hook,
-                    status_hook=status_hook,
-                    should_stop=self._stop_event.is_set,
-                )
                 with self._lock:
-                    self._report_text = _read_text(report_path)
+                    self._status = "connecting"
+
+                if left_rtsp.strip():
+                    workers.append(threading.Thread(target=_reader_loop, args=("left", left_rtsp), daemon=True))
+                if right_rtsp.strip():
+                    workers.append(threading.Thread(target=_reader_loop, args=("right", right_rtsp), daemon=True))
+                if not workers:
+                    raise RuntimeError("left/right RTSP URL is empty")
+
+                for worker in workers:
+                    worker.start()
+
+                while not self._stop_event.is_set():
+                    with self._lock:
+                        has_any_frame = (self._latest_left is not None) or (self._latest_right is not None)
+                        self._status = "previewing" if has_any_frame else "connecting"
+                    if not any(worker.is_alive() for worker in workers):
+                        raise RuntimeError("all rtsp reader threads stopped")
+                    time.sleep(0.01)
             except Exception as exc:  # pragma: no cover - GUI guard
                 with self._lock:
                     self._status = f"failed: {exc}"
             finally:
+                self._stop_event.set()
+                for worker in workers:
+                    worker.join(timeout=1.0)
                 with self._lock:
                     self._running = False
                     if not self._status.startswith("failed"):
@@ -405,15 +431,15 @@ class LiveSession:
         thread.start()
         with self._lock:
             self._thread = thread
-        return f"라이브 시작: out={self._out_path}, report={self._report_path}"
+        return f"live started: out={self._out_path}, report={self._report_path}"
 
     def stop(self) -> str:
         with self._lock:
             if not self._running:
-                return "현재 실행 중인 라이브가 없습니다."
+                return "not running"
             self._stop_event.set()
             self._status = "stopping"
-        return "중지 요청 완료"
+        return "stop requested"
 
     def snapshot(self) -> LiveSnapshot:
         with self._lock:
@@ -445,7 +471,7 @@ class ServeSession:
     def start(self, host: str, port: int, storage_dir: str) -> str:
         with self._lock:
             if self._proc is not None and self._proc.poll() is None:
-                return "serve 서버가 이미 실행 중입니다."
+                return "serve server already running"
             self.host = host
             self.port = int(port)
             self.storage = storage_dir
@@ -462,18 +488,18 @@ class ServeSession:
                 storage_dir,
             ]
             self._proc = subprocess.Popen(cmd, cwd=str(REPO_ROOT))
-            return f"serve 시작: http://{host}:{port}"
+            return f"serve started: http://{host}:{port}"
 
     def stop(self) -> str:
         with self._lock:
             if self._proc is None or self._proc.poll() is not None:
-                return "실행 중인 serve 서버가 없습니다."
+                return "serve server not running"
             self._proc.terminate()
             try:
                 self._proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self._proc.kill()
-            return "serve 종료 완료"
+            return "serve stopped"
 
     def health(self) -> str:
         url = f"http://{self.host}:{self.port}/health"
@@ -482,7 +508,7 @@ class ServeSession:
                 body = resp.read().decode("utf-8")
             return f"health OK: {body}"
         except Exception as exc:
-            return f"health 실패: {exc}"
+            return f"health failed: {exc}"
 
     def submit_video_job(self, host: str, port: int, left_path: str, right_path: str, options_json: str) -> str:
         url = f"http://{host}:{port}/jobs/video-stitch"
@@ -503,7 +529,7 @@ class ServeSession:
         except URLError as exc:
             return f"URLError: {exc}"
         except Exception as exc:
-            return f"submit 실패: {exc}"
+            return f"submit failed: {exc}"
 
     def get_job(self, host: str, port: int, job_id: str) -> str:
         url = f"http://{host}:{port}/jobs/{job_id}"
@@ -511,7 +537,7 @@ class ServeSession:
             with urlopen(url, timeout=5) as resp:
                 return resp.read().decode("utf-8")
         except Exception as exc:
-            return f"조회 실패: {exc}"
+            return f"query failed: {exc}"
 
     def get_report(self, host: str, port: int, job_id: str) -> str:
         url = f"http://{host}:{port}/jobs/{job_id}/report"
@@ -519,7 +545,7 @@ class ServeSession:
             with urlopen(url, timeout=5) as resp:
                 return resp.read().decode("utf-8")
         except Exception as exc:
-            return f"report 조회 실패: {exc}"
+            return f"report query failed: {exc}"
 
     def get_artifact(self, host: str, port: int, job_id: str) -> str:
         url = f"http://{host}:{port}/jobs/{job_id}/artifact"
@@ -527,7 +553,7 @@ class ServeSession:
             with urlopen(url, timeout=5) as resp:
                 return resp.read().decode("utf-8")
         except Exception as exc:
-            return f"artifact 조회 실패: {exc}"
+            return f"artifact query failed: {exc}"
 
 
 LIVE_SESSION = LiveSession()
@@ -537,10 +563,10 @@ SERVE_SESSION = ServeSession()
 def _poll_live_view() -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None, str, str, str | None]:
     snap = LIVE_SESSION.snapshot()
     status = (
-        f"상태: {snap.status}\n"
-        f"실행중: {snap.running}\n"
-        f"출력: {snap.out_path}\n"
-        f"리포트: {snap.report_path}"
+        f": {snap.status}\n"
+        f": {snap.running}\n"
+        f"output: {snap.out_path}\n"
+        f"report: {snap.report_path}"
     )
     video_path = snap.out_path if snap.out_path and Path(snap.out_path).exists() else None
     return snap.left, snap.right, snap.stitched, status, snap.report_text, video_path
@@ -549,9 +575,9 @@ def _poll_live_view() -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray 
 def build_gui() -> gr.Blocks:
     with gr.Blocks(title="Dual Smartphone Stitching GUI") as app:
         gr.Markdown("# Dual Smartphone Stitching GUI")
-        gr.Markdown("오프라인/프리셋/라이브/서비스 기능을 한 화면에서 제어합니다.")
+        gr.Markdown("Control offline/preset/live/serve features in one page.")
 
-        with gr.Tab("오프라인 Video"):
+        with gr.Tab("Offline Video", visible=False):
             with gr.Row():
                 left = gr.Textbox(label="Left Video", value=str(INPUT_VIDEOS / "Video10_left.mp4"))
                 right = gr.Textbox(label="Right Video", value=str(INPUT_VIDEOS / "Video10_right.mp4"))
@@ -561,7 +587,7 @@ def build_gui() -> gr.Blocks:
                 debug_dir = gr.Textbox(label="Debug Dir", value=str(OUTPUT_DEBUG / "gui_video"))
             max_duration_sec = gr.Number(label="Max Duration (sec)", value=30.0)
 
-            with gr.Accordion("고급 옵션", open=False):
+            with gr.Accordion("Advanced Options", open=False):
                 with gr.Row():
                     min_matches = gr.Number(label="min_matches", value=80)
                     min_inliers = gr.Number(label="min_inliers", value=30)
@@ -573,7 +599,7 @@ def build_gui() -> gr.Blocks:
                     calib_step_sec = gr.Number(label="calib_step_sec", value=1.0)
                 with gr.Row():
                     perf_mode = gr.Dropdown(["quality", "balanced", "fast"], value="quality", label="perf_mode")
-                    process_scale = gr.Number(label="process_scale(빈값이면 perf_mode 사용)", value=None)
+                    process_scale = gr.Number(label="process_scale (empty = use perf_mode)", value=None)
                     homography_mode = gr.Dropdown(["off", "auto", "reuse", "refresh"], value="off", label="homography_mode")
                     homography_file = gr.Textbox(label="homography_file", value="")
                 with gr.Row():
@@ -582,8 +608,8 @@ def build_gui() -> gr.Blocks:
                     seam_temporal_penalty = gr.Number(label="seam_temporal_penalty", value=1.5)
                     seam_motion_weight = gr.Number(label="seam_motion_weight", value=1.5)
 
-            run_btn = gr.Button("오프라인 스티칭 실행", variant="primary")
-            run_status = gr.Textbox(label="실행 결과")
+            run_btn = gr.Button("Run Offline Stitch", variant="primary")
+            run_status = gr.Textbox(label="Result")
             run_report = gr.Code(label="report.json", language="json")
             run_video = gr.Video(label="Output Video")
 
@@ -615,18 +641,18 @@ def build_gui() -> gr.Blocks:
                 outputs=[run_status, run_report, run_video],
             )
 
-        with gr.Tab("프리셋 Video"):
+        with gr.Tab("Preset Video", visible=False):
             with gr.Row():
                 preset = gr.Dropdown(["video-10s", "video-30s", "video-full"], value="video-10s", label="Preset")
-                pair = gr.Textbox(label="pair(선택)", value="video10")
-                p_left = gr.Textbox(label="left(선택)", value="")
-                p_right = gr.Textbox(label="right(선택)", value="")
+                pair = gr.Textbox(label="pair()", value="video10")
+                p_left = gr.Textbox(label="left()", value="")
+                p_right = gr.Textbox(label="right()", value="")
             with gr.Row():
                 input_dir = gr.Textbox(label="input_dir", value=str(INPUT_VIDEOS))
                 output_dir = gr.Textbox(label="output_dir", value=str(OUTPUT_VIDEOS))
                 debug_root = gr.Textbox(label="debug_root", value=str(OUTPUT_DEBUG))
 
-            with gr.Accordion("고급 옵션", open=False):
+            with gr.Accordion("Advanced Options", open=False):
                 p_min_matches = gr.Number(label="min_matches", value=80)
                 p_min_inliers = gr.Number(label="min_inliers", value=30)
                 p_ratio_test = gr.Number(label="ratio_test", value=0.75)
@@ -643,8 +669,8 @@ def build_gui() -> gr.Blocks:
                 p_seam_temporal_penalty = gr.Number(label="seam_temporal_penalty", value=1.5)
                 p_seam_motion_weight = gr.Number(label="seam_motion_weight", value=1.5)
 
-            p_btn = gr.Button("프리셋 스티칭 실행", variant="primary")
-            p_status = gr.Textbox(label="실행 결과")
+            p_btn = gr.Button("Run Preset Stitch", variant="primary")
+            p_status = gr.Textbox(label="Result")
             p_report = gr.Code(label="report.json", language="json")
             p_video = gr.Video(label="Output Video")
 
@@ -677,7 +703,7 @@ def build_gui() -> gr.Blocks:
                 outputs=[p_status, p_report, p_video],
             )
 
-        with gr.Tab("라이브 RTSP"):
+        with gr.Tab("Live RTSP"):
             with gr.Row():
                 left_rtsp = gr.Textbox(label="Left RTSP", value="rtsp://admin:***@192.168.0.137:554/cam/realmonitor?channel=1&subtype=0")
                 right_rtsp = gr.Textbox(label="Right RTSP", value="rtsp://admin:***@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0")
@@ -686,10 +712,10 @@ def build_gui() -> gr.Blocks:
                 live_report = gr.Textbox(label="Report JSON", value=str(OUTPUT_VIDEOS / "live_gui_report.json"))
                 live_debug = gr.Textbox(label="Debug Dir", value=str(OUTPUT_DEBUG / "live_gui"))
 
-            with gr.Accordion("라이브 옵션", open=True):
+            with gr.Accordion("Live Options", open=True):
                 with gr.Row():
                     live_max_duration = gr.Number(label="max_duration_sec", value=30.0)
-                    live_output_fps = gr.Number(label="output_fps", value=20.0)
+                    live_output_fps = gr.Number(label="output_fps (0=uncapped)", value=0.0)
                     live_perf_mode = gr.Dropdown(["quality", "balanced", "fast"], value="balanced", label="perf_mode")
                     live_process_scale = gr.Number(label="process_scale", value=None)
                 with gr.Row():
@@ -717,16 +743,16 @@ def build_gui() -> gr.Blocks:
                     live_seam_motion = gr.Number(label="seam_motion_weight", value=1.5)
 
             with gr.Row():
-                live_start = gr.Button("라이브 시작", variant="primary")
-                live_stop = gr.Button("라이브 중지")
-            live_status = gr.Textbox(label="라이브 상태")
+                live_start = gr.Button("Start Live", variant="primary")
+                live_stop = gr.Button("Stop Live")
+            live_status = gr.Textbox(label="Live Status")
 
             with gr.Row():
                 view_left = gr.Image(label="Left Live", type="numpy")
                 view_right = gr.Image(label="Right Live", type="numpy")
-                view_stitched = gr.Image(label="Stitched Live", type="numpy")
+                view_stitched = gr.Image(label="Stitch Output (disabled)", type="numpy")
             view_report = gr.Code(label="live report.json", language="json")
-            view_video = gr.Video(label="저장된 출력 비디오")
+            view_video = gr.Video(label="Saved Output Video")
 
             live_start.click(
                 fn=LIVE_SESSION.start,
@@ -764,27 +790,27 @@ def build_gui() -> gr.Blocks:
             )
             live_stop.click(fn=LIVE_SESSION.stop, outputs=[live_status])
 
-            timer = gr.Timer(0.2)
+            timer = gr.Timer(0.01)
             timer.tick(
                 fn=_poll_live_view,
                 outputs=[view_left, view_right, view_stitched, live_status, view_report, view_video],
             )
 
-        with gr.Tab("서비스(serve)"):
+        with gr.Tab("(serve)"):
             with gr.Row():
                 serve_host = gr.Textbox(label="host", value="127.0.0.1")
                 serve_port = gr.Number(label="port", value=8080)
                 serve_storage = gr.Textbox(label="storage_dir", value="storage")
             with gr.Row():
-                serve_start = gr.Button("serve 시작", variant="primary")
-                serve_stop = gr.Button("serve 중지")
-                serve_health = gr.Button("health 체크")
-            serve_status = gr.Textbox(label="serve 상태")
+                serve_start = gr.Button("serve ", variant="primary")
+                serve_stop = gr.Button("serve ")
+                serve_health = gr.Button("health check")
+            serve_status = gr.Textbox(label="serve ")
             serve_start.click(fn=SERVE_SESSION.start, inputs=[serve_host, serve_port, serve_storage], outputs=[serve_status])
             serve_stop.click(fn=SERVE_SESSION.stop, outputs=[serve_status])
             serve_health.click(fn=SERVE_SESSION.health, outputs=[serve_status])
 
-            gr.Markdown("### API 테스트")
+            gr.Markdown("### API ")
             with gr.Row():
                 api_host = gr.Textbox(label="API host", value="127.0.0.1")
                 api_port = gr.Number(label="API port", value=8080)
@@ -796,8 +822,8 @@ def build_gui() -> gr.Blocks:
                 language="json",
                 value='{"max_duration_sec": 10, "perf_mode": "balanced", "adaptive_seam": false}',
             )
-            submit_job_btn = gr.Button("video-stitch 잡 제출")
-            api_result = gr.Code(label="API 응답", language="json")
+            submit_job_btn = gr.Button("video-stitch  ")
+            api_result = gr.Code(label="API ", language="json")
             submit_job_btn.click(
                 fn=SERVE_SESSION.submit_video_job,
                 inputs=[api_host, api_port, api_left, api_right, api_options],
@@ -826,6 +852,7 @@ def build_gui() -> gr.Blocks:
 
 def run_gui(host: str = "127.0.0.1", port: int = 7860, share: bool = False) -> None:
     app = build_gui()
+    app.queue(default_concurrency_limit=8)
     app.launch(server_name=host, server_port=port, share=share, inbrowser=True)
 
 
@@ -841,3 +868,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+

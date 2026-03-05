@@ -38,6 +38,15 @@ from stitching.reporting import (
 )
 
 
+def _compose_preview_frame(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+    """Build a quick side-by-side preview before stitched output is ready."""
+    lh, lw = left.shape[:2]
+    rh, rw = right.shape[:2]
+    if (lh, lw) != (rh, rw):
+        right = cv2.resize(right, (lw, lh), interpolation=cv2.INTER_LINEAR)
+    return np.hstack([left, right])
+
+
 @dataclass(slots=True)
 class LiveConfig(StitchConfig):
     """Configuration for live RTSP stitching."""
@@ -307,6 +316,7 @@ def _estimate_h_for_live(
     left_reader: RtspBufferedReader,
     right_reader: RtspBufferedReader,
     config: LiveConfig,
+    preview_hook: Callable[[np.ndarray, np.ndarray, np.ndarray], None] | None = None,
 ) -> tuple[dict, list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], np.ndarray, float | None]:
     """Try multiple synced frame pairs until homography estimation succeeds."""
     last_failure: StitchingFailure | None = None
@@ -319,6 +329,8 @@ def _estimate_h_for_live(
         if not ok or left is None or right is None:
             time.sleep(config.calib_retry_sleep_sec)
             continue
+        if preview_hook is not None:
+            preview_hook(left, right, _compose_preview_frame(left, right))
         try:
             keypoints_left, keypoints_right, matches = _detect_and_match(left, right, config)
             try:
@@ -438,6 +450,16 @@ def stitch_live_rtsp(
                     "timeout waiting initial frames from both RTSP streams",
                 )
 
+            # Push one early preview frame so GUI immediately shows incoming streams.
+            if frame_hook is not None:
+                left_probe_packet = left_reader.pop_latest()
+                right_probe_packet = right_reader.pop_latest()
+                if left_probe_packet is not None and right_probe_packet is not None:
+                    left_probe = _resize_frame(left_probe_packet.frame, config.process_scale)
+                    right_probe = _resize_frame(right_probe_packet.frame, config.process_scale)
+                    right_probe = _resize_to_match(right_probe, left_probe.shape[:2])
+                    frame_hook(left_probe, right_probe, _compose_preview_frame(left_probe, right_probe))
+
         with StageTimer(stage_times, "homography"):
             if status_hook is not None:
                 status_hook("homography")
@@ -445,6 +467,7 @@ def stitch_live_rtsp(
                 left_reader,
                 right_reader,
                 config,
+                preview_hook=frame_hook,
             )
             frame_left = calib["frame_left"]
             frame_right = calib["frame_right"]
