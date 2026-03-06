@@ -26,12 +26,15 @@ from stitching.core import (
     _find_seam_path,
     _prepare_warp_plan,
 )
+from stitching.ffmpeg_reader import FfmpegRtspReader
+from stitching.ffmpeg_runtime import FfmpegRuntimeError
 
 
 @dataclass(slots=True)
 class DesktopConfig:
     left_rtsp: str
     right_rtsp: str
+    input_runtime: str = "opencv"
     rtsp_transport: str = "tcp"
     rtsp_timeout_sec: float = 10.0
     reconnect_cooldown_sec: float = 1.0
@@ -164,6 +167,7 @@ class RtspReader:
                 "buffer_size": int(len(self._buffer)),
                 "buffer_overflow_drops": int(self._buffer_overflow_drops),
                 "stale_drops": int(self._stale_drops),
+                "runtime": "opencv",
             }
 
     def _set_error(self, message: str) -> None:
@@ -231,6 +235,22 @@ class RtspReader:
             self._release()
             if not self._stop_event.is_set():
                 time.sleep(cooldown)
+
+
+def _build_rtsp_reader(*, name: str, url: str, config: DesktopConfig) -> RtspReader | FfmpegRtspReader:
+    runtime = str(config.input_runtime).lower().strip()
+    if runtime in {"ffmpeg", "ffmpeg-cpu", "ffmpeg-cuda"}:
+        ffmpeg_runtime = "ffmpeg-cuda" if runtime == "ffmpeg-cuda" else "ffmpeg-cpu"
+        return FfmpegRtspReader(
+            name=name,
+            url=url,
+            transport=config.rtsp_transport,
+            timeout_sec=float(config.rtsp_timeout_sec),
+            reconnect_cooldown_sec=float(config.reconnect_cooldown_sec),
+            sync_buffer_sec=float(config.sync_buffer_sec),
+            runtime=ffmpeg_runtime,
+        )
+    return RtspReader(name=name, url=url, config=config)
 
 
 def _resize_frame(frame: np.ndarray, scale: float) -> np.ndarray:
@@ -1541,8 +1561,12 @@ def run_desktop(config: DesktopConfig) -> int:
         print("Provide at least one RTSP URL via --left-rtsp or --right-rtsp")
         return 2
 
-    left = RtspReader(name="left", url=left_url, config=config) if left_url else None
-    right = RtspReader(name="right", url=right_url, config=config) if right_url else None
+    try:
+        left = _build_rtsp_reader(name="left", url=left_url, config=config) if left_url else None
+        right = _build_rtsp_reader(name="right", url=right_url, config=config) if right_url else None
+    except FfmpegRuntimeError as exc:
+        print(f"FFmpeg runtime setup failed: {exc}")
+        return 2
     if left is not None:
         left.start()
     if right is not None:
@@ -1754,10 +1778,13 @@ def run_desktop(config: DesktopConfig) -> int:
 
                 log_panel_h = max(320, int(top_row.shape[0] * 0.78))
                 if cached_log_panel is None or (now - last_log_refresh_at) >= 0.25:
+                    left_runtime = str(left_stats.get("runtime", "-"))
+                    right_runtime = str(right_stats.get("runtime", "-"))
                     monitor_lines = [
                         f"status={metrics.get('status', stitch_status)}  frame={int(metrics.get('frame_index', 0))}  dashboard_fps={dashboard_fps:.2f}",
                         f"matches={int(metrics.get('matches', 0))}  inliers={int(metrics.get('inliers', 0))}  stitch_new_fps={stitch_compute_fps:.2f}  panorama_out_fps={panorama_out_fps:.2f}  worker_fps={float(metrics.get('worker_fps', 0.0)):.2f}",
                         f"left_fps={left_stream_fps:.2f}  right_fps={right_stream_fps:.2f}  pair_skew_ms={float(metrics.get('pair_skew_ms_mean', 0.0)):.2f}",
+                        f"input_runtime={str(config.input_runtime)}  left_runtime={left_runtime}  right_runtime={right_runtime}",
                         f"stitched_count={int(metrics.get('stitched_count', 0))}  reused_count={int(metrics.get('reused_count', 0))}  stitch_every_n={int(config.stitch_every_n)}  process_scale={float(config.process_scale):.2f}",
                         f"manual L/R={int(metrics.get('manual_left', 0))}/{int(metrics.get('manual_right', 0))} target={int(metrics.get('manual_target', 0))}  manual_mode={manual_mode}",
                         f"CPU usage: {sys_stats['cpu_percent']:.1f}%  threads={int(config.cpu_threads) if int(config.cpu_threads) > 0 else int(os.cpu_count() or 1)}  GPU usage: {gpu_pct:.1f}%  GPU temp: {gpu_temp:.0f} C",

@@ -158,10 +158,20 @@ def parse_args() -> argparse.Namespace:
     gui_cmd.add_argument("--host", default="127.0.0.1")
     gui_cmd.add_argument("--port", type=int, default=7860)
     gui_cmd.add_argument("--share", action="store_true")
+    ffmpeg_env_cmd = subparsers.add_parser("ffmpeg-env", help="Inspect ffmpeg/ffprobe runtime availability")
+    ffmpeg_env_cmd.add_argument("--rtsp-url", default="", help="Optional RTSP URL to print ffprobe command for")
+    ffmpeg_env_cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
+    ffmpeg_env_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     # Desktop RTSP live stitching preview mode
     desktop_cmd = subparsers.add_parser("desktop", help="Run desktop RTSP live stitching preview")
     desktop_cmd.add_argument("--left-rtsp", default="", help="Left RTSP URL")
     desktop_cmd.add_argument("--right-rtsp", default="", help="Right RTSP URL")
+    desktop_cmd.add_argument(
+        "--input-runtime",
+        choices=["opencv", "ffmpeg", "ffmpeg-cpu", "ffmpeg-cuda"],
+        default="opencv",
+        help="RTSP input runtime. ffmpeg-cuda uses direct ffmpeg subprocess with CUDA decode when possible.",
+    )
     desktop_cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
     desktop_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     desktop_cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
@@ -449,6 +459,58 @@ def main() -> int:
         run_gui(host=args.host, port=args.port, share=bool(args.share))
         return 0
 
+    if args.command == "ffmpeg-env":
+        try:
+            from stitching.ffmpeg_runtime import (
+                FfmpegRuntimeError,
+                build_ffprobe_stream_command,
+                build_nvenc_stream_command,
+                build_rtsp_decode_command,
+                resolve_binaries,
+                NvencEncodeSpec,
+                RtspDecodeSpec,
+            )
+        except ModuleNotFoundError as exc:
+            print(f"Missing dependency while loading ffmpeg runtime helpers: {exc}")
+            return 2
+
+        try:
+            bins = resolve_binaries()
+        except FfmpegRuntimeError as exc:
+            print(str(exc))
+            return 2
+        print(f"ffmpeg={bins.ffmpeg}")
+        print(f"ffprobe={bins.ffprobe or 'NOT_FOUND'}")
+        if args.rtsp_url:
+            decode_cmd = build_rtsp_decode_command(
+                ffmpeg_bin=bins.ffmpeg,
+                spec=RtspDecodeSpec(
+                    url=args.rtsp_url,
+                    transport=args.rtsp_transport,
+                    timeout_sec=float(args.rtsp_timeout_sec),
+                ),
+            )
+            print("decode_cmd=" + " ".join(decode_cmd))
+            if bins.ffprobe:
+                probe_cmd = build_ffprobe_stream_command(
+                    ffprobe_bin=bins.ffprobe,
+                    url=args.rtsp_url,
+                    transport=args.rtsp_transport,
+                    timeout_sec=float(args.rtsp_timeout_sec),
+                )
+                print("probe_cmd=" + " ".join(probe_cmd))
+            sample_nvenc_cmd = build_nvenc_stream_command(
+                ffmpeg_bin=bins.ffmpeg,
+                spec=NvencEncodeSpec(
+                    width=1920,
+                    height=1080,
+                    fps=30.0,
+                    output_url="rtsp://example.invalid/live/panorama",
+                ),
+            )
+            print("sample_nvenc_cmd=" + " ".join(sample_nvenc_cmd))
+        return 0
+
     if args.command == "live":
         _run_live_from_args(args)
         return 0
@@ -464,6 +526,7 @@ def main() -> int:
         cfg = DesktopConfig(
             left_rtsp=args.left_rtsp,
             right_rtsp=args.right_rtsp,
+            input_runtime=args.input_runtime,
             rtsp_transport=args.rtsp_transport,
             rtsp_timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
             reconnect_cooldown_sec=max(0.2, float(args.reconnect_cooldown_sec)),
