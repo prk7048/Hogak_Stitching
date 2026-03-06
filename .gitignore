@@ -16,6 +16,7 @@ venv/
 .third_party/
 _tags.txt
 _cv2_check.py
+*-arch=x64 -host_arch=x64 && set PATH
 
 # OS/editor
 .DS_Store
