@@ -300,7 +300,9 @@ class FfmpegRtspReader:
                     self._set_error(detail)
                     break
                 try:
-                    frame = np.frombuffer(raw, dtype=np.uint8).reshape(self._height, self._width, 3).copy()
+                    # Keep the array backed by the bytes buffer to avoid an extra
+                    # 1080p frame copy on every decode step.
+                    frame = np.frombuffer(raw, dtype=np.uint8).reshape(self._height, self._width, 3)
                 except Exception as exc:
                     self._set_error(f"rawvideo reshape failed: {exc}")
                     break

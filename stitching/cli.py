@@ -88,6 +88,21 @@ def parse_args() -> argparse.Namespace:
     live_cmd.add_argument("--left-rtsp", required=True, help="Left RTSP URL")
     live_cmd.add_argument("--right-rtsp", required=True, help="Right RTSP URL")
     live_cmd.add_argument("--out", default="output/videos/live_stitched.mp4")
+    live_cmd.add_argument(
+        "--output-runtime",
+        choices=["opencv", "ffmpeg"],
+        default="opencv",
+        help="Output writer runtime. ffmpeg enables direct FFmpeg/NVENC writer.",
+    )
+    live_cmd.add_argument(
+        "--output-target",
+        default="",
+        help="Optional override output target. May be a file path or stream URL when using ffmpeg output runtime.",
+    )
+    live_cmd.add_argument("--output-codec", default="h264_nvenc", help="FFmpeg output codec (e.g. h264_nvenc, libx264)")
+    live_cmd.add_argument("--output-bitrate", default="12M", help="FFmpeg output bitrate")
+    live_cmd.add_argument("--output-preset", default="p4", help="FFmpeg output preset")
+    live_cmd.add_argument("--output-muxer", default="", help="Optional FFmpeg output muxer override (auto if empty)")
     live_cmd.add_argument("--report", default="output/videos/live_report.json")
     live_cmd.add_argument("--debug-dir", default="output/debug/live")
     live_cmd.add_argument(
@@ -359,6 +374,12 @@ def _run_live_from_args(args: argparse.Namespace) -> None:
         process_scale=scale,
         max_duration_sec=args.max_duration_sec,
         output_fps=args.output_fps,
+        output_runtime=args.output_runtime,
+        output_target_override=str(args.output_target or ""),
+        output_codec=str(args.output_codec),
+        output_bitrate=str(args.output_bitrate),
+        output_preset=str(args.output_preset),
+        output_muxer=str(args.output_muxer),
         calib_max_attempts=args.calib_max_attempts,
         max_read_failures=args.max_read_failures,
         reconnect_cooldown_sec=args.reconnect_cooldown_sec,

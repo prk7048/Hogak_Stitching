@@ -28,6 +28,8 @@ from stitching.core import (
     _prepare_warp_plan,
 )
 from stitching.errors import ErrorCode
+from stitching.ffmpeg_runtime import FfmpegRuntimeError, RawVideoOutputSpec
+from stitching.ffmpeg_writer import FfmpegRawVideoWriter
 from stitching.reporting import (
     StageTimer,
     base_report,
@@ -47,6 +49,57 @@ def _compose_preview_frame(left: np.ndarray, right: np.ndarray) -> np.ndarray:
     return np.hstack([left, right])
 
 
+class _OpenCvFrameWriter:
+    def __init__(self, *, output_target: str, fps: float, width: int, height: int) -> None:
+        self._writer = cv2.VideoWriter(
+            output_target,
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (width, height),
+        )
+
+    def is_opened(self) -> bool:
+        return bool(self._writer.isOpened())
+
+    def write(self, frame: np.ndarray) -> None:
+        self._writer.write(frame)
+
+    def release(self) -> None:
+        self._writer.release()
+
+
+def _open_output_writer(
+    *,
+    output_target: str,
+    width: int,
+    height: int,
+    fps: float,
+    config: "LiveConfig",
+) -> _OpenCvFrameWriter | FfmpegRawVideoWriter:
+    runtime = str(config.output_runtime).lower().strip()
+    if runtime == "ffmpeg":
+        writer = FfmpegRawVideoWriter(
+            spec=RawVideoOutputSpec(
+                width=width,
+                height=height,
+                fps=fps,
+                output_target=output_target,
+                codec=str(config.output_codec),
+                bitrate=str(config.output_bitrate),
+                preset=str(config.output_preset),
+                muxer=(str(config.output_muxer).strip() or None),
+            )
+        )
+        writer.open()
+        return writer
+    return _OpenCvFrameWriter(
+        output_target=output_target,
+        fps=fps,
+        width=width,
+        height=height,
+    )
+
+
 @dataclass(slots=True)
 class LiveConfig(StitchConfig):
     """Configuration for live RTSP stitching."""
@@ -55,6 +108,12 @@ class LiveConfig(StitchConfig):
     max_duration_sec: float = 0.0
     output_fps: float = 20.0
     process_scale: float = 1.0
+    output_runtime: str = "opencv"
+    output_target_override: str = ""
+    output_codec: str = "h264_nvenc"
+    output_bitrate: str = "12M"
+    output_preset: str = "p4"
+    output_muxer: str = ""
 
     # Initial calibration retries
     calib_max_attempts: int = 180
@@ -402,6 +461,10 @@ def stitch_live_rtsp(
     report["metrics"]["mode"] = "live_rtsp"
     report["metrics"]["process_scale"] = float(config.process_scale)
     report["metrics"]["output_fps"] = float(config.output_fps)
+    report["metrics"]["output_runtime"] = str(config.output_runtime)
+    report["metrics"]["output_codec"] = str(config.output_codec)
+    report["metrics"]["output_bitrate"] = str(config.output_bitrate)
+    report["metrics"]["output_muxer"] = str(config.output_muxer or "")
     report["metrics"]["adaptive_seam_enabled"] = bool(config.adaptive_seam)
     report["metrics"]["seam_update_interval"] = int(max(1, config.seam_update_interval))
     report["metrics"]["seam_motion_weight"] = float(max(0.0, config.seam_motion_weight))
@@ -417,7 +480,7 @@ def stitch_live_rtsp(
     report_path.parent.mkdir(parents=True, exist_ok=True)
     debug_dir.mkdir(parents=True, exist_ok=True)
 
-    writer: cv2.VideoWriter | None = None
+    writer: _OpenCvFrameWriter | FfmpegRawVideoWriter | None = None
     left_reader: RtspBufferedReader | None = None
     right_reader: RtspBufferedReader | None = None
 
@@ -549,14 +612,20 @@ def stitch_live_rtsp(
             target_output_frames = max(1, int(math.ceil(float(config.max_duration_sec) * out_fps)))
         report["metrics"]["target_output_frames"] = target_output_frames
 
-        writer = cv2.VideoWriter(
-            str(output_path),
-            cv2.VideoWriter_fourcc(*"mp4v"),
-            out_fps,
-            (plan.width, plan.height),
-        )
-        if not writer.isOpened():
-            raise StitchingFailure(ErrorCode.ENCODE_FAIL, f"cannot open encoder: {output_path}")
+        output_target = str(config.output_target_override).strip() or str(output_path)
+        report["metrics"]["output_target"] = output_target
+        try:
+            writer = _open_output_writer(
+                output_target=output_target,
+                width=plan.width,
+                height=plan.height,
+                fps=out_fps,
+                config=config,
+            )
+        except FfmpegRuntimeError as exc:
+            raise StitchingFailure(ErrorCode.ENCODE_FAIL, str(exc)) from exc
+        if not writer.is_opened():
+            raise StitchingFailure(ErrorCode.ENCODE_FAIL, f"cannot open encoder: {output_target}")
 
         loop_started_at = time.perf_counter()
         prev_canvas_left: np.ndarray | None = None

@@ -48,6 +48,22 @@ class NvencEncodeSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class RawVideoOutputSpec:
+    width: int
+    height: int
+    fps: float
+    output_target: str
+    pix_fmt: str = "bgr24"
+    codec: str = "h264_nvenc"
+    bitrate: str = "12M"
+    preset: str = "p4"
+    tune: str = "ll"
+    rc: str = "cbr"
+    muxer: str | None = None
+    overwrite: bool = True
+
+
+@dataclass(frozen=True, slots=True)
 class ProbeStreamInfo:
     codec_name: str
     codec_type: str
@@ -76,6 +92,12 @@ def _candidate_binary_paths(binary_name: str) -> list[str]:
         Path.home() / "ffmpeg" / "bin",
         Path.home() / "scoop" / "apps" / "ffmpeg" / "current" / "bin",
     ]
+    project_root = Path(__file__).resolve().parents[1]
+    project_local_roots = [
+        project_root / ".third_party" / "ffmpeg" / "current" / "bin",
+        project_root / ".third_party" / "ffmpeg" / "bin",
+    ]
+    common_roots.extend(project_local_roots)
     for root in common_roots:
         candidates.append(str(root / f"{binary_name}.exe"))
 
@@ -122,7 +144,7 @@ def build_ffprobe_stream_command(
         "error",
         "-rtsp_transport",
         transport,
-        "-stimeout",
+        "-timeout",
         str(timeout_us),
         "-select_streams",
         "v:0",
@@ -151,7 +173,7 @@ def build_rtsp_decode_command(
         "low_delay",
         "-rtsp_transport",
         spec.transport,
-        "-stimeout",
+        "-timeout",
         str(timeout_us),
     ]
     if spec.use_hwaccel:
@@ -223,6 +245,76 @@ def build_nvenc_stream_command(
         spec.muxer,
         spec.output_url,
     ]
+
+
+def infer_output_muxer(output_target: str) -> str | None:
+    target = str(output_target or "").strip().lower()
+    if not target:
+        return None
+    if target.startswith("rtsp://"):
+        return "rtsp"
+    if target.startswith("rtmp://"):
+        return "flv"
+    if target.startswith("srt://"):
+        return "mpegts"
+    return None
+
+
+def build_rawvideo_output_command(
+    *,
+    ffmpeg_bin: str,
+    spec: RawVideoOutputSpec,
+) -> list[str]:
+    if not spec.output_target:
+        raise FfmpegRuntimeError("output_target is required for FFmpeg rawvideo output")
+    size = f"{int(spec.width)}x{int(spec.height)}"
+    fps = max(1.0, float(spec.fps))
+    muxer = spec.muxer or infer_output_muxer(spec.output_target)
+    cmd = [
+        ffmpeg_bin,
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+    ]
+    if spec.overwrite:
+        cmd.append("-y")
+    cmd += [
+        "-f",
+        "rawvideo",
+        "-pix_fmt",
+        spec.pix_fmt,
+        "-s",
+        size,
+        "-r",
+        f"{fps:.3f}",
+        "-i",
+        "-",
+        "-an",
+        "-c:v",
+        spec.codec,
+    ]
+    if spec.codec.endswith("_nvenc"):
+        cmd += [
+            "-preset",
+            spec.preset,
+            "-tune",
+            spec.tune,
+            "-rc",
+            spec.rc,
+        ]
+    if spec.bitrate:
+        cmd += [
+            "-b:v",
+            spec.bitrate,
+            "-maxrate",
+            spec.bitrate,
+            "-bufsize",
+            spec.bitrate,
+        ]
+    if muxer:
+        cmd += ["-f", muxer]
+    cmd += [spec.output_target]
+    return cmd
 
 
 def summarize_probe_json(raw_text: str) -> dict[str, Any]:

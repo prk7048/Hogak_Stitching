@@ -87,6 +87,18 @@ Replace local display or file-only write path with:
 
 This gives us the first practical end-to-end streaming pipeline.
 
+Status:
+
+- Initial implementation added in this branch:
+  - `stitching/ffmpeg_writer.py`: rawvideo stdin writer for FFmpeg output
+  - `stitching/live_stitching.py`: `output_runtime=opencv|ffmpeg` integration
+  - `stitching/cli.py`: `live` mode now exposes FFmpeg output runtime options
+
+Current scope:
+
+- local file output via FFmpeg writer
+- URL targets are supported by command generation, but not yet validated end-to-end in this environment
+
 ### Phase 4: Evaluate throughput again
 
 If throughput is still below target:
