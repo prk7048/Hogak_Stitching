@@ -168,19 +168,26 @@ def parse_args() -> argparse.Namespace:
     desktop_cmd.add_argument("--max-display-width", type=int, default=2880)
     desktop_cmd.add_argument("--process-scale", type=float, default=1.0, help="Preview processing scale (e.g. 0.5)")
     desktop_cmd.add_argument("--min-matches", type=int, default=20)
-    desktop_cmd.add_argument("--min-inliers", type=int, default=10)
-    desktop_cmd.add_argument("--ratio-test", type=float, default=0.75)
-    desktop_cmd.add_argument("--ransac-thresh", type=float, default=5.0)
+    desktop_cmd.add_argument("--min-inliers", type=int, default=8)
+    desktop_cmd.add_argument("--ratio-test", type=float, default=0.82)
+    desktop_cmd.add_argument("--ransac-thresh", type=float, default=6.0)
     desktop_cmd.add_argument("--stitch-every-n", type=int, default=3, help="Run stitching every N frames")
-    desktop_cmd.add_argument("--max-features", type=int, default=1200, help="ORB feature count for stitching")
+    desktop_cmd.add_argument("--max-features", type=int, default=2800, help="ORB feature count for stitching")
     desktop_cmd.add_argument(
         "--stitch-output-scale",
         type=float,
         default=0.6,
         help="Scale factor for stitched panel output",
     )
-    desktop_cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="off")
+    desktop_cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="on")
     desktop_cmd.add_argument("--gpu-device", type=int, default=0)
+    desktop_cmd.add_argument("--manual-points", type=int, default=4, help="Number of manual point pairs for first calibration")
+    desktop_cmd.add_argument(
+        "--inlier-preview-interval-sec",
+        type=float,
+        default=5.0,
+        help="Seconds between inlier preview refreshes",
+    )
     return parser.parse_args()
 
 
@@ -469,6 +476,8 @@ def main() -> int:
             stitch_output_scale=max(0.1, float(args.stitch_output_scale)),
             gpu_mode=args.gpu_mode,
             gpu_device=max(0, int(args.gpu_device)),
+            manual_points=max(4, int(args.manual_points)),
+            inlier_preview_interval_sec=max(1.0, float(args.inlier_preview_interval_sec)),
         )
         return int(run_desktop(cfg))
 
