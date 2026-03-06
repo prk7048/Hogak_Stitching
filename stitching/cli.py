@@ -165,29 +165,31 @@ def parse_args() -> argparse.Namespace:
     desktop_cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
     desktop_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     desktop_cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
+    desktop_cmd.add_argument("--sync-buffer-sec", type=float, default=0.6)
+    desktop_cmd.add_argument("--sync-match-max-delta-ms", type=float, default=35.0)
+    desktop_cmd.add_argument("--sync-manual-offset-ms", type=float, default=0.0)
+    desktop_cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest"], default="none")
     desktop_cmd.add_argument("--max-display-width", type=int, default=2880)
     desktop_cmd.add_argument("--process-scale", type=float, default=1.0, help="Preview processing scale (e.g. 0.5)")
     desktop_cmd.add_argument("--min-matches", type=int, default=20)
     desktop_cmd.add_argument("--min-inliers", type=int, default=8)
     desktop_cmd.add_argument("--ratio-test", type=float, default=0.82)
     desktop_cmd.add_argument("--ransac-thresh", type=float, default=6.0)
-    desktop_cmd.add_argument("--stitch-every-n", type=int, default=3, help="Run stitching every N frames")
+    desktop_cmd.add_argument("--stitch-every-n", type=int, default=1, help="Run stitching every N frames")
     desktop_cmd.add_argument("--max-features", type=int, default=2800, help="ORB feature count for stitching")
     desktop_cmd.add_argument(
         "--stitch-output-scale",
         type=float,
-        default=0.6,
+        default=1.0,
         help="Scale factor for stitched panel output",
     )
     desktop_cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="on")
     desktop_cmd.add_argument("--gpu-device", type=int, default=0)
+    desktop_cmd.add_argument("--cpu-threads", type=int, default=0, help="0 uses all logical CPU cores")
     desktop_cmd.add_argument("--manual-points", type=int, default=4, help="Number of manual point pairs for first calibration")
-    desktop_cmd.add_argument(
-        "--inlier-preview-interval-sec",
-        type=float,
-        default=5.0,
-        help="Seconds between inlier preview refreshes",
-    )
+    desktop_cmd.add_argument("--headless-benchmark", action="store_true", help="Run without windows and print pure stitching benchmark stats")
+    desktop_cmd.add_argument("--benchmark-log-interval-sec", type=float, default=1.0, help="Headless benchmark log interval")
+    desktop_cmd.add_argument("--benchmark-duration-sec", type=float, default=0.0, help="Headless benchmark duration (0 runs until Ctrl+C)")
     return parser.parse_args()
 
 
@@ -465,6 +467,10 @@ def main() -> int:
             rtsp_transport=args.rtsp_transport,
             rtsp_timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
             reconnect_cooldown_sec=max(0.2, float(args.reconnect_cooldown_sec)),
+            sync_buffer_sec=max(0.2, float(args.sync_buffer_sec)),
+            sync_match_max_delta_ms=max(1.0, float(args.sync_match_max_delta_ms)),
+            sync_manual_offset_ms=float(args.sync_manual_offset_ms),
+            sync_pair_mode=args.sync_pair_mode,
             max_display_width=max(640, int(args.max_display_width)),
             process_scale=max(0.1, float(args.process_scale)),
             min_matches=max(8, int(args.min_matches)),
@@ -476,9 +482,16 @@ def main() -> int:
             stitch_output_scale=max(0.1, float(args.stitch_output_scale)),
             gpu_mode=args.gpu_mode,
             gpu_device=max(0, int(args.gpu_device)),
+            cpu_threads=max(0, int(args.cpu_threads)),
             manual_points=max(4, int(args.manual_points)),
-            inlier_preview_interval_sec=max(1.0, float(args.inlier_preview_interval_sec)),
+            headless_benchmark=bool(args.headless_benchmark),
+            benchmark_log_interval_sec=max(0.1, float(args.benchmark_log_interval_sec)),
+            benchmark_duration_sec=max(0.0, float(args.benchmark_duration_sec)),
         )
         return int(run_desktop(cfg))
 
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

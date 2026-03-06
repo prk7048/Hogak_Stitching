@@ -178,19 +178,21 @@ def _blend_seam_path(
 
     if np.any(overlap):
         transition = max(2, int(transition_px))
-        h, w = overlap.shape
-        x_coords = np.arange(w, dtype=np.float32)
-        for y in range(h):
-            row_overlap = overlap[y]
-            if not np.any(row_overlap):
-                continue
-            seam_x = float(seam_path[y])
-            right_w = np.clip((x_coords - (seam_x - transition / 2.0)) / transition, 0.0, 1.0)
-            left_w = 1.0 - right_w
-            blend_row = (
-                canvas_left[y].astype(np.float32) * left_w[:, None]
-                + warped_right[y].astype(np.float32) * right_w[:, None]
-            )
-            result[y, row_overlap] = blend_row[row_overlap]
+        ys, xs = np.where(overlap)
+        y0, y1 = int(ys.min()), int(ys.max()) + 1
+        x0, x1 = int(xs.min()), int(xs.max()) + 1
+
+        overlap_roi = overlap[y0:y1, x0:x1]
+        left_roi = canvas_left[y0:y1, x0:x1].astype(np.float32)
+        right_roi = warped_right[y0:y1, x0:x1].astype(np.float32)
+
+        x_coords = np.arange(x0, x1, dtype=np.float32)[None, :]
+        seam_roi = np.asarray(seam_path[y0:y1], dtype=np.float32)[:, None]
+        right_w = np.clip((x_coords - (seam_roi - transition / 2.0)) / transition, 0.0, 1.0)
+        left_w = 1.0 - right_w
+        blend_roi = left_roi * left_w[..., None] + right_roi * right_w[..., None]
+
+        result_roi = result[y0:y1, x0:x1]
+        result_roi[overlap_roi] = blend_roi[overlap_roi]
 
     return np.clip(result, 0, 255).astype(np.uint8)

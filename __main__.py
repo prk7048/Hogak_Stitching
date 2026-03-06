@@ -1,4 +1,6 @@
-from stitching.cli import main
+from __future__ import annotations
+
+from stitching.__main__ import main
 
 
 if __name__ == "__main__":
