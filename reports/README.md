@@ -2,7 +2,7 @@
 
 이 디렉터리는 현재 프로젝트의 의사결정, 알고리즘 정책, 개발 진행 기록을 정리한 문서 모음이다.
 
-현재 기준으로 **우선 읽어야 할 문서**는 아래 3개다.
+현재 기준으로 **우선 읽어야 할 문서**는 아래 4개다.
 
 ## 1. [01_런타임_구조_전환.md](c:\Users\Pixellot\Hogak_Stitching\reports\01_런타임_구조_전환.md)
 
@@ -36,6 +36,18 @@
 
 대상:
 - 지금까지의 진행 상황을 빠르게 훑고 싶은 경우
+
+## 4. [04_native_runtime_skeleton.md](c:\Users\Pixellot\Hogak_Stitching\reports\04_native_runtime_skeleton.md)
+
+내용:
+- `native_runtime/` 최소 골격 추가 이유
+- CMake / Presets / runtime skeleton 구조
+- RTSP 입력과 pair/sync 메트릭을 native runtime으로 옮긴 1차 결과
+- Python launcher/client를 왜 같이 추가했는지
+- 현재 구현 범위와 다음 단계
+
+대상:
+- 네이티브 런타임 착수 상태와 현재 코드 경계를 확인하려는 경우
 
 ## 보관 문서
 
