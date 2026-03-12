@@ -116,9 +116,33 @@ raw event가 필요할 때만 `--verbose-events`를 붙인다.
 
 ### homography 생성
 
+가장 간단한 실행:
+
+```cmd
+scripts\run_native_calibrate.cmd
+```
+
+CLI도 기본 project camera 주소와 `output/native/runtime_homography.json`을 사용하므로 바로 실행 가능하다.
+
+```cmd
+.venv312\Scripts\python.exe -m stitching.cli native-calibrate
+```
+
 ```cmd
 .venv312\Scripts\python.exe -m stitching.cli native-calibrate --left-rtsp "rtsp://..." --right-rtsp "rtsp://..." --out "output/native/runtime_homography.json"
 ```
+
+기본 calibration mode는 `assisted`다.
+
+- 좌/우 대표 프레임을 한 OpenCV 창에서 보여준다
+- 사용자가 같은 지점을 원하는 만큼 찍는다
+- `COMPLETE`를 누르면 즉시 homography를 계산한다
+- 점을 하나도 안 찍으면 자동 보정으로 fallback한다
+- 점을 하나라도 찍으면 그 점들을 seed로 유지한 채 추가 매칭을 보강한다
+- seed 1개는 translation, 2~3개는 affine, 4개 이상은 homography 가이드로 사용한다
+- `manual`도 direct homography solve가 아니라 seed-guided matching 경로로 처리한다
+
+필요하면 `--calibration-mode assisted|manual|auto`, `--match-backend auto|classic|deep`로 명시할 수 있다.
 
 ## 현재 남은 핵심 작업
 

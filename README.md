@@ -36,11 +36,43 @@ cmake --build --preset build-windows-release
 
 ### 고정 homography 생성
 
+`native-calibrate`는 이제 기본적으로 `assisted` 모드다.
+
+- 좌/우 대표 프레임이 한 창에 뜬다
+- 같은 지점을 좌/우에 원하는 만큼 클릭한다
+- `COMPLETE`를 누르면 바로 계산한다
+- 점을 하나도 안 찍고 끝내면 기존 자동 보정으로 진행한다
+- 점을 하나라도 찍으면 그 점들을 절대 버리지 않고 seed로 유지한다
+- seed가 1개면 translation, 2~3개면 affine, 4개 이상이면 homography 가이드로 추가 매칭을 보강한다
+- `manual`과 `assisted` 모두 수동점을 최종 매칭점으로 직접 쓰지 않고, seed guidance로만 사용한다
+- `--match-backend auto|classic|deep`로 backend를 고를 수 있다. 현재 `auto`는 deep backend가 없으면 classic으로 fallback한다
+
+가장 간단한 실행:
+
+```cmd
+scripts\run_native_calibrate.cmd
+```
+
+또는 CLI도 이제 기본 카메라 주소와 기본 출력 경로를 사용하므로 이렇게 바로 실행할 수 있다.
+
+```powershell
+python -m stitching native-calibrate
+```
+
 ```powershell
 python -m stitching native-calibrate `
   --left-rtsp 'rtsp://...' `
   --right-rtsp 'rtsp://...' `
   --out .\output\native\runtime_homography.json
+```
+
+필요하면 아래처럼 모드를 명시할 수 있다.
+
+```powershell
+python -m stitching native-calibrate `
+  --left-rtsp 'rtsp://...' `
+  --right-rtsp 'rtsp://...' `
+  --calibration-mode assisted
 ```
 
 ### 기본 실행

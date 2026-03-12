@@ -5,13 +5,19 @@ from pathlib import Path
 from typing import Tuple
 
 from stitching.perf_profiles import resolve_perf_profile
+from stitching.project_defaults import (
+    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+    DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+    default_left_rtsp,
+    default_right_rtsp,
+)
 
 
 def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
     """ì˜ìƒ ìŠ¤í‹°ì¹­ ê³µí†µ ì˜µì…˜."""
 
-    cmd.add_argument("--min-matches", type=int, default=80)
-    cmd.add_argument("--min-inliers", type=int, default=30)
+    cmd.add_argument("--min-matches", type=int, default=40)
+    cmd.add_argument("--min-inliers", type=int, default=20)
     cmd.add_argument("--ratio-test", type=float, default=0.75)
     cmd.add_argument("--ransac-thresh", type=float, default=5.0)
     cmd.add_argument("--calib-start-sec", type=float, default=0.0)
@@ -63,18 +69,26 @@ def _add_native_calibration_args(
     include_stream_args: bool = True,
 ) -> None:
     if include_stream_args:
-        cmd.add_argument("--left-rtsp", required=True, help="Left RTSP URL")
-        cmd.add_argument("--right-rtsp", required=True, help="Right RTSP URL")
+        cmd.add_argument(
+            "--left-rtsp",
+            default=default_left_rtsp(),
+            help="Left RTSP URL (defaults to project camera or HOGAK_LEFT_RTSP)",
+        )
+        cmd.add_argument(
+            "--right-rtsp",
+            default=default_right_rtsp(),
+            help="Right RTSP URL (defaults to project camera or HOGAK_RIGHT_RTSP)",
+        )
         cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
         cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     cmd.add_argument(
         "--out",
-        default="output/native/runtime_homography.json",
+        default=DEFAULT_NATIVE_HOMOGRAPHY_PATH,
         help="Output homography JSON path",
     )
     cmd.add_argument(
         "--debug-dir",
-        default="output/native/calibration",
+        default=DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
         help="Calibration debug image directory",
     )
     cmd.add_argument(
@@ -84,8 +98,42 @@ def _add_native_calibration_args(
         help="Frames to read before selecting representative images",
     )
     cmd.add_argument("--process-scale", type=float, default=1.0, help="Calibration frame scale")
-    cmd.add_argument("--min-matches", type=int, default=80)
-    cmd.add_argument("--min-inliers", type=int, default=30)
+    cmd.add_argument(
+        "--calibration-mode",
+        choices=["assisted", "manual", "auto"],
+        default="assisted",
+        help="assisted(default): click any number of matching points, then auto-boost around them",
+    )
+    cmd.add_argument(
+        "--assisted-reproj-threshold",
+        type=float,
+        default=12.0,
+        help="Max reprojection error in pixels for seed-guided auto match reinforcement",
+    )
+    cmd.add_argument(
+        "--assisted-max-auto-matches",
+        type=int,
+        default=600,
+        help="Max number of auto-reinforced matches kept in assisted mode",
+    )
+    cmd.add_argument(
+        "--match-backend",
+        choices=["auto", "classic", "deep"],
+        default="auto",
+        help="Match backend for auto/assisted reinforcement. auto falls back to classic if deep is unavailable.",
+    )
+    cmd.add_argument(
+        "--launch-runtime",
+        action="store_true",
+        help="Launch native runtime immediately after calibration succeeds",
+    )
+    cmd.add_argument(
+        "--runtime-script",
+        default="scripts/run_native_runtime.cmd",
+        help="Script launched after successful calibration when --launch-runtime is set",
+    )
+    cmd.add_argument("--min-matches", type=int, default=40)
+    cmd.add_argument("--min-inliers", type=int, default=20)
     cmd.add_argument("--ratio-test", type=float, default=0.75)
     cmd.add_argument("--ransac-thresh", type=float, default=5.0)
     cmd.add_argument("--max-features", type=int, default=4000)
