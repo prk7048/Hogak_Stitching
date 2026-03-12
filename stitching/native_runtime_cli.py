@@ -265,6 +265,8 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--output-bitrate", default="12M")
     cmd.add_argument("--output-preset", default="p4")
     cmd.add_argument("--output-muxer", default="")
+    cmd.add_argument("--output-width", type=int, default=0)
+    cmd.add_argument("--output-height", type=int, default=0)
     cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest"], default="none")
     cmd.add_argument("--sync-match-max-delta-ms", type=float, default=35.0)
     cmd.add_argument("--sync-manual-offset-ms", type=float, default=0.0)
@@ -305,6 +307,18 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     pair_skew_ms_mean = payload.get("pair_skew_ms_mean")
     if isinstance(pair_skew_ms_mean, (int, float)):
         parts.append(f"pair_skew_ms={float(pair_skew_ms_mean):.2f}")
+    left_age_ms = payload.get("left_age_ms")
+    right_age_ms = payload.get("right_age_ms")
+    if isinstance(left_age_ms, (int, float)) and isinstance(right_age_ms, (int, float)):
+        parts.append(f"input_age_ms=({float(left_age_ms):.0f},{float(right_age_ms):.0f})")
+    left_motion = payload.get("left_motion_mean")
+    right_motion = payload.get("right_motion_mean")
+    if isinstance(left_motion, (int, float)) and isinstance(right_motion, (int, float)):
+        parts.append(f"input_motion=({float(left_motion):.2f},{float(right_motion):.2f})")
+    if bool(payload.get("left_content_frozen")) or bool(payload.get("right_content_frozen")):
+        parts.append(
+            f"frozen=({bool(payload.get('left_content_frozen'))},{bool(payload.get('right_content_frozen'))})"
+        )
 
     parts.append(f"written={int(payload.get('output_frames_written') or 0)}")
 
@@ -334,6 +348,8 @@ def _status_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
         payload.get("output_last_error"),
         payload.get("left_last_error"),
         payload.get("right_last_error"),
+        payload.get("left_content_frozen"),
+        payload.get("right_content_frozen"),
         payload.get("gpu_errors"),
     )
 
@@ -392,10 +408,18 @@ def _render_dashboard(
             f"input  left_fps={float(payload.get('left_fps') or 0.0):6.2f}  "
             f"right_fps={float(payload.get('right_fps') or 0.0):6.2f}  "
             f"pair_skew_ms={float(payload.get('pair_skew_ms_mean') or 0.0):7.2f}  "
-            f"buffered_output={int(payload.get('output_frames_written') or 0)}"
+            f"left_age_ms={float(payload.get('left_age_ms') or 0.0):7.0f}  "
+            f"right_age_ms={float(payload.get('right_age_ms') or 0.0):7.0f}"
         ),
         (
-            f"stitch stitch_fps={float(payload.get('stitch_fps') or 0.0):6.2f}  "
+            f"motion left={float(payload.get('left_motion_mean') or 0.0):6.2f}  "
+            f"right={float(payload.get('right_motion_mean') or 0.0):6.2f}  "
+            f"stitched={float(payload.get('stitched_motion_mean') or 0.0):6.2f}  "
+            f"frozen=({_format_flag(bool(payload.get('left_content_frozen')))},"
+            f"{_format_flag(bool(payload.get('right_content_frozen')))})"
+        ),
+        (
+            f"stitch internal_fps={float(payload.get('stitch_fps') or 0.0):6.2f}  "
             f"worker_fps={float(payload.get('worker_fps') or 0.0):6.2f}  "
             f"output_fps={float(payload.get('output_written_fps') or 0.0):6.2f}  "
             f"gpu_warp={int(payload.get('gpu_warp_count') or 0)}  "
@@ -405,7 +429,8 @@ def _render_dashboard(
         (
             f"output active={_format_flag(bool(payload.get('output_active')))}  "
             f"size={output_size}  codec={codec}  "
-            f"dropped={int(payload.get('output_frames_dropped') or 0)}"
+            f"dropped={int(payload.get('output_frames_dropped') or 0)}  "
+            f"written={int(payload.get('output_frames_written') or 0)}"
         ),
         (
             f"luma   stitched={float(payload.get('stitched_mean_luma') or 0.0):6.2f}  "
@@ -416,7 +441,9 @@ def _render_dashboard(
         (
             f"errors gpu_errors={int(payload.get('gpu_errors') or 0)}  "
             f"left_stale={int(payload.get('left_stale_drops') or 0)}  "
-            f"right_stale={int(payload.get('right_stale_drops') or 0)}"
+            f"right_stale={int(payload.get('right_stale_drops') or 0)}  "
+            f"freeze_restarts=({int(payload.get('left_freeze_restarts') or 0)},"
+            f"{int(payload.get('right_freeze_restarts') or 0)})"
         ),
         (
             f"system cpu_total={cpu_percent:6.2f}%  "
@@ -506,6 +533,8 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         output_bitrate=str(args.output_bitrate),
         output_preset=str(args.output_preset),
         output_muxer=str(args.output_muxer),
+        output_width=max(0, int(args.output_width)),
+        output_height=max(0, int(args.output_height)),
         sync_pair_mode=str(args.sync_pair_mode),
         sync_match_max_delta_ms=max(1.0, float(args.sync_match_max_delta_ms)),
         sync_manual_offset_ms=float(args.sync_manual_offset_ms),

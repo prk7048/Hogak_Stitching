@@ -4,6 +4,10 @@
 #include <iostream>
 #include <thread>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 #include "control/control_server.h"
 #include "engine/engine_config.h"
 #include "engine/stitch_engine.h"
@@ -48,7 +52,7 @@ bool has_flag(int argc, char** argv, const char* key) {
 
 void print_help() {
     std::cout
-        << "stitch_runtime (skeleton)\n"
+        << "stitch_runtime\n"
         << "  --help             Show help\n"
         << "  --emit-hello       Emit hello event on startup\n"
         << "  --once             Emit startup events and exit\n"
@@ -61,7 +65,39 @@ void print_help() {
         << "  --width N          Input width (default 1920)\n"
         << "  --height N         Input height (default 1080)\n"
         << "  --transport M      RTSP transport (default tcp)\n"
-        << "  --video-codec C    h264 or hevc (default h264)\n";
+        << "  --video-codec C    h264 or hevc (default h264)\n"
+        << "  --output-runtime M none or ffmpeg\n"
+        << "  --output-target U  Encoded output target (udp/rtsp/rtmp/file)\n"
+        << "  --output-codec C   Output codec (default h264_nvenc)\n"
+        << "  --output-bitrate B Output bitrate (default 12M)\n"
+        << "  --output-preset P  Output preset (default p4)\n"
+        << "  --output-muxer M   Optional explicit muxer\n"
+        << "  --output-width N   Force encoded output width\n"
+        << "  --output-height N  Force encoded output height\n"
+        << "  --sync-pair-mode M none/latest/oldest\n"
+        << "  --sync-match-max-delta-ms N  Pairing skew threshold\n"
+        << "  --sync-manual-offset-ms N    Manual right-stream offset\n"
+        << "  --stitch-output-scale N      Runtime stitch/output scale\n"
+        << "  --stitch-every-n N           Stitch every N selected pairs\n"
+        << "  --gpu-mode M      off/auto/on\n"
+        << "  --gpu-device N    CUDA device index\n"
+        << "  --headless-benchmark  Enable benchmark mode metadata\n";
+}
+
+bool has_pending_stdin_data() {
+#ifdef _WIN32
+    const HANDLE stdin_handle = GetStdHandle(STD_INPUT_HANDLE);
+    if (stdin_handle == nullptr || stdin_handle == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    DWORD available = 0;
+    if (PeekNamedPipe(stdin_handle, nullptr, 0, nullptr, &available, nullptr)) {
+        return available > 0;
+    }
+    return false;
+#else
+    return std::cin.rdbuf()->in_avail() > 0;
+#endif
 }
 
 }  // namespace
@@ -97,6 +133,22 @@ int main(int argc, char** argv) {
     config.right.timeout_sec = config.left.timeout_sec;
     config.left.reconnect_cooldown_sec = read_double_arg(argc, argv, "--reconnect-cooldown-sec", 1.0);
     config.right.reconnect_cooldown_sec = config.left.reconnect_cooldown_sec;
+    config.output.runtime = read_string_arg(argc, argv, "--output-runtime", "none");
+    config.output.target = read_string_arg(argc, argv, "--output-target", "");
+    config.output.codec = read_string_arg(argc, argv, "--output-codec", "h264_nvenc");
+    config.output.bitrate = read_string_arg(argc, argv, "--output-bitrate", "12M");
+    config.output.preset = read_string_arg(argc, argv, "--output-preset", "p4");
+    config.output.muxer = read_string_arg(argc, argv, "--output-muxer", "");
+    config.output.width = read_int_arg(argc, argv, "--output-width", 0);
+    config.output.height = read_int_arg(argc, argv, "--output-height", 0);
+    config.sync_pair_mode = read_string_arg(argc, argv, "--sync-pair-mode", "none");
+    config.sync_match_max_delta_ms = read_double_arg(argc, argv, "--sync-match-max-delta-ms", 35.0);
+    config.sync_manual_offset_ms = read_double_arg(argc, argv, "--sync-manual-offset-ms", 0.0);
+    config.stitch_output_scale = read_double_arg(argc, argv, "--stitch-output-scale", 1.0);
+    config.stitch_every_n = read_int_arg(argc, argv, "--stitch-every-n", 1);
+    config.gpu_mode = read_string_arg(argc, argv, "--gpu-mode", "on");
+    config.gpu_device = read_int_arg(argc, argv, "--gpu-device", 0);
+    config.headless_benchmark = has_flag(argc, argv, "--headless-benchmark");
 
     hogak::engine::StitchEngine engine;
     if (!engine.start(config)) {
@@ -122,7 +174,7 @@ int main(int argc, char** argv) {
     while (engine.running()) {
         engine.tick();
 
-        if (std::cin.rdbuf()->in_avail() > 0) {
+        if (has_pending_stdin_data()) {
             if (!control.process_one_command(engine)) {
                 break;
             }

@@ -10,6 +10,11 @@ struct EngineMetrics {
     int64_t frame_index = 0;
     double left_fps = 0.0;
     double right_fps = 0.0;
+    double left_age_ms = 0.0;
+    double right_age_ms = 0.0;
+    double left_motion_mean = 0.0;
+    double right_motion_mean = 0.0;
+    double stitched_motion_mean = 0.0;
     double stitch_fps = 0.0;
     double worker_fps = 0.0;
     double output_written_fps = 0.0;
@@ -47,6 +52,12 @@ struct EngineMetrics {
     int64_t right_frames_total = 0;
     int64_t left_stale_drops = 0;
     int64_t right_stale_drops = 0;
+    bool left_content_frozen = false;
+    bool right_content_frozen = false;
+    double left_frozen_duration_sec = 0.0;
+    double right_frozen_duration_sec = 0.0;
+    int64_t left_freeze_restarts = 0;
+    int64_t right_freeze_restarts = 0;
     bool output_active = false;
     int64_t output_frames_written = 0;
     int64_t output_frames_dropped = 0;

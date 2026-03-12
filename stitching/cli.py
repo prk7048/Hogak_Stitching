@@ -57,6 +57,40 @@ def _add_video_common_args(cmd: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_native_calibration_args(
+    cmd: argparse.ArgumentParser,
+    *,
+    include_stream_args: bool = True,
+) -> None:
+    if include_stream_args:
+        cmd.add_argument("--left-rtsp", required=True, help="Left RTSP URL")
+        cmd.add_argument("--right-rtsp", required=True, help="Right RTSP URL")
+        cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
+        cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+    cmd.add_argument(
+        "--out",
+        default="output/native/runtime_homography.json",
+        help="Output homography JSON path",
+    )
+    cmd.add_argument(
+        "--debug-dir",
+        default="output/native/calibration",
+        help="Calibration debug image directory",
+    )
+    cmd.add_argument(
+        "--warmup-frames",
+        type=int,
+        default=45,
+        help="Frames to read before selecting representative images",
+    )
+    cmd.add_argument("--process-scale", type=float, default=1.0, help="Calibration frame scale")
+    cmd.add_argument("--min-matches", type=int, default=80)
+    cmd.add_argument("--min-inliers", type=int, default=30)
+    cmd.add_argument("--ratio-test", type=float, default=0.75)
+    cmd.add_argument("--ransac-thresh", type=float, default=5.0)
+    cmd.add_argument("--max-features", type=int, default=4000)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Dual smartphone video stitching MVP")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -177,6 +211,14 @@ def parse_args() -> argparse.Namespace:
     ffmpeg_env_cmd.add_argument("--rtsp-url", default="", help="Optional RTSP URL to print ffprobe command for")
     ffmpeg_env_cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
     ffmpeg_env_cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+    native_calib_cmd = subparsers.add_parser(
+        "native-calibrate",
+        help="Capture a representative RTSP frame pair and save a fixed homography JSON for native runtime",
+    )
+    _add_native_calibration_args(native_calib_cmd)
+    native_cmd = subparsers.add_parser("native-runtime", help="Launch native runtime, print logs, and optionally open final stream viewer")
+    from stitching.native_runtime_cli import add_native_runtime_args
+    add_native_runtime_args(native_cmd)
     # Desktop RTSP live stitching preview mode
     desktop_cmd = subparsers.add_parser("desktop", help="Run desktop RTSP live stitching preview")
     desktop_cmd.add_argument("--left-rtsp", default="", help="Left RTSP URL")
@@ -531,6 +573,16 @@ def main() -> int:
             )
             print("sample_nvenc_cmd=" + " ".join(sample_nvenc_cmd))
         return 0
+
+    if args.command == "native-calibrate":
+        from stitching.native_calibration import run_native_calibration
+
+        return int(run_native_calibration(args))
+
+    if args.command == "native-runtime":
+        from stitching.native_runtime_cli import run_native_runtime_monitor
+
+        return int(run_native_runtime_monitor(args))
 
     if args.command == "live":
         _run_live_from_args(args)

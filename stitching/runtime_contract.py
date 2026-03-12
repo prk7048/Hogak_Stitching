@@ -15,6 +15,7 @@ CommandType = Literal[
     "stop",
     "shutdown",
     "reload_config",
+    "reload_homography",
     "set_manual_mode",
     "add_manual_point",
     "reset_auto_calibration",
@@ -31,6 +32,33 @@ EventType = Literal[
     "manual_state",
     "snapshot_ready",
 ]
+
+SUPPORTED_RELOAD_CONFIG_FIELDS = (
+    "left_rtsp",
+    "right_rtsp",
+    "input_runtime",
+    "ffmpeg_bin",
+    "homography_file",
+    "output_runtime",
+    "output_target",
+    "output_codec",
+    "output_bitrate",
+    "output_preset",
+    "output_muxer",
+    "rtsp_transport",
+    "rtsp_timeout_sec",
+    "reconnect_cooldown_sec",
+    "sync_pair_mode",
+    "sync_match_max_delta_ms",
+    "sync_manual_offset_ms",
+    "process_scale",
+    "stitch_output_scale",
+    "stitch_every_n",
+    "gpu_mode",
+    "gpu_device",
+    "benchmark_log_interval_sec",
+    "headless_benchmark",
+)
 
 
 def _to_primitive(value: Any) -> Any:
@@ -165,6 +193,12 @@ class EngineMetrics:
     right_frames_total: int = 0
     left_stale_drops: int = 0
     right_stale_drops: int = 0
+    output_active: bool = False
+    output_frames_written: int = 0
+    output_frames_dropped: int = 0
+    output_target: str = ""
+    output_effective_codec: str = ""
+    output_last_error: str = ""
     left_last_error: str = ""
     right_last_error: str = ""
 
@@ -200,4 +234,3 @@ class RuntimeEvent:
 
     def to_json(self) -> str:
         return json.dumps(self.to_message(), ensure_ascii=True)
-

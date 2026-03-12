@@ -41,6 +41,21 @@ bool WinProcessPipe::start(const std::string& command_line, std::string& error_m
         return false;
     }
 
+    HANDLE stdin_handle = CreateFileA(
+        "NUL",
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &security,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (stdin_handle == INVALID_HANDLE_VALUE) {
+        CloseHandle(stdout_read);
+        CloseHandle(stdout_write);
+        error_message = "failed to open NUL for stdin";
+        return false;
+    }
+
     HANDLE stderr_handle = CreateFileA(
         "NUL",
         GENERIC_WRITE,
@@ -59,7 +74,7 @@ bool WinProcessPipe::start(const std::string& command_line, std::string& error_m
     STARTUPINFOA startup{};
     startup.cb = sizeof(startup);
     startup.dwFlags = STARTF_USESTDHANDLES;
-    startup.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    startup.hStdInput = stdin_handle;
     startup.hStdOutput = stdout_write;
     startup.hStdError = stderr_handle;
 
@@ -80,6 +95,7 @@ bool WinProcessPipe::start(const std::string& command_line, std::string& error_m
         &process);
 
     CloseHandle(stdout_write);
+    CloseHandle(stdin_handle);
     CloseHandle(stderr_handle);
 
     if (!ok) {

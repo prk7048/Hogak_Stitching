@@ -8,14 +8,6 @@ set "RIGHT_URL=rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1
 set "OUTPUT_TARGET=udp://127.0.0.1:23000?pkt_size=1316"
 set "VIEWER_TARGET=udp://127.0.0.1:23000"
 set "HOMOGRAPHY_FILE=%ROOT%\output\native\runtime_homography.json"
-set "STITCH_OUTPUT_SCALE=0.25"
-set "OUTPUT_WIDTH=1920"
-set "OUTPUT_HEIGHT=1080"
-set "SYNC_PAIR_MODE=latest"
-set "SYNC_MATCH_MAX_DELTA_MS=60"
-set "SYNC_MANUAL_OFFSET_MS=0"
-set "OUTPUT_BITRATE=6M"
-set "OUTPUT_PRESET=p1"
 
 if not exist "%PYTHON%" (
   echo Python venv not found: %PYTHON%
@@ -33,17 +25,17 @@ if /I "%~1"=="--no-viewer" goto run_no_viewer
   --rtsp-transport tcp ^
   --rtsp-timeout-sec 10 ^
   --reconnect-cooldown-sec 1 ^
-  --sync-pair-mode %SYNC_PAIR_MODE% ^
-  --sync-match-max-delta-ms %SYNC_MATCH_MAX_DELTA_MS% ^
-  --sync-manual-offset-ms %SYNC_MANUAL_OFFSET_MS% ^
-  --stitch-output-scale %STITCH_OUTPUT_SCALE% ^
+  --sync-pair-mode latest ^
+  --sync-match-max-delta-ms 35 ^
+  --sync-manual-offset-ms 0 ^
+  --stitch-output-scale 0.25 ^
   --output-runtime ffmpeg ^
   --output-target "%OUTPUT_TARGET%" ^
-  --output-width %OUTPUT_WIDTH% ^
-  --output-height %OUTPUT_HEIGHT% ^
+  --output-width 1920 ^
+  --output-height 1080 ^
   --output-codec h264_nvenc ^
-  --output-bitrate %OUTPUT_BITRATE% ^
-  --output-preset %OUTPUT_PRESET% ^
+  --output-bitrate 6M ^
+  --output-preset p1 ^
   --status-interval-sec 5 ^
   --homography-file "%HOMOGRAPHY_FILE%" ^
   --viewer ^
@@ -60,17 +52,17 @@ exit /b %ERRORLEVEL%
   --rtsp-transport tcp ^
   --rtsp-timeout-sec 10 ^
   --reconnect-cooldown-sec 1 ^
-  --sync-pair-mode %SYNC_PAIR_MODE% ^
-  --sync-match-max-delta-ms %SYNC_MATCH_MAX_DELTA_MS% ^
-  --sync-manual-offset-ms %SYNC_MANUAL_OFFSET_MS% ^
-  --stitch-output-scale %STITCH_OUTPUT_SCALE% ^
+  --sync-pair-mode latest ^
+  --sync-match-max-delta-ms 35 ^
+  --sync-manual-offset-ms 0 ^
+  --stitch-output-scale 0.25 ^
   --output-runtime ffmpeg ^
   --output-target "%OUTPUT_TARGET%" ^
-  --output-width %OUTPUT_WIDTH% ^
-  --output-height %OUTPUT_HEIGHT% ^
+  --output-width 1920 ^
+  --output-height 1080 ^
   --output-codec h264_nvenc ^
-  --output-bitrate %OUTPUT_BITRATE% ^
-  --output-preset %OUTPUT_PRESET% ^
+  --output-bitrate 6M ^
+  --output-preset p1 ^
   --status-interval-sec 5 ^
   --homography-file "%HOMOGRAPHY_FILE%"
 

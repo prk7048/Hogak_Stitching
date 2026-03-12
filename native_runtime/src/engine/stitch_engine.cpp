@@ -28,6 +28,12 @@ namespace {
 
 input::FfmpegRtspReader g_left_reader;
 input::FfmpegRtspReader g_right_reader;
+constexpr int kMotionProbeWidth = 64;
+constexpr int kMotionProbeHeight = 36;
+constexpr double kRealtimeFallbackMaxAgeMs = 90.0;
+constexpr int kRealtimeFallbackMaxConsecutiveReuse = 2;
+constexpr double kReaderRestartAgeMs = 1500.0;
+constexpr double kReaderRestartCooldownSec = 3.0;
 
 double fps_from_period_ns(std::int64_t delta_ns) {
     if (delta_ns <= 0) {
@@ -47,6 +53,33 @@ double mean_luma(const cv::Mat& image) {
         cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
     }
     return cv::mean(gray)[0];
+}
+
+cv::Mat make_motion_probe_gray(const cv::Mat& image) {
+    if (image.empty()) {
+        return {};
+    }
+    cv::Mat gray;
+    if (image.channels() == 1) {
+        gray = image.clone();
+    } else {
+        cv::cvtColor(image, gray, cv::COLOR_BGR2GRAY);
+    }
+    cv::resize(gray, gray, cv::Size(kMotionProbeWidth, kMotionProbeHeight), 0.0, 0.0, cv::INTER_AREA);
+    return gray;
+}
+
+double probe_motion_mean(const cv::Mat& previous_probe_gray, const cv::Mat& image) {
+    if (previous_probe_gray.empty() || image.empty()) {
+        return 0.0;
+    }
+    cv::Mat current_probe_gray = make_motion_probe_gray(image);
+    if (current_probe_gray.empty()) {
+        return 0.0;
+    }
+    cv::Mat diff;
+    cv::absdiff(previous_probe_gray, current_probe_gray, diff);
+    return cv::mean(diff)[0];
 }
 
 double clamp_output_scale(double value) {
@@ -322,6 +355,7 @@ void StitchEngine::clear_calibration_state_locked() {
     weight_right_.release();
     weight_left_3c_.release();
     weight_right_3c_.release();
+    previous_stitched_probe_gray_.release();
     latest_stitched_.release();
     gpu_left_input_.release();
     gpu_left_canvas_.release();
@@ -352,11 +386,46 @@ void StitchEngine::clear_calibration_state_locked() {
     metrics_.matches = 0;
     metrics_.inliers = 0;
     metrics_.overlap_diff_mean = 0.0;
+    metrics_.left_motion_mean = 0.0;
+    metrics_.right_motion_mean = 0.0;
+    metrics_.stitched_motion_mean = 0.0;
     metrics_.stitched_mean_luma = 0.0;
     metrics_.warped_mean_luma = 0.0;
     metrics_.only_left_pixels = 0;
     metrics_.only_right_pixels = 0;
     metrics_.overlap_pixels = 0;
+}
+
+bool StitchEngine::restart_reader_locked(bool left_reader, const char* reason) {
+    const auto now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    auto& last_restart_ns = left_reader ? last_left_reader_restart_ns_ : last_right_reader_restart_ns_;
+    if (last_restart_ns > 0 &&
+        static_cast<double>(now_ns - last_restart_ns) / 1'000'000'000.0 < kReaderRestartCooldownSec) {
+        return false;
+    }
+
+    const auto ffmpeg_bin = config_.ffmpeg_bin;
+    if (left_reader) {
+        g_left_reader.stop();
+        const bool ok = g_left_reader.start(config_.left, ffmpeg_bin, config_.input_runtime);
+        if (ok) {
+            left_reader_restart_count_ += 1;
+            last_left_reader_restart_ns_ = now_ns;
+            metrics_.status = std::string("left reader restarted: ") + reason;
+        }
+        return ok;
+    }
+
+    g_right_reader.stop();
+    const bool ok = g_right_reader.start(config_.right, ffmpeg_bin, config_.input_runtime);
+    if (ok) {
+        right_reader_restart_count_ += 1;
+        last_right_reader_restart_ns_ = now_ns;
+        metrics_.status = std::string("right reader restarted: ") + reason;
+    }
+    return ok;
 }
 
 bool StitchEngine::start(const EngineConfig& config) {
@@ -371,6 +440,12 @@ bool StitchEngine::start(const EngineConfig& config) {
     last_worker_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    consecutive_left_reuse_ = 0;
+    consecutive_right_reuse_ = 0;
+    left_reader_restart_count_ = 0;
+    right_reader_restart_count_ = 0;
+    last_left_reader_restart_ns_ = 0;
+    last_right_reader_restart_ns_ = 0;
     clear_calibration_state_locked();
     output_writer_.reset();
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
@@ -409,6 +484,8 @@ void StitchEngine::stop() {
     metrics_.output_written_fps = 0.0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    consecutive_left_reuse_ = 0;
+    consecutive_right_reuse_ = 0;
 }
 
 bool StitchEngine::reload_config(const EngineConfig& config) {
@@ -447,6 +524,8 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
     last_worker_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    consecutive_left_reuse_ = 0;
+    consecutive_right_reuse_ = 0;
     metrics_.output_written_fps = 0.0;
     metrics_.gpu_enabled = (config.gpu_mode != "off");
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
@@ -635,8 +714,8 @@ bool StitchEngine::ensure_calibration_locked(const cv::Mat& left_frame, const cv
 
     calibrated_ = true;
     metrics_.calibrated = true;
-    metrics_.output_width = output_size_.width;
-    metrics_.output_height = output_size_.height;
+    metrics_.output_width = (config_.output.width > 0) ? config_.output.width : output_size_.width;
+    metrics_.output_height = (config_.output.height > 0) ? config_.output.height : output_size_.height;
     metrics_.blend_mode = "feather";
     metrics_.status = "calibrated";
     return true;
@@ -775,6 +854,8 @@ bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& 
     }
 
     latest_stitched_ = stitched;
+    metrics_.stitched_motion_mean = probe_motion_mean(previous_stitched_probe_gray_, stitched);
+    previous_stitched_probe_gray_ = make_motion_probe_gray(stitched);
     if (!stitched.empty()) {
         cv::Mat stitched_gray;
         cv::cvtColor(stitched, stitched_gray, cv::COLOR_BGR2GRAY);
@@ -815,13 +896,28 @@ bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& 
 void StitchEngine::update_metrics_locked() {
     const auto left = g_left_reader.snapshot();
     const auto right = g_right_reader.snapshot();
+    const auto now_ns =
+        std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
+            .count();
 
     metrics_.left_fps = left.fps;
     metrics_.right_fps = right.fps;
+    metrics_.left_age_ms =
+        left.latest_timestamp_ns > 0 ? static_cast<double>(now_ns - left.latest_timestamp_ns) / 1'000'000.0 : 0.0;
+    metrics_.right_age_ms =
+        right.latest_timestamp_ns > 0 ? static_cast<double>(now_ns - right.latest_timestamp_ns) / 1'000'000.0 : 0.0;
+    metrics_.left_motion_mean = left.motion_mean;
+    metrics_.right_motion_mean = right.motion_mean;
     metrics_.left_frames_total = left.frames_total;
     metrics_.right_frames_total = right.frames_total;
     metrics_.left_stale_drops = left.stale_drops;
     metrics_.right_stale_drops = right.stale_drops;
+    metrics_.left_content_frozen = left.content_frozen;
+    metrics_.right_content_frozen = right.content_frozen;
+    metrics_.left_frozen_duration_sec = left.frozen_duration_sec;
+    metrics_.right_frozen_duration_sec = right.frozen_duration_sec;
+    metrics_.left_freeze_restarts = left.freeze_restarts;
+    metrics_.right_freeze_restarts = right.freeze_restarts;
     metrics_.left_last_error = left.last_error;
     metrics_.right_last_error = right.last_error;
     metrics_.gpu_feature_enabled = false;
@@ -829,8 +925,8 @@ void StitchEngine::update_metrics_locked() {
     metrics_.matches = 0;
     metrics_.inliers = 0;
     metrics_.calibrated = calibrated_;
-    metrics_.output_width = output_size_.width;
-    metrics_.output_height = output_size_.height;
+    metrics_.output_width = (config_.output.width > 0) ? config_.output.width : output_size_.width;
+    metrics_.output_height = (config_.output.height > 0) ? config_.output.height : output_size_.height;
     metrics_.output_active = (output_writer_ != nullptr) && output_writer_->active();
     metrics_.output_frames_written = (output_writer_ != nullptr) ? output_writer_->frames_written() : 0;
     metrics_.output_frames_dropped = (output_writer_ != nullptr) ? output_writer_->frames_dropped() : 0;
@@ -842,9 +938,6 @@ void StitchEngine::update_metrics_locked() {
         last_output_timestamp_ns_ = 0;
     }
     if (metrics_.output_frames_written > last_output_frames_written_) {
-        const auto now_ns =
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
-                .count();
         const auto delta_frames = metrics_.output_frames_written - last_output_frames_written_;
         const auto delta_ns = now_ns - last_output_timestamp_ns_;
         if (last_output_timestamp_ns_ > 0 && delta_frames > 0 && delta_ns > 0) {
@@ -864,6 +957,13 @@ void StitchEngine::update_metrics_locked() {
         return;
     }
 
+    if (metrics_.left_age_ms > kReaderRestartAgeMs) {
+        restart_reader_locked(true, "input age exceeded threshold");
+    }
+    if (metrics_.right_age_ms > kReaderRestartAgeMs) {
+        restart_reader_locked(false, "input age exceeded threshold");
+    }
+
     metrics_.pair_skew_ms_mean =
         std::abs(static_cast<double>(left.latest_timestamp_ns - right.latest_timestamp_ns)) / 1'000'000.0;
     SelectedPair pair;
@@ -881,8 +981,23 @@ void StitchEngine::update_metrics_locked() {
         return;
     }
     if (!has_new_left || !has_new_right) {
-        metrics_.status = "waiting paired fresh frame";
-        return;
+        const bool left_reused = !has_new_left;
+        const bool right_reused = !has_new_right;
+        const double left_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.left_ts_ns)) / 1'000'000.0;
+        const double right_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.right_ts_ns)) / 1'000'000.0;
+        const bool can_reuse_left =
+            left_reused &&
+            left_age_ms <= kRealtimeFallbackMaxAgeMs &&
+            consecutive_left_reuse_ < kRealtimeFallbackMaxConsecutiveReuse;
+        const bool can_reuse_right =
+            right_reused &&
+            right_age_ms <= kRealtimeFallbackMaxAgeMs &&
+            consecutive_right_reuse_ < kRealtimeFallbackMaxConsecutiveReuse;
+        if ((left_reused && !can_reuse_left) || (right_reused && !can_reuse_right)) {
+            metrics_.status = "waiting paired fresh frame";
+            return;
+        }
+        metrics_.status = "stitching realtime fallback pair";
     }
 
     const auto pair_ts_ns = std::max(pair.left_ts_ns, pair.right_ts_ns);
@@ -892,8 +1007,18 @@ void StitchEngine::update_metrics_locked() {
         metrics_.worker_fps = 0.0;
     }
 
-    last_left_seq_ = pair.left_seq;
-    last_right_seq_ = pair.right_seq;
+    if (has_new_left) {
+        last_left_seq_ = pair.left_seq;
+        consecutive_left_reuse_ = 0;
+    } else {
+        consecutive_left_reuse_ += 1;
+    }
+    if (has_new_right) {
+        last_right_seq_ = pair.right_seq;
+        consecutive_right_reuse_ = 0;
+    } else {
+        consecutive_right_reuse_ += 1;
+    }
     if (config_.stitch_every_n > 1 && (std::max(pair.left_seq, pair.right_seq) % config_.stitch_every_n) != 0) {
         metrics_.reused_count += 1;
         metrics_.status = "skipping per stitch_every_n";

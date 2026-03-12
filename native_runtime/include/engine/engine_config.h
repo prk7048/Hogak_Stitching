@@ -23,6 +23,8 @@ struct OutputConfig {
     std::string bitrate = "12M";
     std::string preset = "p4";
     std::string muxer;
+    int32_t width = 0;
+    int32_t height = 0;
 };
 
 struct EngineConfig {

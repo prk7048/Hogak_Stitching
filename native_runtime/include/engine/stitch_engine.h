@@ -48,6 +48,7 @@ private:
 
     void clear_calibration_state_locked();
     void update_metrics_locked();
+    bool restart_reader_locked(bool left_reader, const char* reason);
     bool ensure_calibration_locked(const cv::Mat& left_frame, const cv::Mat& right_frame);
     bool stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& right_frame, std::int64_t pair_ts_ns);
     bool load_homography_locked(cv::Mat* homography_out);
@@ -65,6 +66,12 @@ private:
     std::int64_t last_worker_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;
     std::int64_t last_output_timestamp_ns_ = 0;
+    std::int32_t consecutive_left_reuse_ = 0;
+    std::int32_t consecutive_right_reuse_ = 0;
+    std::int64_t left_reader_restart_count_ = 0;
+    std::int64_t right_reader_restart_count_ = 0;
+    std::int64_t last_left_reader_restart_ns_ = 0;
+    std::int64_t last_right_reader_restart_ns_ = 0;
     bool calibrated_ = false;
     bool gpu_available_ = false;
     cv::Mat homography_{};
@@ -79,6 +86,7 @@ private:
     cv::Mat weight_right_{};
     cv::Mat weight_left_3c_{};
     cv::Mat weight_right_3c_{};
+    cv::Mat previous_stitched_probe_gray_{};
     cv::Rect left_roi_{};
     cv::Rect overlap_roi_{};
     cv::Size output_size_{};

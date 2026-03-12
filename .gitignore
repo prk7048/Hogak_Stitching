@@ -17,6 +17,10 @@ venv/
 native_runtime/build/
 _tags.txt
 _cv2_check.py
+_native_check.py
+_tmp_*.py
+tmp_*.py
+__dump_reports.py
 *-arch=x64 -host_arch=x64 && set PATH
 
 # OS/editor
@@ -36,6 +40,7 @@ output/debug/*
 !output/debug/.gitkeep
 output/images/*
 !output/images/.gitkeep
+output/native/
 output/videos/*
 !output/videos/.gitkeep
 

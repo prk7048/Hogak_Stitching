@@ -2,7 +2,7 @@
 
 이 디렉터리는 현재 프로젝트의 의사결정, 알고리즘 정책, 개발 진행 기록을 정리한 문서 모음이다.
 
-현재 기준으로 **우선 읽어야 할 문서**는 아래 4개다.
+현재 기준으로 **우선 읽어야 할 문서**는 아래 5개다.
 
 ## 1. [01_런타임_구조_전환.md](c:\Users\Pixellot\Hogak_Stitching\reports\01_런타임_구조_전환.md)
 
@@ -16,7 +16,18 @@
 대상:
 - 런타임 구조, 성능 병목, 구현 순서를 이해하려는 경우
 
-## 2. [02_스티칭_알고리즘_정책.md](c:\Users\Pixellot\Hogak_Stitching\reports\02_스티칭_알고리즘_정책.md)
+## 2. [05_native_runtime_progress_and_finish_plan.md](c:\Users\Pixellot\Hogak_Stitching\reports\05_native_runtime_progress_and_finish_plan.md)
+
+내용:
+- 현재 native runtime이 어디까지 구현되었는지
+- 실제로 확인된 동작과 아직 불안정한 부분이 무엇인지
+- 완료로 볼 기준이 무엇인지
+- 남은 마무리 작업 우선순위
+
+대상:
+- 지금 시점의 구현 상태와 남은 리스크를 빠르게 알고 싶은 경우
+
+## 3. [02_스티칭_알고리즘_정책.md](c:\Users\Pixellot\Hogak_Stitching\reports\02_스티칭_알고리즘_정책.md)
 
 내용:
 - 특징점 매칭 / 기하 변환 / 블렌딩 / seam-cut 정책 정리
@@ -28,7 +39,7 @@
 대상:
 - 스티칭 품질과 알고리즘 방향을 정리하려는 경우
 
-## 3. [03_개발_로그.md](c:\Users\Pixellot\Hogak_Stitching\reports\03_개발_로그.md)
+## 4. [03_개발_로그.md](c:\Users\Pixellot\Hogak_Stitching\reports\03_개발_로그.md)
 
 내용:
 - 주요 변경 이력 요약
@@ -37,7 +48,7 @@
 대상:
 - 지금까지의 진행 상황을 빠르게 훑고 싶은 경우
 
-## 4. [04_native_runtime_skeleton.md](c:\Users\Pixellot\Hogak_Stitching\reports\04_native_runtime_skeleton.md)
+## 5. [04_native_runtime_skeleton.md](c:\Users\Pixellot\Hogak_Stitching\reports\04_native_runtime_skeleton.md)
 
 내용:
 - `native_runtime/` 최소 골격 추가 이유
@@ -47,7 +58,11 @@
 - 현재 구현 범위와 다음 단계
 
 대상:
-- 네이티브 런타임 착수 상태와 현재 코드 경계를 확인하려는 경우
+- 네이티브 런타임의 **초기 skeleton 시점**을 확인하려는 경우
+
+주의:
+- 현재 구현 상태는 `04`보다 더 진행됐다.
+- 최신 상태는 `05_native_runtime_progress_and_finish_plan.md`를 우선 본다.
 
 ## 보관 문서
 
