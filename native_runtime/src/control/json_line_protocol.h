@@ -40,7 +40,7 @@ inline std::string hello_event_json(double timestamp_sec) {
     std::ostringstream out;
     out << "{\"seq\":0,\"type\":\"hello\",\"timestamp_sec\":" << std::fixed << std::setprecision(3)
         << timestamp_sec
-        << ",\"payload\":{\"runtime\":\"stitch_runtime\",\"protocol\":\"jsonl-v1\",\"mode\":\"skeleton\"}}";
+        << ",\"payload\":{\"runtime\":\"stitch_runtime\",\"protocol\":\"jsonl-v1\",\"mode\":\"native-runtime\"}}";
     return out.str();
 }
 
@@ -55,9 +55,11 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"right_fps\":" << metrics.right_fps << ','
         << "\"stitch_fps\":" << metrics.stitch_fps << ','
         << "\"worker_fps\":" << metrics.worker_fps << ','
+        << "\"output_written_fps\":" << metrics.output_written_fps << ','
         << "\"pair_skew_ms_mean\":" << metrics.pair_skew_ms_mean << ','
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
+        << "\"gpu_errors\":" << metrics.gpu_errors << ','
         << "\"calibrated\":" << (metrics.calibrated ? "true" : "false") << ','
         << "\"output_width\":" << metrics.output_width << ','
         << "\"output_height\":" << metrics.output_height << ','
@@ -66,6 +68,12 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"right_frames_total\":" << metrics.right_frames_total << ','
         << "\"left_stale_drops\":" << metrics.left_stale_drops << ','
         << "\"right_stale_drops\":" << metrics.right_stale_drops << ','
+        << "\"output_active\":" << (metrics.output_active ? "true" : "false") << ','
+        << "\"output_frames_written\":" << metrics.output_frames_written << ','
+        << "\"output_frames_dropped\":" << metrics.output_frames_dropped << ','
+        << "\"output_target\":\"" << json_escape(metrics.output_target) << "\","
+        << "\"output_effective_codec\":\"" << json_escape(metrics.output_effective_codec) << "\","
+        << "\"output_last_error\":\"" << json_escape(metrics.output_last_error) << "\","
         << "\"left_last_error\":\"" << json_escape(metrics.left_last_error) << "\","
         << "\"right_last_error\":\"" << json_escape(metrics.right_last_error) << "\","
         << "\"gpu_warp_count\":" << metrics.gpu_warp_count << ','
@@ -73,7 +81,14 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"gpu_blend_count\":" << metrics.gpu_blend_count << ','
         << "\"cpu_blend_count\":" << metrics.cpu_blend_count << ','
         << "\"blend_mode\":\"" << json_escape(metrics.blend_mode) << "\","
-        << "\"overlap_diff_mean\":" << metrics.overlap_diff_mean
+        << "\"overlap_diff_mean\":" << metrics.overlap_diff_mean << ','
+        << "\"stitched_mean_luma\":" << metrics.stitched_mean_luma << ','
+        << "\"left_mean_luma\":" << metrics.left_mean_luma << ','
+        << "\"right_mean_luma\":" << metrics.right_mean_luma << ','
+        << "\"warped_mean_luma\":" << metrics.warped_mean_luma << ','
+        << "\"only_left_pixels\":" << metrics.only_left_pixels << ','
+        << "\"only_right_pixels\":" << metrics.only_right_pixels << ','
+        << "\"overlap_pixels\":" << metrics.overlap_pixels
         << "}}";
     return out.str();
 }
