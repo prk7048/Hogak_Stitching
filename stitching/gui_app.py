@@ -735,7 +735,7 @@ def build_gui() -> gr.Blocks:
                     live_sync_offset = gr.Number(label="sync_manual_offset_ms", value=0.0)
                     live_sync_timeout = gr.Number(label="sync_no_pair_timeout_sec", value=8.0)
                 with gr.Row():
-                    live_sync_mode = gr.Dropdown(["latest", "oldest"], value="latest", label="sync_pair_mode")
+                    live_sync_mode = gr.Dropdown(["latest", "oldest", "service"], value="service", label="sync_pair_mode")
                     live_max_lag = gr.Number(label="max_live_lag_sec", value=1.0)
                     live_adaptive_seam = gr.Dropdown(["off", "on"], value="off", label="adaptive_seam")
                     live_seam_interval = gr.Number(label="seam_update_interval", value=12)
@@ -868,4 +868,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

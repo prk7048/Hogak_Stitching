@@ -12,9 +12,11 @@ struct StreamConfig {
     double timeout_sec = 10.0;
     double reconnect_cooldown_sec = 1.0;
     std::string video_codec = "h264";
+    std::string input_pipe_format = "nv12";
     int32_t width = 1920;
     int32_t height = 1080;
     int32_t max_buffered_frames = 8;
+    bool enable_freeze_detection = true;
 };
 
 struct OutputConfig {

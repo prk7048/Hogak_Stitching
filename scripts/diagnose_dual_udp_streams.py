@@ -7,12 +7,11 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from validation_support import OUT_DIR, ROOT, add_common_runtime_input_args
 
-ROOT = Path(__file__).resolve().parents[1]
 PYTHON = ROOT / ".venv312" / "Scripts" / "python.exe"
 FFMPEG = ROOT / ".third_party" / "ffmpeg" / "current" / "bin" / "ffmpeg.exe"
 FFPROBE = ROOT / ".third_party" / "ffmpeg" / "current" / "bin" / "ffprobe.exe"
-OUT_DIR = ROOT / "output" / "debug"
 
 RUNTIME_LOG = OUT_DIR / "diagnose_dual_runtime.log"
 PROBE_TS = OUT_DIR / "diagnose_probe23000.ts"
@@ -413,16 +412,41 @@ def _parse_runtime_metrics(log_path: Path) -> dict[str, object]:
     transmit_written_delta = int(last.get("production_output_frames_written") or 0) - int(
         first.get("production_output_frames_written") or 0
     )
+    wait_both_delta = int(last.get("wait_both_streams_count") or 0) - int(first.get("wait_both_streams_count") or 0)
+    wait_sync_delta = int(last.get("wait_sync_pair_count") or 0) - int(first.get("wait_sync_pair_count") or 0)
+    wait_next_delta = int(last.get("wait_next_frame_count") or 0) - int(first.get("wait_next_frame_count") or 0)
+    wait_fresh_delta = int(last.get("wait_paired_fresh_count") or 0) - int(
+        first.get("wait_paired_fresh_count") or 0
+    )
+    wait_fresh_left_delta = int(last.get("wait_paired_fresh_left_count") or 0) - int(
+        first.get("wait_paired_fresh_left_count") or 0
+    )
+    wait_fresh_right_delta = int(last.get("wait_paired_fresh_right_count") or 0) - int(
+        first.get("wait_paired_fresh_right_count") or 0
+    )
+    wait_fresh_both_delta = int(last.get("wait_paired_fresh_both_count") or 0) - int(
+        first.get("wait_paired_fresh_both_count") or 0
+    )
+    fallback_pair_delta = int(last.get("realtime_fallback_pair_count") or 0) - int(
+        first.get("realtime_fallback_pair_count") or 0
+    )
 
+    stitch_metric_key = "stitch_actual_fps" if any("stitch_actual_fps" in payload for payload in metrics_payloads) else "stitch_fps"
     return {
         "samples": len(metrics_payloads),
         "active_samples": len(active_payloads),
+        "sync_pair_mode": str(last.get("sync_pair_mode") or first.get("sync_pair_mode") or "-"),
         "waiting_ratio": (float(waiting_samples) / float(len(metrics_payloads))) if metrics_payloads else 0.0,
         "status_counts": status_counts,
-        "stitch_fps": _summary(_series("stitch_fps")),
+        "stitch_metric_key": stitch_metric_key,
+        "stitch_fps": _summary(_series(stitch_metric_key)),
         "worker_fps": _summary(_series("worker_fps")),
         "active_stitch_fps": _summary(
-            [float(payload.get("stitch_fps") or 0.0) for payload in active_payloads if isinstance(payload.get("stitch_fps"), (int, float))]
+            [
+                float(payload.get(stitch_metric_key) or 0.0)
+                for payload in active_payloads
+                if isinstance(payload.get(stitch_metric_key), (int, float))
+            ]
         ),
         "active_worker_fps": _summary(
             [float(payload.get("worker_fps") or 0.0) for payload in active_payloads if isinstance(payload.get("worker_fps"), (int, float))]
@@ -430,10 +454,42 @@ def _parse_runtime_metrics(log_path: Path) -> dict[str, object]:
         "probe_written_fps": _summary(_series("output_written_fps")),
         "transmit_written_fps": _summary(_series("production_output_written_fps")),
         "pair_skew_ms": _summary(_series("pair_skew_ms_mean")),
+        "left_avg_frame_interval_ms": _summary(_series("left_avg_frame_interval_ms")),
+        "right_avg_frame_interval_ms": _summary(_series("right_avg_frame_interval_ms")),
+        "left_max_frame_interval_ms": _summary(_series("left_max_frame_interval_ms")),
+        "right_max_frame_interval_ms": _summary(_series("right_max_frame_interval_ms")),
+        "left_late_frame_intervals": _summary(_series("left_late_frame_intervals")),
+        "right_late_frame_intervals": _summary(_series("right_late_frame_intervals")),
+        "left_buffer_span_ms": _summary(_series("left_buffer_span_ms")),
+        "right_buffer_span_ms": _summary(_series("right_buffer_span_ms")),
+        "left_avg_read_ms": _summary(_series("left_avg_read_ms")),
+        "right_avg_read_ms": _summary(_series("right_avg_read_ms")),
+        "left_max_read_ms": _summary(_series("left_max_read_ms")),
+        "right_max_read_ms": _summary(_series("right_max_read_ms")),
         "left_age_ms": _summary(_series("left_age_ms")),
         "right_age_ms": _summary(_series("right_age_ms")),
+        "selected_left_lag_ms": _summary(_series("selected_left_lag_ms")),
+        "selected_right_lag_ms": _summary(_series("selected_right_lag_ms")),
+        "selected_left_lag_frames": _summary(_series("selected_left_lag_frames")),
+        "selected_right_lag_frames": _summary(_series("selected_right_lag_frames")),
+        "wait_paired_fresh_left_age_ms_avg": _summary(_series("wait_paired_fresh_left_age_ms_avg")),
+        "wait_paired_fresh_right_age_ms_avg": _summary(_series("wait_paired_fresh_right_age_ms_avg")),
         "left_buffered_frames": _summary(_series("left_buffered_frames")),
         "right_buffered_frames": _summary(_series("right_buffered_frames")),
+        "wait_both_streams_delta": wait_both_delta,
+        "wait_sync_pair_delta": wait_sync_delta,
+        "wait_next_frame_delta": wait_next_delta,
+        "wait_paired_fresh_delta": wait_fresh_delta,
+        "wait_paired_fresh_left_delta": wait_fresh_left_delta,
+        "wait_paired_fresh_right_delta": wait_fresh_right_delta,
+        "wait_paired_fresh_both_delta": wait_fresh_both_delta,
+        "realtime_fallback_pair_delta": fallback_pair_delta,
+        "left_launch_failures_delta": int(last.get("left_launch_failures") or 0) - int(first.get("left_launch_failures") or 0),
+        "right_launch_failures_delta": int(last.get("right_launch_failures") or 0) - int(first.get("right_launch_failures") or 0),
+        "left_read_failures_delta": int(last.get("left_read_failures") or 0) - int(first.get("left_read_failures") or 0),
+        "right_read_failures_delta": int(last.get("right_read_failures") or 0) - int(first.get("right_read_failures") or 0),
+        "left_reader_restarts_delta": int(last.get("left_reader_restarts") or 0) - int(first.get("left_reader_restarts") or 0),
+        "right_reader_restarts_delta": int(last.get("right_reader_restarts") or 0) - int(first.get("right_reader_restarts") or 0),
         "reused_count_delta": int(last.get("reused_count") or 0) - int(first.get("reused_count") or 0),
         "stitched_count_delta": stitched_delta,
         "probe_frames_written_delta": probe_written_delta,
@@ -515,11 +571,17 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Capture and compare probe 23000 vs transmit 24000")
     parser.add_argument("--warmup-sec", type=float, default=6.0)
     parser.add_argument("--capture-sec", type=float, default=10.0)
-    parser.add_argument("--transport", default="udp", choices=["udp", "tcp"])
-    parser.add_argument("--output-standard", default="realtime_gpu_1080p")
+    add_common_runtime_input_args(parser, include_left_right=False)
+    parser.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest", "service"], default="")
+    parser.add_argument("--disable-freeze-detection", action="store_true")
+    parser.add_argument("--disable-probe", action="store_true")
+    parser.add_argument("--production-output-runtime", choices=["ffmpeg", "gpu-direct"], default="ffmpeg")
+    parser.add_argument("--sync-match-max-delta-ms", type=float, default=60.0)
+    parser.add_argument("--runtime-duration-sec", type=float, default=25.0)
     parser.add_argument("--target-fps", type=float, default=60.0)
     parser.add_argument("--max-waiting-ratio", type=float, default=0.05)
     parser.add_argument("--max-output-repeat-ratio", type=float, default=1.05)
+    parser.add_argument("--summary-json", default="", help="Optional path to write machine-readable summary JSON")
     args = parser.parse_args()
 
     if not PYTHON.exists():
@@ -554,11 +616,14 @@ def main() -> int:
         "--right-rtsp",
         "rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0",
         "--input-runtime",
-        "ffmpeg-cuda",
+        str(args.input_runtime),
+        "--input-pipe-format",
+        str(args.input_pipe_format),
         "--rtsp-transport",
         str(args.transport),
         "--input-buffer-frames",
-        "4",
+        str(max(1, int(args.input_buffer_frames))),
+        *(["--disable-freeze-detection"] if bool(args.disable_freeze_detection) else []),
         "--rtsp-timeout-sec",
         "10",
         "--reconnect-cooldown-sec",
@@ -566,19 +631,15 @@ def main() -> int:
         "--sync-manual-offset-ms",
         "0",
         "--pair-reuse-max-age-ms",
-        "140",
+        f"{max(1.0, float(args.pair_reuse_max_age_ms)):.3f}",
         "--pair-reuse-max-consecutive",
-        "4",
-        "--probe-source",
-        "standalone",
-        "--probe-output-runtime",
-        "ffmpeg",
-        "--probe-output-target",
-        "udp://127.0.0.1:23000?pkt_size=1316",
+        str(max(1, int(args.pair_reuse_max_consecutive))),
+        "--sync-match-max-delta-ms",
+        f"{max(1.0, float(args.sync_match_max_delta_ms)):.3f}",
         "--output-standard",
         str(args.output_standard),
         "--transmit-output-runtime",
-        "ffmpeg",
+        str(args.production_output_runtime),
         "--transmit-output-target",
         "udp://127.0.0.1:24000?pkt_size=1316",
         "--transmit-output-codec",
@@ -591,7 +652,7 @@ def main() -> int:
         "--status-interval-sec",
         "1",
         "--duration-sec",
-        "25",
+        f"{max(5.0, float(args.runtime_duration_sec)):.3f}",
         "--homography-file",
         str(ROOT / "output" / "native" / "runtime_homography.json"),
         "--no-output-ui",
@@ -599,10 +660,26 @@ def main() -> int:
         "json",
         "--no-viewer",
     ]
+    if bool(args.disable_probe):
+        runtime_cmd.extend(["--probe-source", "disabled"])
+    else:
+        runtime_cmd.extend(
+            [
+                "--probe-source",
+                "standalone",
+                "--probe-output-runtime",
+                "ffmpeg",
+                "--probe-output-target",
+                "udp://127.0.0.1:23000?pkt_size=1316",
+            ]
+        )
+    if str(args.sync_pair_mode or "").strip():
+        runtime_cmd.extend(["--sync-pair-mode", str(args.sync_pair_mode).strip()])
 
     runtime = subprocess.Popen(
         runtime_cmd,
         cwd=str(ROOT),
+        stdin=subprocess.PIPE,
         stdout=RUNTIME_LOG.open("w", encoding="utf-8"),
         stderr=subprocess.STDOUT,
         text=True,
@@ -614,11 +691,12 @@ def main() -> int:
     system_samples: list[dict[str, float]] = []
     try:
         time.sleep(max(1.0, float(args.warmup_sec)))
-        probe_capture = _capture_stream(
-            "udp://127.0.0.1:23000?fifo_size=5000000&overrun_nonfatal=1",
-            PROBE_TS,
-            PROBE_CAPTURE_LOG,
-        )
+        if not bool(args.disable_probe):
+            probe_capture = _capture_stream(
+                "udp://127.0.0.1:23000?fifo_size=5000000&overrun_nonfatal=1",
+                PROBE_TS,
+                PROBE_CAPTURE_LOG,
+            )
         transmit_capture = _capture_stream(
             "udp://127.0.0.1:24000?fifo_size=5000000&overrun_nonfatal=1",
             TRANSMIT_TS,
@@ -635,14 +713,34 @@ def main() -> int:
                     proc.kill()
                     proc.wait(timeout=5)
         if runtime.poll() is None:
-            runtime.terminate()
+            shutdown_sent = False
+            if runtime.stdin is not None:
+                try:
+                    runtime.stdin.write('{"seq":1,"type":"shutdown","payload":{}}\n')
+                    runtime.stdin.flush()
+                    shutdown_sent = True
+                except OSError:
+                    shutdown_sent = False
+                finally:
+                    try:
+                        runtime.stdin.close()
+                    except OSError:
+                        pass
             try:
-                runtime.wait(timeout=5)
+                runtime.wait(timeout=8 if shutdown_sent else 5)
             except subprocess.TimeoutExpired:
-                runtime.kill()
-                runtime.wait(timeout=5)
+                runtime.terminate()
+                try:
+                    runtime.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    runtime.kill()
+                    runtime.wait(timeout=5)
 
-    probe_decode_rc, probe_montage_text = _decode_diagnostics(PROBE_TS, PROBE_DECODE_LOG, PROBE_MONTAGE)
+    if bool(args.disable_probe):
+        probe_decode_rc = 0
+        probe_montage_text = "probe disabled"
+    else:
+        probe_decode_rc, probe_montage_text = _decode_diagnostics(PROBE_TS, PROBE_DECODE_LOG, PROBE_MONTAGE)
     transmit_decode_rc, transmit_montage_text = _decode_diagnostics(TRANSMIT_TS, TRANSMIT_DECODE_LOG, TRANSMIT_MONTAGE)
 
     print("runtime_returncode", runtime.returncode)
@@ -668,6 +766,29 @@ def main() -> int:
     print(goal_summary)
     _print_summary("probe23000", PROBE_TS, PROBE_CAPTURE_LOG, PROBE_DECODE_LOG, PROBE_MONTAGE)
     _print_summary("transmit24000", TRANSMIT_TS, TRANSMIT_CAPTURE_LOG, TRANSMIT_DECODE_LOG, TRANSMIT_MONTAGE)
+
+    if str(args.summary_json or "").strip():
+        summary_path = Path(str(args.summary_json)).expanduser()
+        summary_path.parent.mkdir(parents=True, exist_ok=True)
+        summary_payload = {
+            "input_runtime": str(args.input_runtime),
+            "input_pipe_format": str(args.input_pipe_format),
+            "output_standard": str(args.output_standard),
+            "sync_pair_mode": str(args.sync_pair_mode or ""),
+            "system_metrics": system_summary,
+            "runtime_metrics": runtime_summary,
+            "service_goal": goal_summary,
+            "artifacts": {
+                "runtime_log": str(RUNTIME_LOG),
+                "probe_ts": str(PROBE_TS),
+                "transmit_ts": str(TRANSMIT_TS),
+            },
+        }
+        summary_path.write_text(
+            json.dumps(summary_payload, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+        print("summary_json", summary_path)
     return 0
 
 

@@ -2,6 +2,7 @@
 
 #include "output/ffmpeg_output_writer.h"
 #include "output/gpu_direct_output_writer.h"
+#include "output/gpu_direct_support.h"
 
 namespace hogak::output {
 
@@ -31,6 +32,26 @@ OutputRuntimeCapabilities get_output_runtime_capabilities(const std::string& run
         };
     }
     return OutputRuntimeCapabilities{};
+}
+
+bool output_runtime_available(const std::string& runtime) {
+    if (runtime == "none" || runtime == "ffmpeg") {
+        return true;
+    }
+    if (runtime == "gpu-direct") {
+        return gpu_direct_dependency_ready();
+    }
+    return false;
+}
+
+std::string output_runtime_availability_reason(const std::string& runtime) {
+    if (runtime == "none" || runtime == "ffmpeg") {
+        return "";
+    }
+    if (runtime == "gpu-direct") {
+        return gpu_direct_startup_status();
+    }
+    return "unsupported output runtime";
 }
 
 }  // namespace hogak::output

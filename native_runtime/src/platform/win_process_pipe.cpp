@@ -4,6 +4,8 @@
 
 #include <windows.h>
 
+#include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace hogak::platform {
@@ -14,6 +16,11 @@ HANDLE as_handle(void* value) noexcept {
     return static_cast<HANDLE>(value);
 }
 
+// Keep at least one full 1080p BGR24 frame in the pipe so reader-side frame reads
+// are less likely to be split across many small ReadFile calls.
+constexpr DWORD kPipeBufferBytes = 8u << 20;
+constexpr std::size_t kPipeReadChunkBytes = 4u << 20;
+
 }  // namespace
 
 WinProcessPipe::~WinProcessPipe() {
@@ -22,6 +29,9 @@ WinProcessPipe::~WinProcessPipe() {
 
 bool WinProcessPipe::start(const std::string& command_line, std::string& error_message) {
     stop();
+    read_buffer_.assign(kPipeReadChunkBytes, 0);
+    read_buffer_begin_ = 0;
+    read_buffer_end_ = 0;
 
     SECURITY_ATTRIBUTES security{};
     security.nLength = sizeof(security);
@@ -30,7 +40,7 @@ bool WinProcessPipe::start(const std::string& command_line, std::string& error_m
 
     HANDLE stdout_read = nullptr;
     HANDLE stdout_write = nullptr;
-    if (!CreatePipe(&stdout_read, &stdout_write, &security, 0)) {
+    if (!CreatePipe(&stdout_read, &stdout_write, &security, kPipeBufferBytes)) {
         error_message = "CreatePipe failed";
         return false;
     }
@@ -117,15 +127,31 @@ bool WinProcessPipe::read_exact(std::uint8_t* destination, std::size_t bytes_to_
     }
 
     while (bytes_read < bytes_to_read) {
-        DWORD chunk = 0;
-        const auto remaining = static_cast<DWORD>(bytes_to_read - bytes_read);
-        if (!ReadFile(as_handle(stdout_read_handle_), destination + bytes_read, remaining, &chunk, nullptr)) {
-            return false;
+        if (read_buffer_begin_ >= read_buffer_end_) {
+            if (read_buffer_.empty()) {
+                read_buffer_.assign(kPipeReadChunkBytes, 0);
+            }
+            DWORD chunk = 0;
+            if (!ReadFile(
+                    as_handle(stdout_read_handle_),
+                    read_buffer_.data(),
+                    static_cast<DWORD>(read_buffer_.size()),
+                    &chunk,
+                    nullptr)) {
+                return false;
+            }
+            if (chunk == 0) {
+                return false;
+            }
+            read_buffer_begin_ = 0;
+            read_buffer_end_ = static_cast<std::size_t>(chunk);
         }
-        if (chunk == 0) {
-            return false;
-        }
-        bytes_read += static_cast<std::size_t>(chunk);
+        const std::size_t available = read_buffer_end_ - read_buffer_begin_;
+        const std::size_t remaining = bytes_to_read - bytes_read;
+        const std::size_t copy_bytes = (available < remaining) ? available : remaining;
+        std::memcpy(destination + bytes_read, read_buffer_.data() + read_buffer_begin_, copy_bytes);
+        read_buffer_begin_ += copy_bytes;
+        bytes_read += copy_bytes;
     }
     return true;
 }
@@ -141,6 +167,8 @@ void WinProcessPipe::stop() {
         CloseHandle(as_handle(process_handle_));
         process_handle_ = nullptr;
     }
+    read_buffer_begin_ = 0;
+    read_buffer_end_ = 0;
 }
 
 bool WinProcessPipe::running() const noexcept {

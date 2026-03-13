@@ -15,11 +15,19 @@ if not defined VLC_BIN (
   exit /b 1
 )
 
-set "TARGET=udp://@:24000"
-set "WINDOW_TITLE=Hogak Transmit"
+set "TARGET=tcp://127.0.0.1:24001"
+set "WINDOW_TITLE=Hogak Transmit VLC"
 if /I "%MODE%"=="probe" (
   set "TARGET=udp://@:23000"
   set "WINDOW_TITLE=Hogak Probe"
+)
+if /I "%MODE%"=="transmit-udp" (
+  set "TARGET=udp://@:24000"
+  set "WINDOW_TITLE=Hogak Transmit UDP"
+)
+if /I "%MODE%"=="transmit-tcp" (
+  set "TARGET=tcp://127.0.0.1:24001"
+  set "WINDOW_TITLE=Hogak Transmit VLC"
 )
 
 echo Opening %TARGET% with VLC low-latency options ^(network-caching=%CACHE_MS%ms^)
@@ -27,11 +35,12 @@ echo Opening %TARGET% with VLC low-latency options ^(network-caching=%CACHE_MS%m
   --no-video-title-show ^
   --network-caching=%CACHE_MS% ^
   --live-caching=%CACHE_MS% ^
+  --udp-caching=%CACHE_MS% ^
   --clock-jitter=0 ^
   --clock-synchro=0 ^
   --drop-late-frames ^
   --skip-frames ^
-  --avcodec-hw=any ^
+  --avcodec-hw=none ^
   --meta-title="%WINDOW_TITLE%" ^
   "%TARGET%"
 

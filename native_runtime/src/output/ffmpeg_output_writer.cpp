@@ -91,6 +91,159 @@ std::string build_low_latency_bufsize(const std::string& bitrate, double fps) {
     return format_bitrate_bits(chosen_bits);
 }
 
+bool starts_with(const std::string& text, const char* prefix) {
+    return text.rfind(prefix, 0) == 0;
+}
+
+bool url_has_query_key(const std::string& url, const std::string& key) {
+    const auto query_pos = url.find('?');
+    if (query_pos == std::string::npos || key.empty()) {
+        return false;
+    }
+
+    std::size_t item_begin = query_pos + 1;
+    while (item_begin < url.size()) {
+        const auto item_end = url.find('&', item_begin);
+        const auto token = url.substr(item_begin, item_end == std::string::npos ? std::string::npos : item_end - item_begin);
+        const auto equals_pos = token.find('=');
+        const auto token_key = token.substr(0, equals_pos);
+        if (token_key == key) {
+            return true;
+        }
+        if (item_end == std::string::npos) {
+            break;
+        }
+        item_begin = item_end + 1;
+    }
+    return false;
+}
+
+std::string append_url_query_key(std::string url, const std::string& key, const std::string& value) {
+    if (key.empty() || value.empty() || url_has_query_key(url, key)) {
+        return url;
+    }
+    url += (url.find('?') == std::string::npos) ? '?' : '&';
+    url += key;
+    url += '=';
+    url += value;
+    return url;
+}
+
+std::vector<std::string> split_text(const std::string& text, char delimiter) {
+    std::vector<std::string> parts;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        const auto end = text.find(delimiter, begin);
+        parts.emplace_back(text.substr(begin, end == std::string::npos ? std::string::npos : end - begin));
+        if (end == std::string::npos) {
+            break;
+        }
+        begin = end + 1;
+    }
+    return parts;
+}
+
+std::string join_text(const std::vector<std::string>& parts, char delimiter) {
+    std::ostringstream out;
+    for (std::size_t index = 0; index < parts.size(); ++index) {
+        if (index > 0) {
+            out << delimiter;
+        }
+        out << parts[index];
+    }
+    return out.str();
+}
+
+std::int64_t build_udp_transport_bitrate_bits(const std::string& bitrate) {
+    const auto bitrate_bits = parse_bitrate_bits(bitrate);
+    if (bitrate_bits <= 0) {
+        return 0;
+    }
+    const auto overhead_bits = std::max<std::int64_t>(500'000, bitrate_bits / 10);
+    return bitrate_bits + overhead_bits;
+}
+
+std::int64_t build_udp_burst_bits(std::int64_t transport_bitrate_bits, double fps) {
+    if (transport_bitrate_bits <= 0) {
+        return 0;
+    }
+    const double safe_fps = std::max(1.0, fps);
+    const auto frame_bits = std::max<std::int64_t>(
+        1,
+        static_cast<std::int64_t>(std::llround(static_cast<double>(transport_bitrate_bits) / safe_fps)));
+    return std::max<std::int64_t>(262'144, frame_bits * 4);
+}
+
+std::string build_udp_output_target(std::string target, const std::string& bitrate, double fps) {
+    if (!starts_with(target, "udp://")) {
+        return target;
+    }
+
+    std::string result = std::move(target);
+    const auto transport_bitrate_bits = build_udp_transport_bitrate_bits(bitrate);
+    const auto burst_bits = build_udp_burst_bits(transport_bitrate_bits, fps);
+    if (transport_bitrate_bits > 0) {
+        result = append_url_query_key(result, "bitrate", std::to_string(transport_bitrate_bits));
+    }
+    if (burst_bits > 0) {
+        result = append_url_query_key(result, "burst_bits", std::to_string(burst_bits));
+        const auto buffer_bytes = std::max<std::int64_t>(1 * 1024 * 1024, (burst_bits / 8) * 4);
+        result = append_url_query_key(result, "buffer_size", std::to_string(buffer_bytes));
+    } else {
+        result = append_url_query_key(result, "buffer_size", std::to_string(1 * 1024 * 1024));
+    }
+    return result;
+}
+
+std::string normalize_tee_leg_options(std::string options) {
+    if (options.empty()) {
+        return options;
+    }
+    if (options.find("f=mpegts") != std::string::npos) {
+        if (options.find("mpegts_flags=") == std::string::npos) {
+            options += ":mpegts_flags=resend_headers+pat_pmt_at_frames";
+        } else if (options.find("pat_pmt_at_frames") == std::string::npos) {
+            const std::string needle = "mpegts_flags=resend_headers";
+            const auto pos = options.find(needle);
+            if (pos != std::string::npos) {
+                options.replace(pos, needle.size(), "mpegts_flags=resend_headers+pat_pmt_at_frames");
+            }
+        }
+    }
+    return options;
+}
+
+std::string build_tee_output_target(const hogak::engine::OutputConfig& config, double fps) {
+    std::vector<std::string> legs = split_text(config.target, '|');
+    for (auto& leg : legs) {
+        std::string options;
+        std::string leg_target = leg;
+        if (!leg.empty() && leg.front() == '[') {
+            const auto closing = leg.find(']');
+            if (closing != std::string::npos) {
+                options = leg.substr(1, closing - 1);
+                leg_target = leg.substr(closing + 1);
+            }
+        }
+
+        leg_target = build_udp_output_target(std::move(leg_target), config.bitrate, fps);
+        options = normalize_tee_leg_options(std::move(options));
+        if (!options.empty()) {
+            leg = "[" + options + "]" + leg_target;
+        } else {
+            leg = leg_target;
+        }
+    }
+    return join_text(legs, '|');
+}
+
+std::string build_output_target(const hogak::engine::OutputConfig& config, double fps, const std::string& muxer) {
+    if (muxer == "tee" || config.target.find('|') != std::string::npos) {
+        return build_tee_output_target(config, fps);
+    }
+    return build_udp_output_target(config.target, config.bitrate, fps);
+}
+
 bool requires_even_dimensions(const std::string& codec) {
     const auto lowered = codec;
     return lowered == "libx264" ||
@@ -364,6 +517,8 @@ void FfmpegOutputWriter::run() {
 
 std::string FfmpegOutputWriter::build_command_line() const {
     std::ostringstream command;
+    const auto output_target = build_output_target(config_, fps_, muxer_);
+    const auto transport_bitrate_bits = build_udp_transport_bitrate_bits(config_.bitrate);
     command
         << quote_arg(ffmpeg_bin_)
         << " -hide_banner -loglevel warning -y"
@@ -418,12 +573,15 @@ std::string FfmpegOutputWriter::build_command_line() const {
     }
 
     if (muxer_ == "mpegts") {
-        command << " -mpegts_flags resend_headers"
+        command << " -mpegts_flags resend_headers+pat_pmt_at_frames"
                 << " -muxdelay 0"
                 << " -muxpreload 0";
+        if (transport_bitrate_bits > 0) {
+            command << " -muxrate " << transport_bitrate_bits;
+        }
     }
 
-    command << " " << quote_arg(config_.target);
+    command << " " << quote_arg(output_target);
     return command.str();
 }
 

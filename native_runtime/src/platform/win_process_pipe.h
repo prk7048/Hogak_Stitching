@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 namespace hogak::platform {
 
@@ -24,6 +25,9 @@ public:
 private:
     void* process_handle_ = nullptr;
     void* stdout_read_handle_ = nullptr;
+    std::vector<std::uint8_t> read_buffer_{};
+    std::size_t read_buffer_begin_ = 0;
+    std::size_t read_buffer_end_ = 0;
 };
 
 }  // namespace hogak::platform

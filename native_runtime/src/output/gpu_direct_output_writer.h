@@ -1,9 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+
+#include <opencv2/core.hpp>
+#include <opencv2/core/cuda.hpp>
 
 #include "output/output_writer.h"
 
@@ -11,6 +17,12 @@ namespace hogak::output {
 
 class GpuDirectOutputWriter final : public OutputWriter {
 public:
+    GpuDirectOutputWriter();
+    ~GpuDirectOutputWriter() override;
+
+    GpuDirectOutputWriter(const GpuDirectOutputWriter&) = delete;
+    GpuDirectOutputWriter& operator=(const GpuDirectOutputWriter&) = delete;
+
     bool start(
         const hogak::engine::OutputConfig& config,
         const std::string& ffmpeg_bin,
@@ -30,14 +42,30 @@ public:
     std::string muxer() const override;
 
 private:
+    struct Impl;
+
+    void run();
+
     mutable std::mutex mutex_;
+    std::condition_variable condition_{};
+    std::thread thread_{};
     std::atomic<bool> active_{false};
     hogak::engine::OutputConfig config_{};
-    std::string last_error_{"gpu-direct output writer not implemented yet"};
-    std::string command_line_{"gpu-direct://not-implemented"};
+    std::string effective_codec_{};
+    std::string muxer_{};
+    std::string output_target_{};
+    std::string last_error_{"gpu-direct output writer not started"};
+    std::string command_line_{"gpu-direct://pending-backend"};
     int width_ = 0;
     int height_ = 0;
     double fps_ = 0.0;
+    cv::Mat latest_frame_{};
+    cv::cuda::GpuMat latest_gpu_frame_{};
+    bool latest_frame_on_gpu_ = false;
+    bool frame_pending_ = false;
+    std::int64_t frames_written_ = 0;
+    std::int64_t frames_dropped_ = 0;
+    std::unique_ptr<Impl> impl_{};
 };
 
 }  // namespace hogak::output

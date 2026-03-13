@@ -1,10 +1,24 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import os
+import re
 import shutil
 import subprocess
+
+from stitching.project_defaults import (
+    DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
+    DEFAULT_NATIVE_INPUT_PIPE_FORMAT,
+    DEFAULT_NATIVE_INPUT_RUNTIME,
+    DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS,
+    DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE,
+    DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC,
+    DEFAULT_NATIVE_RTSP_TRANSPORT,
+    DEFAULT_NATIVE_RTSP_TIMEOUT_SEC,
+    DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
+)
 
 
 @dataclass(slots=True)
@@ -14,16 +28,18 @@ class RuntimeLaunchSpec:
     heartbeat_ms: int = 1000
     left_rtsp: str = ""
     right_rtsp: str = ""
-    input_runtime: str = "ffmpeg-cuda"
+    input_runtime: str = DEFAULT_NATIVE_INPUT_RUNTIME
+    input_pipe_format: str = DEFAULT_NATIVE_INPUT_PIPE_FORMAT
     ffmpeg_bin: str = ""
     homography_file: str = ""
     frame_width: int = 1920
     frame_height: int = 1080
-    transport: str = "tcp"
-    input_buffer_frames: int = 8
+    transport: str = DEFAULT_NATIVE_RTSP_TRANSPORT
+    input_buffer_frames: int = DEFAULT_NATIVE_INPUT_BUFFER_FRAMES
+    disable_freeze_detection: bool = False
     video_codec: str = "h264"
-    timeout_sec: float = 10.0
-    reconnect_cooldown_sec: float = 1.0
+    timeout_sec: float = DEFAULT_NATIVE_RTSP_TIMEOUT_SEC
+    reconnect_cooldown_sec: float = DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC
     output_runtime: str = "none"
     output_profile: str = "inspection"
     output_target: str = ""
@@ -48,9 +64,9 @@ class RuntimeLaunchSpec:
     production_output_debug_overlay: bool = False
     sync_pair_mode: str = "none"
     allow_frame_reuse: bool = False
-    pair_reuse_max_age_ms: float = 90.0
-    pair_reuse_max_consecutive: int = 2
-    sync_match_max_delta_ms: float = 35.0
+    pair_reuse_max_age_ms: float = DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS
+    pair_reuse_max_consecutive: int = DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE
+    sync_match_max_delta_ms: float = DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS
     sync_manual_offset_ms: float = 0.0
     stitch_output_scale: float = 1.0
     stitch_every_n: int = 1
@@ -62,6 +78,54 @@ class RuntimeLaunchSpec:
 
 def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _runtime_path_entries(repo_root: Path) -> list[str]:
+    return [
+        str(repo_root / ".third_party" / "ffmpeg" / "current" / "bin"),
+        str(repo_root / ".third_party" / "ffmpeg-dev" / "current" / "bin"),
+        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64",
+    ]
+
+
+def _ensure_runtime_loader_paths(repo_root: Path | None = None) -> None:
+    repo_root = repo_root or _repo_root()
+    path_entries = _runtime_path_entries(repo_root)
+    current_path = os.environ.get("PATH", "")
+    normalized_existing = current_path.lower()
+    for entry in path_entries:
+        if not entry:
+            continue
+        if entry.lower() not in normalized_existing:
+            current_path = entry + os.pathsep + current_path
+            normalized_existing = current_path.lower()
+        if os.name == "nt" and hasattr(os, "add_dll_directory") and Path(entry).exists():
+            try:
+                os.add_dll_directory(entry)
+            except OSError:
+                pass
+    os.environ["PATH"] = current_path
+
+
+def _wrap_windows_runtime_command(command: list[str], repo_root: Path) -> list[str]:
+    path_prefix = ";".join(_runtime_path_entries(repo_root))
+    command_text = subprocess.list2cmdline(command)
+    wrapped = f'set "PATH={path_prefix};%PATH%" & {command_text}'
+    return [
+        os.environ.get("ComSpec", r"C:\Windows\System32\cmd.exe"),
+        "/d",
+        "/c",
+        wrapped,
+    ]
+
+
+def _runtime_env(repo_root: Path | None = None) -> dict[str, str]:
+    repo_root = repo_root or _repo_root()
+    _ensure_runtime_loader_paths(repo_root)
+    env = os.environ.copy()
+    path_entries = _runtime_path_entries(repo_root)
+    env["PATH"] = os.pathsep.join(path_entries + [env.get("PATH", "")])
+    return env
 
 
 def resolve_ffmpeg_binary(explicit_path: str = "") -> Path:
@@ -111,6 +175,50 @@ def resolve_runtime_binary() -> Path:
     )
 
 
+def _resolve_gpu_direct_build_config() -> Path | None:
+    candidates = (
+        _repo_root() / "native_runtime" / "build" / "windows-release" / "generated" / "output" / "gpu_direct_build_config.h",
+        _repo_root() / "native_runtime" / "build" / "windows-debug" / "generated" / "output" / "gpu_direct_build_config.h",
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _query_gpu_direct_status_from_build_config() -> dict[str, object]:
+    path = _resolve_gpu_direct_build_config()
+    if path is None:
+        return {
+            "ok": False,
+            "returncode": -1,
+            "stderr": "gpu_direct_build_config.h not found",
+        }
+
+    text = path.read_text(encoding="utf-8", errors="ignore")
+
+    def extract(pattern: str, default: str = "") -> str:
+        match = re.search(pattern, text)
+        if match is None:
+            return default
+        return match.group(1)
+
+    provider = extract(r'#define HOGAK_GPU_DIRECT_PROVIDER "([^"]*)"')
+    dependency_ready_text = extract(r"#define HOGAK_GPU_DIRECT_AVCODEC_ENABLED ([0-9]+)", "0")
+    status = extract(r'#define HOGAK_GPU_DIRECT_DEPENDENCY_STATUS "([^"]*)"')
+    ffmpeg_dev_root = extract(r'#define HOGAK_GPU_DIRECT_FFMPEG_DEV_ROOT "([^"]*)"')
+    return {
+        "ok": True,
+        "returncode": 0,
+        "stderr": "",
+        "provider": provider,
+        "dependency_ready": dependency_ready_text == "1",
+        "status": status,
+        "ffmpeg_dev_root": ffmpeg_dev_root,
+        "source": str(path),
+    }
+
+
 def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
     spec = spec or RuntimeLaunchSpec()
     command = [str(resolve_runtime_binary())]
@@ -125,6 +233,8 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
         command.extend(["--right-url", spec.right_rtsp])
     if spec.input_runtime:
         command.extend(["--input-runtime", spec.input_runtime])
+    if spec.input_pipe_format:
+        command.extend(["--input-pipe-format", spec.input_pipe_format])
     ffmpeg_bin = spec.ffmpeg_bin.strip()
     if ffmpeg_bin:
         command.extend(["--ffmpeg-bin", ffmpeg_bin])
@@ -137,6 +247,8 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
     if spec.transport:
         command.extend(["--transport", spec.transport])
     command.extend(["--input-buffer-frames", str(max(1, int(spec.input_buffer_frames)))])
+    if spec.disable_freeze_detection:
+        command.append("--disable-freeze-detection")
     if spec.video_codec:
         command.extend(["--video-codec", spec.video_codec])
     command.extend(["--timeout-sec", f"{float(spec.timeout_sec):.3f}"])
@@ -211,12 +323,7 @@ def launch_native_runtime(
 ) -> subprocess.Popen[str]:
     command = build_runtime_command(spec)
     repo_root = _repo_root()
-    env = os.environ.copy()
-    path_entries = [
-        str(repo_root / ".third_party" / "ffmpeg" / "current" / "bin"),
-        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64",
-    ]
-    env["PATH"] = os.pathsep.join(path_entries + [env.get("PATH", "")])
+    env = _runtime_env(repo_root)
     return subprocess.Popen(
         command,
         cwd=str(repo_root),
@@ -229,3 +336,37 @@ def launch_native_runtime(
         creationflags=creationflags,
         env=env,
     )
+
+
+def query_gpu_direct_status() -> dict[str, object]:
+    runtime_bin = resolve_runtime_binary()
+    repo_root = _repo_root()
+    command = [str(runtime_bin), "--print-gpu-direct-status"]
+    completed = subprocess.run(
+        command,
+        cwd=str(repo_root),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        env=_runtime_env(repo_root),
+    )
+    payload: dict[str, object] = {
+        "ok": completed.returncode == 0,
+        "returncode": int(completed.returncode),
+        "stderr": completed.stderr.strip(),
+    }
+    stdout = completed.stdout.strip()
+    if stdout:
+        try:
+            payload.update(json.loads(stdout))
+        except json.JSONDecodeError:
+            payload["raw"] = stdout
+    if payload.get("ok") and payload.get("provider"):
+        return payload
+    fallback = _query_gpu_direct_status_from_build_config()
+    fallback["runtime_bin"] = str(runtime_bin)
+    if not payload.get("ok"):
+        fallback["runtime_probe_failed"] = True
+        fallback["runtime_probe_returncode"] = payload.get("returncode")
+    return fallback

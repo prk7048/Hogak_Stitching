@@ -255,11 +255,12 @@ def _build_vlc_command(spec: FinalStreamViewerSpec) -> list[str]:
         "--no-video-title-show",
         f"--network-caching={cache_ms}",
         f"--live-caching={cache_ms}",
+        f"--udp-caching={cache_ms}",
         "--clock-jitter=0",
         "--clock-synchro=0",
         "--drop-late-frames",
         "--skip-frames",
-        "--avcodec-hw=any",
+        "--avcodec-hw=none",
         f"--meta-title={spec.window_title}",
         target,
     ]

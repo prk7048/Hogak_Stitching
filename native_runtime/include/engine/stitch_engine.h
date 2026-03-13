@@ -6,16 +6,14 @@
 #include <memory>
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
+#include <vector>
 
 #include "engine/engine_config.h"
 #include "engine/engine_metrics.h"
+#include "input/ffmpeg_rtsp_reader.h"
 
 namespace hogak::output {
 class OutputWriter;
-}
-
-namespace hogak::input {
-struct ReaderSnapshot;
 }
 
 namespace hogak::engine {
@@ -48,7 +46,7 @@ private:
     void clear_calibration_state_locked();
     void update_metrics_locked();
     bool restart_reader_locked(bool left_reader, const char* reason);
-    bool ensure_calibration_locked(const cv::Mat& left_frame, const cv::Mat& right_frame);
+    bool ensure_calibration_locked(const cv::Size& left_size, const cv::Size& right_size);
     bool stitch_pair_locked(
         const cv::Mat& left_frame,
         const cv::Mat& right_frame,
@@ -56,7 +54,10 @@ private:
         const SelectedPair& selected_pair,
         bool left_reused,
         bool right_reused,
-        double pair_age_ms);
+        double pair_age_ms,
+        const cv::Mat* left_raw_input = nullptr,
+        const cv::Mat* right_raw_input = nullptr,
+        double output_scale = 1.0);
     bool load_homography_locked(cv::Mat* homography_out);
     bool prepare_output_frame_locked(
         const OutputConfig& output_config,
@@ -71,6 +72,7 @@ private:
         bool left_reused,
         bool right_reused,
         double pair_age_ms) const;
+    void record_wait_paired_fresh_locked(bool left_missing_fresh, bool right_missing_fresh);
     bool select_pair_locked(
         const hogak::input::ReaderSnapshot& left_snapshot,
         const hogak::input::ReaderSnapshot& right_snapshot,
@@ -82,19 +84,25 @@ private:
     std::atomic<bool> running_{false};
     std::int64_t last_left_seq_ = 0;
     std::int64_t last_right_seq_ = 0;
+    std::int64_t last_service_pair_ts_ns_ = 0;
     std::int64_t last_worker_timestamp_ns_ = 0;
+    std::int64_t last_stitched_count_ = 0;
+    std::int64_t last_stitch_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;
     std::int64_t last_output_timestamp_ns_ = 0;
     std::int64_t last_production_output_frames_written_ = 0;
     std::int64_t last_production_output_timestamp_ns_ = 0;
     std::int32_t consecutive_left_reuse_ = 0;
     std::int32_t consecutive_right_reuse_ = 0;
+    double wait_paired_fresh_left_age_sum_ms_ = 0.0;
+    double wait_paired_fresh_right_age_sum_ms_ = 0.0;
     std::int64_t left_reader_restart_count_ = 0;
     std::int64_t right_reader_restart_count_ = 0;
     std::int64_t last_left_reader_restart_ns_ = 0;
     std::int64_t last_right_reader_restart_ns_ = 0;
     bool calibrated_ = false;
     bool gpu_available_ = false;
+    bool gpu_nv12_input_supported_ = true;
     cv::Mat homography_{};
     cv::Mat homography_adjusted_{};
     cv::Mat left_mask_template_{};
@@ -113,9 +121,15 @@ private:
     cv::Size output_size_{};
     bool full_overlap_ = false;
     cv::Mat latest_stitched_{};
+    cv::cuda::GpuMat gpu_left_nv12_y_{};
+    cv::cuda::GpuMat gpu_left_nv12_uv_{};
+    cv::cuda::GpuMat gpu_left_decoded_{};
     cv::cuda::GpuMat gpu_left_input_{};
     cv::cuda::GpuMat gpu_left_canvas_{};
     cv::cuda::GpuMat gpu_stitched_{};
+    cv::cuda::GpuMat gpu_right_nv12_y_{};
+    cv::cuda::GpuMat gpu_right_nv12_uv_{};
+    cv::cuda::GpuMat gpu_right_decoded_{};
     cv::cuda::GpuMat gpu_right_input_{};
     cv::cuda::GpuMat gpu_right_warped_{};
     cv::cuda::GpuMat gpu_overlap_mask_{};
@@ -134,6 +148,8 @@ private:
     cv::cuda::GpuMat gpu_overlap_u8_{};
     cv::cuda::GpuMat gpu_output_scaled_{};
     cv::cuda::GpuMat gpu_output_canvas_{};
+    std::vector<hogak::input::BufferedFrameInfo> left_buffered_infos_cache_{};
+    std::vector<hogak::input::BufferedFrameInfo> right_buffered_infos_cache_{};
     std::unique_ptr<hogak::output::OutputWriter> output_writer_{};
     std::unique_ptr<hogak::output::OutputWriter> production_output_writer_{};
 };

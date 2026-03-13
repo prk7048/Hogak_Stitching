@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <string>
 #include <thread>
 
 #ifdef _WIN32
@@ -11,6 +12,7 @@
 #include "control/control_server.h"
 #include "engine/engine_config.h"
 #include "engine/stitch_engine.h"
+#include "output/gpu_direct_support.h"
 
 namespace {
 
@@ -61,13 +63,14 @@ void print_help() {
         << "  --right-url URL    Right RTSP URL\n"
         << "  --ffmpeg-bin PATH  ffmpeg.exe path\n"
         << "  --input-runtime M  ffmpeg-cpu or ffmpeg-cuda\n"
+        << "  --input-pipe-format M  bgr24 or nv12\n"
         << "  --homography-file P  Path to fixed 3x3 homography file\n"
         << "  --width N          Input width (default 1920)\n"
         << "  --height N         Input height (default 1080)\n"
         << "  --transport M      RTSP transport (default tcp)\n"
         << "  --input-buffer-frames N  Max buffered frames per RTSP reader\n"
         << "  --video-codec C    h264 or hevc (default h264)\n"
-        << "  --output-runtime M none or ffmpeg\n"
+        << "  --output-runtime M none, ffmpeg, or gpu-direct\n"
         << "  --output-profile P inspection or production-compatible\n"
         << "  --output-target U  Encoded output target (udp/rtsp/rtmp/file)\n"
         << "  --output-codec C   Output codec (default h264_nvenc)\n"
@@ -78,7 +81,7 @@ void print_help() {
         << "  --output-height N  Force encoded output height\n"
         << "  --output-fps N     Force encoded output fps\n"
         << "  --output-debug-overlay  Burn debug overlay into local probe output\n"
-        << "  --production-output-runtime M none or ffmpeg\n"
+        << "  --production-output-runtime M none, ffmpeg, or gpu-direct\n"
         << "  --production-output-profile P inspection or production-compatible\n"
         << "  --production-output-target U  Production encoded output target\n"
         << "  --production-output-codec C   Production output codec\n"
@@ -89,7 +92,7 @@ void print_help() {
         << "  --production-output-height N  Force production encoded output height\n"
         << "  --production-output-fps N     Force production encoded output fps\n"
         << "  --production-output-debug-overlay  Burn debug overlay into transmit output\n"
-        << "  --sync-pair-mode M none/latest/oldest\n"
+        << "  --sync-pair-mode M none/latest/oldest/service\n"
         << "  --allow-frame-reuse  Allow reuse of one-side stale pair for smoother output\n"
         << "  --pair-reuse-max-age-ms N  Max stale age allowed for one-side reuse\n"
         << "  --pair-reuse-max-consecutive N  Max consecutive one-side reuses\n"
@@ -99,6 +102,7 @@ void print_help() {
         << "  --stitch-every-n N           Stitch every N selected pairs\n"
         << "  --gpu-mode M      off/auto/on\n"
         << "  --gpu-device N    CUDA device index\n"
+        << "  --print-gpu-direct-status  Print gpu-direct dependency status and exit\n"
         << "  --headless-benchmark  Enable benchmark mode metadata\n";
 }
 
@@ -125,6 +129,17 @@ int main(int argc, char** argv) {
         print_help();
         return 0;
     }
+    if (has_flag(argc, argv, "--print-gpu-direct-status")) {
+        const std::string ffmpeg_dev_root = hogak::output::gpu_direct_ffmpeg_dev_root();
+        std::cout
+            << "{"
+            << "\"provider\":\"" << hogak::output::gpu_direct_provider() << "\","
+            << "\"dependency_ready\":" << (hogak::output::gpu_direct_dependency_ready() ? "true" : "false") << ","
+            << "\"status\":\"" << hogak::output::gpu_direct_dependency_status() << "\","
+            << "\"ffmpeg_dev_root\":\"" << ffmpeg_dev_root << "\""
+            << "}\n";
+        return 0;
+    }
 
     const bool emit_hello = has_flag(argc, argv, "--emit-hello");
     const bool once = has_flag(argc, argv, "--once");
@@ -143,12 +158,16 @@ int main(int argc, char** argv) {
     config.right.transport = config.left.transport;
     config.left.video_codec = read_string_arg(argc, argv, "--video-codec", "h264");
     config.right.video_codec = config.left.video_codec;
+    config.left.input_pipe_format = read_string_arg(argc, argv, "--input-pipe-format", "nv12");
+    config.right.input_pipe_format = config.left.input_pipe_format;
     config.left.width = read_int_arg(argc, argv, "--width", 1920);
     config.left.height = read_int_arg(argc, argv, "--height", 1080);
     config.right.width = config.left.width;
     config.right.height = config.left.height;
     config.left.max_buffered_frames = read_int_arg(argc, argv, "--input-buffer-frames", 8);
     config.right.max_buffered_frames = config.left.max_buffered_frames;
+    config.left.enable_freeze_detection = !has_flag(argc, argv, "--disable-freeze-detection");
+    config.right.enable_freeze_detection = config.left.enable_freeze_detection;
     config.left.timeout_sec = read_double_arg(argc, argv, "--timeout-sec", 10.0);
     config.right.timeout_sec = config.left.timeout_sec;
     config.left.reconnect_cooldown_sec = read_double_arg(argc, argv, "--reconnect-cooldown-sec", 1.0);

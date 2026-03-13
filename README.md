@@ -20,6 +20,15 @@ Python이 calibration과 운영 제어를 맡고 C++ runtime이 실제 stitched 
 
 상세 판단 문서는 [`reports/README.md`](/c:/Users/Pixellot/Hogak_Stitching/reports/README.md)를 보면 된다.
 
+## Current Main Path
+
+현재 운영 기준의 메인 경로는 아래 둘이다.
+
+1. `python -m stitching.cli native-calibrate`
+2. `python -m stitching.cli native-runtime`
+
+이 둘은 코드에서도 현재 경로로 분리되어 있고, 나머지 `video/live/gui/desktop/serve`는 보조 또는 레거시 경로로 유지된다.
+
 ## Quick Start
 
 ### 1. Install
@@ -204,11 +213,6 @@ monitor에서 우선 볼 값:
 - `python -m stitching.cli desktop`
 - `python -m stitching.cli gui`
 - offline video stitching commands
-
-현재 프로젝트 기준 main path는 아래 둘이다.
-
-1. `scripts\run_native_calibrate.cmd`
-2. `scripts\run_native_runtime.cmd`
 
 ## Common Errors
 

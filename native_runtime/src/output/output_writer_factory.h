@@ -15,5 +15,7 @@ struct OutputRuntimeCapabilities {
 
 std::unique_ptr<OutputWriter> create_output_writer(const std::string& runtime);
 OutputRuntimeCapabilities get_output_runtime_capabilities(const std::string& runtime);
+bool output_runtime_available(const std::string& runtime);
+std::string output_runtime_availability_reason(const std::string& runtime);
 
 }  // namespace hogak::output
