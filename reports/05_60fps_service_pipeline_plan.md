@@ -446,6 +446,8 @@ probe는 아래 둘 중 하나만 허용한다.
 - `OutputWriter interface + factory` skeleton 반영 완료
 - `OutputFrame`을 CPU/GPU mixed carrier로 확장 완료
 - `gpu-direct` runtime placeholder backend 연결 완료
+- output runtime capability 기반의 `conditional CPU download` 시작
+- heavy stitched/warped metrics `sampled update` 시작
 - 진단 스크립트에 `60fps service_goal` pass/fail summary 반영 완료
 - 다음 단계는 `future GPU writer`가 실제로 들어올 자리와 metrics 기준을 더 분명히 만드는 것
 

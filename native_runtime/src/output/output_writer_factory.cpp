@@ -15,4 +15,22 @@ std::unique_ptr<OutputWriter> create_output_writer(const std::string& runtime) {
     return nullptr;
 }
 
+OutputRuntimeCapabilities get_output_runtime_capabilities(const std::string& runtime) {
+    if (runtime == "ffmpeg") {
+        return OutputRuntimeCapabilities{
+            true,
+            true,
+            true,
+        };
+    }
+    if (runtime == "gpu-direct") {
+        return OutputRuntimeCapabilities{
+            false,
+            true,
+            false,
+        };
+    }
+    return OutputRuntimeCapabilities{};
+}
+
 }  // namespace hogak::output

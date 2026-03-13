@@ -39,6 +39,7 @@ constexpr double kReaderRestartCooldownSec = 3.0;
 constexpr int kSeamFeatherMinWidth = 48;
 constexpr int kSeamFeatherMaxWidth = 192;
 constexpr double kSeamFeatherFraction = 0.14;
+constexpr int kHeavyMetricSampleEveryN = 15;
 
 double fps_from_period_ns(std::int64_t delta_ns) {
     if (delta_ns <= 0) {
@@ -88,6 +89,14 @@ double probe_motion_mean(const cv::Mat& previous_probe_gray, const cv::Mat& curr
 
 double clamp_output_scale(double value) {
     return std::clamp(value, 0.1, 1.0);
+}
+
+bool should_sample_heavy_metrics(std::int64_t next_frame_index) {
+    return next_frame_index <= 1 || (next_frame_index % kHeavyMetricSampleEveryN) == 0;
+}
+
+bool output_config_enabled(const OutputConfig& config) {
+    return config.runtime != "none" && !config.target.empty();
 }
 
 cv::Mat resize_frame_for_runtime(const cv::Mat& frame, double scale) {
@@ -852,21 +861,28 @@ bool StitchEngine::prepare_output_frame_locked(
     if (prepared_gpu_frame_out != nullptr) {
         *prepared_gpu_frame_out = nullptr;
     }
-    if ((prepared_frame_out == nullptr && prepared_gpu_frame_out == nullptr) || stitched_cpu.empty()) {
+    const bool has_cpu_source = !stitched_cpu.empty();
+    const bool has_gpu_source = stitched_gpu != nullptr && !stitched_gpu->empty();
+    if ((prepared_frame_out == nullptr && prepared_gpu_frame_out == nullptr) || (!has_cpu_source && !has_gpu_source)) {
         return false;
     }
 
-    const cv::Size source_size(stitched_cpu.cols, stitched_cpu.rows);
+    const cv::Size source_size = has_cpu_source
+        ? cv::Size(stitched_cpu.cols, stitched_cpu.rows)
+        : cv::Size(stitched_gpu->cols, stitched_gpu->rows);
     const cv::Size target_size = resolve_output_frame_size(output_config, source_size);
     if (target_size.width <= 0 || target_size.height <= 0) {
         return false;
     }
     if (target_size == source_size) {
-        if (prepared_frame_out != nullptr) {
+        if (prepared_frame_out != nullptr && has_cpu_source) {
             *prepared_frame_out = stitched_cpu;
         }
-        if (prepared_gpu_frame_out != nullptr && stitched_gpu != nullptr && !stitched_gpu->empty()) {
+        if (prepared_gpu_frame_out != nullptr && has_gpu_source) {
             *prepared_gpu_frame_out = stitched_gpu;
+        }
+        if (prepared_frame_out != nullptr && !has_cpu_source && has_gpu_source) {
+            stitched_gpu->download(*prepared_frame_out);
         }
         return true;
     }
@@ -904,6 +920,9 @@ bool StitchEngine::prepare_output_frame_locked(
     }
 
     cv::Mat scaled_frame;
+    if (!has_cpu_source) {
+        return false;
+    }
     if (scaled_size == source_size) {
         scaled_frame = stitched_cpu;
     } else {
@@ -998,7 +1017,18 @@ bool StitchEngine::stitch_pair_locked(
 
     metrics_.left_mean_luma = mean_luma(left_frame);
     metrics_.right_mean_luma = mean_luma(right_frame);
-    metrics_.warped_mean_luma = 0.0;
+
+    const std::int64_t next_frame_index = metrics_.frame_index + 1;
+    const bool sample_heavy_metrics = should_sample_heavy_metrics(next_frame_index);
+    const bool probe_enabled = output_config_enabled(config_.output);
+    const bool production_enabled = output_config_enabled(config_.production_output);
+    const auto probe_caps = hogak::output::get_output_runtime_capabilities(config_.output.runtime);
+    const auto production_caps = hogak::output::get_output_runtime_capabilities(config_.production_output.runtime);
+    const bool probe_needs_cpu =
+        probe_enabled && (config_.output.debug_overlay || probe_caps.requires_cpu_input);
+    const bool production_needs_cpu =
+        production_enabled && (config_.production_output.debug_overlay || production_caps.requires_cpu_input);
+    const bool need_cpu_stitched = probe_needs_cpu || production_needs_cpu || sample_heavy_metrics;
 
     cv::Mat stitched;
     cv::Mat warped_right;
@@ -1020,8 +1050,10 @@ bool StitchEngine::stitch_pair_locked(
                 homography_adjusted_,
                 output_size_);
             metrics_.gpu_warp_count += 1;
-            gpu_right_warped_.download(warped_right);
-            metrics_.warped_mean_luma = mean_luma(warped_right);
+            if (sample_heavy_metrics) {
+                gpu_right_warped_.download(warped_right);
+                metrics_.warped_mean_luma = mean_luma(warped_right);
+            }
 
             gpu_stitched_.create(output_size_, CV_8UC3);
             gpu_stitched_.setTo(cv::Scalar::all(0));
@@ -1056,7 +1088,9 @@ bool StitchEngine::stitch_pair_locked(
                 gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
             }
 
-            gpu_stitched_.download(stitched);
+            if (need_cpu_stitched) {
+                gpu_stitched_.download(stitched);
+            }
             metrics_.gpu_blend_count += 1;
             metrics_.overlap_diff_mean = 0.0;
             used_gpu_blend = true;
@@ -1112,16 +1146,16 @@ bool StitchEngine::stitch_pair_locked(
         metrics_.cpu_blend_count += 1;
     }
 
-    latest_stitched_ = stitched;
-    cv::Mat current_stitched_probe_gray = make_motion_probe_gray(stitched);
-    metrics_.stitched_motion_mean = probe_motion_mean(previous_stitched_probe_gray_, current_stitched_probe_gray);
-    previous_stitched_probe_gray_ = current_stitched_probe_gray;
     if (!stitched.empty()) {
+        latest_stitched_ = stitched;
+    }
+    if (sample_heavy_metrics && !stitched.empty()) {
+        cv::Mat current_stitched_probe_gray = make_motion_probe_gray(stitched);
+        metrics_.stitched_motion_mean = probe_motion_mean(previous_stitched_probe_gray_, current_stitched_probe_gray);
+        previous_stitched_probe_gray_ = current_stitched_probe_gray;
         cv::Mat stitched_gray;
         cv::cvtColor(stitched, stitched_gray, cv::COLOR_BGR2GRAY);
         metrics_.stitched_mean_luma = cv::mean(stitched_gray)[0];
-    } else {
-        metrics_.stitched_mean_luma = 0.0;
     }
     metrics_.stitched_count += 1;
     metrics_.frame_index += 1;
