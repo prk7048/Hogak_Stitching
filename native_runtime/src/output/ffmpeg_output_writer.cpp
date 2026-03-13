@@ -173,19 +173,36 @@ bool FfmpegOutputWriter::start(
     return true;
 }
 
-void FfmpegOutputWriter::submit(const cv::Mat& frame, std::int64_t /*timestamp_ns*/) {
+void FfmpegOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timestamp_ns*/) {
     if (!running_.load() || frame.empty()) {
         return;
     }
+
+    cv::Mat cpu_frame;
+    if (frame.cpu_frame != nullptr && !frame.cpu_frame->empty()) {
+        if (frame.cpu_frame->isContinuous()) {
+            frame.cpu_frame->copyTo(cpu_frame);
+        } else {
+            cpu_frame = frame.cpu_frame->clone();
+        }
+    } else if (frame.gpu_frame != nullptr && !frame.gpu_frame->empty()) {
+        try {
+            frame.gpu_frame->download(cpu_frame);
+        } catch (const cv::Exception& e) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            last_error_ = std::string("ffmpeg writer gpu download failed: ") + e.what();
+            return;
+        }
+    }
+    if (cpu_frame.empty()) {
+        return;
+    }
+
     std::lock_guard<std::mutex> lock(mutex_);
     if (frame_pending_) {
         frames_dropped_ += 1;
     }
-    if (frame.isContinuous()) {
-        frame.copyTo(latest_frame_);
-    } else {
-        latest_frame_ = frame.clone();
-    }
+    latest_frame_ = std::move(cpu_frame);
     frame_pending_ = true;
     condition_.notify_one();
 }

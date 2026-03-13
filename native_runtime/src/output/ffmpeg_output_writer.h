@@ -29,7 +29,7 @@ public:
         int height,
         double fps,
         bool input_prepared = false) override;
-    void submit(const cv::Mat& frame, std::int64_t timestamp_ns) override;
+    void submit(const OutputFrame& frame, std::int64_t timestamp_ns) override;
     void stop() override;
 
     bool active() const noexcept override;

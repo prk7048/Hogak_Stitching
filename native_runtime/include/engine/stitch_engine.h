@@ -62,7 +62,8 @@ private:
         const OutputConfig& output_config,
         const cv::Mat& stitched_cpu,
         const cv::cuda::GpuMat* stitched_gpu,
-        cv::Mat* prepared_frame_out);
+        cv::Mat* prepared_frame_out,
+        const cv::cuda::GpuMat** prepared_gpu_frame_out);
     void annotate_output_debug_overlay_locked(
         cv::Mat* frame,
         const char* label,

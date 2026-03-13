@@ -844,8 +844,15 @@ bool StitchEngine::prepare_output_frame_locked(
     const OutputConfig& output_config,
     const cv::Mat& stitched_cpu,
     const cv::cuda::GpuMat* stitched_gpu,
-    cv::Mat* prepared_frame_out) {
-    if (prepared_frame_out == nullptr || stitched_cpu.empty()) {
+    cv::Mat* prepared_frame_out,
+    const cv::cuda::GpuMat** prepared_gpu_frame_out) {
+    if (prepared_frame_out != nullptr) {
+        prepared_frame_out->release();
+    }
+    if (prepared_gpu_frame_out != nullptr) {
+        *prepared_gpu_frame_out = nullptr;
+    }
+    if ((prepared_frame_out == nullptr && prepared_gpu_frame_out == nullptr) || stitched_cpu.empty()) {
         return false;
     }
 
@@ -855,7 +862,12 @@ bool StitchEngine::prepare_output_frame_locked(
         return false;
     }
     if (target_size == source_size) {
-        *prepared_frame_out = stitched_cpu;
+        if (prepared_frame_out != nullptr) {
+            *prepared_frame_out = stitched_cpu;
+        }
+        if (prepared_gpu_frame_out != nullptr && stitched_gpu != nullptr && !stitched_gpu->empty()) {
+            *prepared_gpu_frame_out = stitched_gpu;
+        }
         return true;
     }
 
@@ -877,7 +889,12 @@ bool StitchEngine::prepare_output_frame_locked(
                 scaled_size.height);
             cv::cuda::GpuMat target_roi(gpu_output_canvas_, roi);
             scaled_source->copyTo(target_roi);
-            gpu_output_canvas_.download(*prepared_frame_out);
+            if (prepared_gpu_frame_out != nullptr) {
+                *prepared_gpu_frame_out = &gpu_output_canvas_;
+            }
+            if (prepared_frame_out != nullptr) {
+                gpu_output_canvas_.download(*prepared_frame_out);
+            }
             return true;
         } catch (const cv::Exception& e) {
             gpu_available_ = false;
@@ -891,6 +908,9 @@ bool StitchEngine::prepare_output_frame_locked(
         scaled_frame = stitched_cpu;
     } else {
         cv::resize(stitched_cpu, scaled_frame, scaled_size, 0.0, 0.0, cv::INTER_LINEAR);
+    }
+    if (prepared_frame_out == nullptr) {
+        return false;
     }
     prepared_frame_out->create(target_size, CV_8UC3);
     prepared_frame_out->setTo(cv::Scalar::all(0));
@@ -1122,7 +1142,7 @@ bool StitchEngine::stitch_pair_locked(
         if (writer == nullptr || last_error == nullptr || target == nullptr || effective_codec == nullptr) {
             return;
         }
-        if (output_config.runtime != "ffmpeg" || output_config.target.empty()) {
+        if (output_config.runtime == "none" || output_config.target.empty()) {
             if (*writer != nullptr) {
                 (*writer)->stop();
                 writer->reset();
@@ -1130,16 +1150,44 @@ bool StitchEngine::stitch_pair_locked(
             return;
         }
         cv::Mat prepared_frame;
+        const cv::cuda::GpuMat* prepared_gpu_frame = nullptr;
         const bool prepared_ok = prepare_output_frame_locked(
             output_config,
             stitched,
             used_gpu_blend ? &gpu_stitched_ : nullptr,
-            &prepared_frame);
-        const cv::Mat& frame_to_submit = (prepared_ok && !prepared_frame.empty()) ? prepared_frame : stitched;
+            &prepared_frame,
+            &prepared_gpu_frame);
+        const cv::Mat* cpu_submit_frame = nullptr;
+        const cv::cuda::GpuMat* gpu_submit_frame = nullptr;
+        if (prepared_ok) {
+            if (!prepared_frame.empty()) {
+                cpu_submit_frame = &prepared_frame;
+            }
+            if (prepared_gpu_frame != nullptr && !prepared_gpu_frame->empty()) {
+                gpu_submit_frame = prepared_gpu_frame;
+            }
+        } else {
+            cpu_submit_frame = &stitched;
+            if (used_gpu_blend && !gpu_stitched_.empty()) {
+                gpu_submit_frame = &gpu_stitched_;
+            }
+        }
         cv::Mat annotated_frame;
-        const cv::Mat* submit_frame = &frame_to_submit;
         if (output_config.debug_overlay) {
-            annotated_frame = frame_to_submit.clone();
+            if (cpu_submit_frame != nullptr && !cpu_submit_frame->empty()) {
+                annotated_frame = cpu_submit_frame->clone();
+            } else if (gpu_submit_frame != nullptr && !gpu_submit_frame->empty()) {
+                try {
+                    gpu_submit_frame->download(annotated_frame);
+                } catch (const cv::Exception& e) {
+                    *last_error = std::string("debug overlay gpu download failed: ") + e.what();
+                    return;
+                }
+            }
+            if (annotated_frame.empty()) {
+                *last_error = "debug overlay frame unavailable";
+                return;
+            }
             annotate_output_debug_overlay_locked(
                 &annotated_frame,
                 overlay_label,
@@ -1147,10 +1195,22 @@ bool StitchEngine::stitch_pair_locked(
                 left_reused,
                 right_reused,
                 pair_age_ms);
-            submit_frame = &annotated_frame;
+            cpu_submit_frame = &annotated_frame;
+            gpu_submit_frame = nullptr;
         }
-        const bool input_prepared =
-            (submit_frame->cols != stitched.cols) || (submit_frame->rows != stitched.rows);
+        hogak::output::OutputFrame submit_frame;
+        if (cpu_submit_frame != nullptr && !cpu_submit_frame->empty()) {
+            submit_frame.cpu_frame = cpu_submit_frame;
+        }
+        if (gpu_submit_frame != nullptr && !gpu_submit_frame->empty()) {
+            submit_frame.gpu_frame = gpu_submit_frame;
+        }
+        if (submit_frame.empty()) {
+            *last_error = "output submit frame unavailable";
+            return;
+        }
+        submit_frame.input_prepared =
+            (submit_frame.width() != stitched.cols) || (submit_frame.height() != stitched.rows);
         if (*writer == nullptr) {
             *writer = hogak::output::create_output_writer(output_config.runtime);
             if (*writer == nullptr) {
@@ -1164,11 +1224,14 @@ bool StitchEngine::stitch_pair_locked(
             if (!(*writer)->start(
                     output_config,
                     config_.ffmpeg_bin,
-                    submit_frame->cols,
-                    submit_frame->rows,
+                    submit_frame.width(),
+                    submit_frame.height(),
                     output_fps,
-                    input_prepared)) {
-                *last_error = "failed to start ffmpeg output writer";
+                    submit_frame.input_prepared)) {
+                *last_error = (*writer)->last_error();
+                if (last_error->empty()) {
+                    *last_error = "failed to start output writer";
+                }
                 writer->reset();
                 return;
             }
@@ -1176,7 +1239,7 @@ bool StitchEngine::stitch_pair_locked(
             *effective_codec = (*writer)->effective_codec();
         }
         if (*writer != nullptr) {
-            (*writer)->submit(*submit_frame, pair_ts_ns);
+            (*writer)->submit(submit_frame, pair_ts_ns);
         }
     };
 
