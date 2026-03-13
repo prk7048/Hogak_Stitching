@@ -428,6 +428,17 @@ probe는 아래 둘 중 하나만 허용한다.
 먼저 현재 코드가 새 backend를 꽂을 수 있게 구조를 정리하고,
 동시에 측정 기준을 고정한다.
 
+## Current Active Step
+
+현재 `v1.0` 브랜치에서 가장 먼저 착수하는 작업은 아래다.
+
+1. `Phase 2`의 cheap CPU wins 중 `output writer copy reduction`
+2. 그다음 `Phase 0` 측정 기준 보강
+3. 이후 `Phase 3` transmit writer abstraction 초안
+
+즉 첫 구현은 "가장 큰 개선"이 아니라,
+"큰 개선에 들어가기 전에 본선 경로의 불필요한 CPU 낭비를 먼저 걷어내는 작업"부터 시작한다.
+
 ## Working Rule
 
 앞으로 이 주제의 작업을 진행할 때는 아래 원칙을 지킨다.

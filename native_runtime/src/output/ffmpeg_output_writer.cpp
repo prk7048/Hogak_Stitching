@@ -262,7 +262,6 @@ void FfmpegOutputWriter::run() {
     auto next_write_time = std::chrono::steady_clock::now();
 
     while (running_.load()) {
-        cv::Mat frame;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!has_current_frame) {
@@ -274,7 +273,7 @@ void FfmpegOutputWriter::run() {
                 break;
             }
             if (frame_pending_) {
-                latest_frame_.copyTo(current_frame);
+                std::swap(current_frame, latest_frame_);
                 frame_pending_ = false;
                 has_current_frame = !current_frame.empty();
             }
@@ -289,16 +288,21 @@ void FfmpegOutputWriter::run() {
             continue;
         }
 
-        current_frame.copyTo(frame);
-        if (frame.empty()) {
-            continue;
-        }
-        if (!frame.isContinuous()) {
-            frame = frame.clone();
+        const cv::Mat* frame_to_write = &current_frame;
+        cv::Mat contiguous_frame;
+        if (!current_frame.isContinuous()) {
+            contiguous_frame = current_frame.clone();
+            if (contiguous_frame.empty()) {
+                continue;
+            }
+            frame_to_write = &contiguous_frame;
         }
 
         std::string write_error;
-        if (!sink.write_all(frame.ptr<std::uint8_t>(), frame.total() * frame.elemSize(), write_error)) {
+        if (!sink.write_all(
+                frame_to_write->ptr<std::uint8_t>(),
+                frame_to_write->total() * frame_to_write->elemSize(),
+                write_error)) {
             std::lock_guard<std::mutex> lock(mutex_);
             std::ostringstream message;
             message << write_error
