@@ -1,5 +1,4 @@
 import argparse
-import argparse
 import json
 import subprocess
 import time
@@ -448,6 +447,54 @@ def _parse_runtime_metrics(log_path: Path) -> dict[str, object]:
     }
 
 
+def _evaluate_service_goal(
+    runtime_metrics: dict[str, object],
+    system_metrics: dict[str, object],
+    target_fps: float,
+    max_waiting_ratio: float,
+    max_output_repeat_ratio: float,
+) -> dict[str, object]:
+    if "error" in runtime_metrics:
+        return {
+            "pass": False,
+            "reason": str(runtime_metrics["error"]),
+        }
+
+    active_stitch = float(((runtime_metrics.get("active_stitch_fps") or {}) if isinstance(runtime_metrics.get("active_stitch_fps"), dict) else {}).get("avg") or 0.0)
+    transmit_written = float(
+        (((runtime_metrics.get("transmit_written_fps") or {}) if isinstance(runtime_metrics.get("transmit_written_fps"), dict) else {}).get("avg") or 0.0)
+    )
+    waiting_ratio = float(runtime_metrics.get("waiting_ratio") or 0.0)
+    transmit_to_stitched_ratio = float(runtime_metrics.get("transmit_to_stitched_ratio") or 0.0)
+    gpu_util_avg = float((((system_metrics.get("gpu_util_percent") or {}) if isinstance(system_metrics.get("gpu_util_percent"), dict) else {}).get("avg") or 0.0))
+    cpu_total_avg = float((((system_metrics.get("cpu_total_percent") or {}) if isinstance(system_metrics.get("cpu_total_percent"), dict) else {}).get("avg") or 0.0))
+
+    checks = {
+        "active_stitch_fps_ok": active_stitch >= target_fps,
+        "transmit_written_fps_ok": transmit_written >= target_fps,
+        "waiting_ratio_ok": waiting_ratio <= max_waiting_ratio,
+        "transmit_repeat_ratio_ok": transmit_to_stitched_ratio <= max_output_repeat_ratio,
+    }
+
+    failed_checks = [name for name, passed in checks.items() if not passed]
+    return {
+        "pass": not failed_checks,
+        "target_fps": target_fps,
+        "max_waiting_ratio": max_waiting_ratio,
+        "max_output_repeat_ratio": max_output_repeat_ratio,
+        "checks": checks,
+        "failed_checks": failed_checks,
+        "observed": {
+            "active_stitch_fps_avg": active_stitch,
+            "transmit_written_fps_avg": transmit_written,
+            "waiting_ratio": waiting_ratio,
+            "transmit_to_stitched_ratio": transmit_to_stitched_ratio,
+            "gpu_util_avg": gpu_util_avg,
+            "cpu_total_avg": cpu_total_avg,
+        },
+    }
+
+
 def _print_summary(label: str, ts_path: Path, capture_log: Path, decode_log: Path, montage_path: Path) -> None:
     capture_text = capture_log.read_text(encoding="utf-8", errors="replace") if capture_log.exists() else ""
     decode_text = decode_log.read_text(encoding="utf-8", errors="replace") if decode_log.exists() else ""
@@ -470,6 +517,9 @@ def main() -> int:
     parser.add_argument("--capture-sec", type=float, default=10.0)
     parser.add_argument("--transport", default="udp", choices=["udp", "tcp"])
     parser.add_argument("--output-standard", default="realtime_gpu_1080p")
+    parser.add_argument("--target-fps", type=float, default=60.0)
+    parser.add_argument("--max-waiting-ratio", type=float, default=0.05)
+    parser.add_argument("--max-output-repeat-ratio", type=float, default=1.05)
     args = parser.parse_args()
 
     if not PYTHON.exists():
@@ -601,10 +651,21 @@ def main() -> int:
     print("transmit_decode_rc", transmit_decode_rc)
     print("transmit_montage_msg", transmit_montage_text)
     print("runtime_log", RUNTIME_LOG)
+    system_summary = _summarize_system_samples(system_samples)
+    runtime_summary = _parse_runtime_metrics(RUNTIME_LOG)
+    goal_summary = _evaluate_service_goal(
+        runtime_summary,
+        system_summary,
+        target_fps=float(args.target_fps),
+        max_waiting_ratio=float(args.max_waiting_ratio),
+        max_output_repeat_ratio=float(args.max_output_repeat_ratio),
+    )
     print("[system_metrics]")
-    print(_summarize_system_samples(system_samples))
+    print(system_summary)
     print("[runtime_metrics]")
-    print(_parse_runtime_metrics(RUNTIME_LOG))
+    print(runtime_summary)
+    print("[service_goal]")
+    print(goal_summary)
     _print_summary("probe23000", PROBE_TS, PROBE_CAPTURE_LOG, PROBE_DECODE_LOG, PROBE_MONTAGE)
     _print_summary("transmit24000", TRANSMIT_TS, TRANSMIT_CAPTURE_LOG, TRANSMIT_DECODE_LOG, TRANSMIT_MONTAGE)
     return 0

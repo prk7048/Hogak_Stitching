@@ -10,13 +10,14 @@
 #include <opencv2/core.hpp>
 
 #include "engine/engine_config.h"
+#include "output/output_writer.h"
 
 namespace hogak::output {
 
-class FfmpegOutputWriter {
+class FfmpegOutputWriter final : public OutputWriter {
 public:
     FfmpegOutputWriter() = default;
-    ~FfmpegOutputWriter();
+    ~FfmpegOutputWriter() override;
 
     FfmpegOutputWriter(const FfmpegOutputWriter&) = delete;
     FfmpegOutputWriter& operator=(const FfmpegOutputWriter&) = delete;
@@ -27,17 +28,17 @@ public:
         int width,
         int height,
         double fps,
-        bool input_prepared = false);
-    void submit(const cv::Mat& frame, std::int64_t timestamp_ns);
-    void stop();
+        bool input_prepared = false) override;
+    void submit(const cv::Mat& frame, std::int64_t timestamp_ns) override;
+    void stop() override;
 
-    bool active() const noexcept;
-    std::int64_t frames_written() const noexcept;
-    std::int64_t frames_dropped() const noexcept;
-    std::string last_error() const;
-    std::string effective_codec() const;
-    std::string command_line() const;
-    std::string muxer() const;
+    bool active() const noexcept override;
+    std::int64_t frames_written() const noexcept override;
+    std::int64_t frames_dropped() const noexcept override;
+    std::string last_error() const override;
+    std::string effective_codec() const override;
+    std::string command_line() const override;
+    std::string muxer() const override;
 
 private:
     void run();

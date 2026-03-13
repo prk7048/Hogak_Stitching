@@ -23,7 +23,8 @@
 #include <opencv2/imgproc.hpp>
 
 #include "input/ffmpeg_rtsp_reader.h"
-#include "output/ffmpeg_output_writer.h"
+#include "output/output_writer.h"
+#include "output/output_writer_factory.h"
 
 namespace hogak::engine {
 
@@ -1114,7 +1115,7 @@ bool StitchEngine::stitch_pair_locked(
 
     const auto launch_output_writer = [&](const char* overlay_label,
                                           const OutputConfig& output_config,
-                                          std::unique_ptr<hogak::output::FfmpegOutputWriter>* writer,
+                                          std::unique_ptr<hogak::output::OutputWriter>* writer,
                                           std::string* last_error,
                                           std::string* target,
                                           std::string* effective_codec) {
@@ -1151,7 +1152,11 @@ bool StitchEngine::stitch_pair_locked(
         const bool input_prepared =
             (submit_frame->cols != stitched.cols) || (submit_frame->rows != stitched.rows);
         if (*writer == nullptr) {
-            *writer = std::make_unique<hogak::output::FfmpegOutputWriter>();
+            *writer = hogak::output::create_output_writer(output_config.runtime);
+            if (*writer == nullptr) {
+                *last_error = "unsupported output runtime: " + output_config.runtime;
+                return;
+            }
             const double requested_output_fps = (output_config.fps > 0.0) ? output_config.fps : 0.0;
             const double output_fps = (requested_output_fps > 0.0)
                 ? requested_output_fps

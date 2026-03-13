@@ -11,7 +11,7 @@
 #include "engine/engine_metrics.h"
 
 namespace hogak::output {
-class FfmpegOutputWriter;
+class OutputWriter;
 }
 
 namespace hogak::input {
@@ -133,8 +133,8 @@ private:
     cv::cuda::GpuMat gpu_overlap_u8_{};
     cv::cuda::GpuMat gpu_output_scaled_{};
     cv::cuda::GpuMat gpu_output_canvas_{};
-    std::unique_ptr<hogak::output::FfmpegOutputWriter> output_writer_{};
-    std::unique_ptr<hogak::output::FfmpegOutputWriter> production_output_writer_{};
+    std::unique_ptr<hogak::output::OutputWriter> output_writer_{};
+    std::unique_ptr<hogak::output::OutputWriter> production_output_writer_{};
 };
 
 }  // namespace hogak::engine

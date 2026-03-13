@@ -433,11 +433,19 @@ probe는 아래 둘 중 하나만 허용한다.
 현재 `v1.0` 브랜치에서 가장 먼저 착수하는 작업은 아래다.
 
 1. `Phase 2`의 cheap CPU wins 중 `output writer copy reduction`
-2. 그다음 `Phase 0` 측정 기준 보강
-3. 이후 `Phase 3` transmit writer abstraction 초안
+2. `Phase 3` transmit writer abstraction skeleton 추가
+3. 그다음 `Phase 0` 측정 기준 보강
+4. 이후 `future GPU transmit writer`를 꽂을 수 있는 backend 분리 진행
 
 즉 첫 구현은 "가장 큰 개선"이 아니라,
 "큰 개선에 들어가기 전에 본선 경로의 불필요한 CPU 낭비를 먼저 걷어내는 작업"부터 시작한다.
+
+현재 반영 상태:
+
+- `output writer copy reduction` 1차 반영 완료
+- `OutputWriter interface + factory` skeleton 반영 완료
+- 진단 스크립트에 `60fps service_goal` pass/fail summary 반영 완료
+- 다음 단계는 `future GPU writer`가 실제로 들어올 자리와 metrics 기준을 더 분명히 만드는 것
 
 ## Working Rule
 

@@ -26,6 +26,7 @@ add_library(
     src/engine/stitch_engine.cpp
     src/input/ffmpeg_rtsp_reader.cpp
     src/output/ffmpeg_output_writer.cpp
+    src/output/output_writer_factory.cpp
     src/platform/win_process_pipe.cpp
     src/platform/win_process_sink.cpp
 )
