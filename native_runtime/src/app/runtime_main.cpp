@@ -65,8 +65,10 @@ void print_help() {
         << "  --width N          Input width (default 1920)\n"
         << "  --height N         Input height (default 1080)\n"
         << "  --transport M      RTSP transport (default tcp)\n"
+        << "  --input-buffer-frames N  Max buffered frames per RTSP reader\n"
         << "  --video-codec C    h264 or hevc (default h264)\n"
         << "  --output-runtime M none or ffmpeg\n"
+        << "  --output-profile P inspection or production-compatible\n"
         << "  --output-target U  Encoded output target (udp/rtsp/rtmp/file)\n"
         << "  --output-codec C   Output codec (default h264_nvenc)\n"
         << "  --output-bitrate B Output bitrate (default 12M)\n"
@@ -74,7 +76,23 @@ void print_help() {
         << "  --output-muxer M   Optional explicit muxer\n"
         << "  --output-width N   Force encoded output width\n"
         << "  --output-height N  Force encoded output height\n"
+        << "  --output-fps N     Force encoded output fps\n"
+        << "  --output-debug-overlay  Burn debug overlay into local probe output\n"
+        << "  --production-output-runtime M none or ffmpeg\n"
+        << "  --production-output-profile P inspection or production-compatible\n"
+        << "  --production-output-target U  Production encoded output target\n"
+        << "  --production-output-codec C   Production output codec\n"
+        << "  --production-output-bitrate B Production output bitrate\n"
+        << "  --production-output-preset P  Production output preset\n"
+        << "  --production-output-muxer M   Production output muxer\n"
+        << "  --production-output-width N   Force production encoded output width\n"
+        << "  --production-output-height N  Force production encoded output height\n"
+        << "  --production-output-fps N     Force production encoded output fps\n"
+        << "  --production-output-debug-overlay  Burn debug overlay into transmit output\n"
         << "  --sync-pair-mode M none/latest/oldest\n"
+        << "  --allow-frame-reuse  Allow reuse of one-side stale pair for smoother output\n"
+        << "  --pair-reuse-max-age-ms N  Max stale age allowed for one-side reuse\n"
+        << "  --pair-reuse-max-consecutive N  Max consecutive one-side reuses\n"
         << "  --sync-match-max-delta-ms N  Pairing skew threshold\n"
         << "  --sync-manual-offset-ms N    Manual right-stream offset\n"
         << "  --stitch-output-scale N      Runtime stitch/output scale\n"
@@ -129,11 +147,14 @@ int main(int argc, char** argv) {
     config.left.height = read_int_arg(argc, argv, "--height", 1080);
     config.right.width = config.left.width;
     config.right.height = config.left.height;
+    config.left.max_buffered_frames = read_int_arg(argc, argv, "--input-buffer-frames", 8);
+    config.right.max_buffered_frames = config.left.max_buffered_frames;
     config.left.timeout_sec = read_double_arg(argc, argv, "--timeout-sec", 10.0);
     config.right.timeout_sec = config.left.timeout_sec;
     config.left.reconnect_cooldown_sec = read_double_arg(argc, argv, "--reconnect-cooldown-sec", 1.0);
     config.right.reconnect_cooldown_sec = config.left.reconnect_cooldown_sec;
     config.output.runtime = read_string_arg(argc, argv, "--output-runtime", "none");
+    config.output.profile = read_string_arg(argc, argv, "--output-profile", "inspection");
     config.output.target = read_string_arg(argc, argv, "--output-target", "");
     config.output.codec = read_string_arg(argc, argv, "--output-codec", "h264_nvenc");
     config.output.bitrate = read_string_arg(argc, argv, "--output-bitrate", "12M");
@@ -141,7 +162,24 @@ int main(int argc, char** argv) {
     config.output.muxer = read_string_arg(argc, argv, "--output-muxer", "");
     config.output.width = read_int_arg(argc, argv, "--output-width", 0);
     config.output.height = read_int_arg(argc, argv, "--output-height", 0);
+    config.output.fps = read_double_arg(argc, argv, "--output-fps", 30.0);
+    config.output.debug_overlay = has_flag(argc, argv, "--output-debug-overlay");
+    config.production_output.runtime = read_string_arg(argc, argv, "--production-output-runtime", "none");
+    config.production_output.profile = read_string_arg(
+        argc, argv, "--production-output-profile", "production-compatible");
+    config.production_output.target = read_string_arg(argc, argv, "--production-output-target", "");
+    config.production_output.codec = read_string_arg(argc, argv, "--production-output-codec", "h264_nvenc");
+    config.production_output.bitrate = read_string_arg(argc, argv, "--production-output-bitrate", "12M");
+    config.production_output.preset = read_string_arg(argc, argv, "--production-output-preset", "p4");
+    config.production_output.muxer = read_string_arg(argc, argv, "--production-output-muxer", "");
+    config.production_output.width = read_int_arg(argc, argv, "--production-output-width", 0);
+    config.production_output.height = read_int_arg(argc, argv, "--production-output-height", 0);
+    config.production_output.fps = read_double_arg(argc, argv, "--production-output-fps", 30.0);
+    config.production_output.debug_overlay = has_flag(argc, argv, "--production-output-debug-overlay");
     config.sync_pair_mode = read_string_arg(argc, argv, "--sync-pair-mode", "none");
+    config.allow_frame_reuse = has_flag(argc, argv, "--allow-frame-reuse");
+    config.pair_reuse_max_age_ms = read_double_arg(argc, argv, "--pair-reuse-max-age-ms", 90.0);
+    config.pair_reuse_max_consecutive = read_int_arg(argc, argv, "--pair-reuse-max-consecutive", 2);
     config.sync_match_max_delta_ms = read_double_arg(argc, argv, "--sync-match-max-delta-ms", 35.0);
     config.sync_manual_offset_ms = read_double_arg(argc, argv, "--sync-manual-offset-ms", 0.0);
     config.stitch_output_scale = read_double_arg(argc, argv, "--stitch-output-scale", 1.0);

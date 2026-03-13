@@ -19,7 +19,7 @@ RTSP input -> decode -> pair/sync -> stitch -> encode -> output stream
   - calibration UI
   - runtime 실행/중지
   - monitor/dashboard
-  - viewer launch
+  - encoded output probe viewer
   - control command
 - C++ native runtime:
   - RTSP input
@@ -63,7 +63,7 @@ RTSP input -> decode -> pair/sync -> stitch -> encode -> output stream
 
 현재 운영 기본값은 realtime 기준으로 정리되고 있다.
 
-- output target: local UDP viewer path
+- inspection target: local encoded output probe path
 - output resolution: `1920x1080`
 - codec baseline: `h264_nvenc`
 - runtime preset: realtime 중심

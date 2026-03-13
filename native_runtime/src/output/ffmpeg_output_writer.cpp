@@ -1,8 +1,10 @@
 #include "output/ffmpeg_output_writer.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
+#include <cstdint>
 #include <cstdlib>
 #include <filesystem>
 #include <sstream>
@@ -21,6 +23,74 @@ std::string build_size_text(int width, int height) {
     return out.str();
 }
 
+std::string trim_copy(const std::string& text) {
+    std::size_t begin = 0;
+    std::size_t end = text.size();
+    while (begin < end && std::isspace(static_cast<unsigned char>(text[begin])) != 0) {
+        ++begin;
+    }
+    while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])) != 0) {
+        --end;
+    }
+    return text.substr(begin, end - begin);
+}
+
+std::int64_t parse_bitrate_bits(const std::string& text) {
+    const auto trimmed = trim_copy(text);
+    if (trimmed.empty()) {
+        return 0;
+    }
+
+    double multiplier = 1.0;
+    std::string number_text = trimmed;
+    const char suffix = static_cast<char>(std::tolower(static_cast<unsigned char>(trimmed.back())));
+    if (suffix == 'k' || suffix == 'm' || suffix == 'g') {
+        number_text.pop_back();
+        if (suffix == 'k') {
+            multiplier = 1'000.0;
+        } else if (suffix == 'm') {
+            multiplier = 1'000'000.0;
+        } else if (suffix == 'g') {
+            multiplier = 1'000'000'000.0;
+        }
+    }
+
+    char* end = nullptr;
+    const double value = std::strtod(number_text.c_str(), &end);
+    if (end == number_text.c_str() || (end != nullptr && *end != '\0') || !std::isfinite(value) || value <= 0.0) {
+        return 0;
+    }
+    return std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(value * multiplier)));
+}
+
+std::string format_bitrate_bits(std::int64_t bits) {
+    if (bits <= 0) {
+        return "";
+    }
+    if ((bits % 1'000'000) == 0) {
+        return std::to_string(bits / 1'000'000) + "M";
+    }
+    if ((bits % 1'000) == 0) {
+        return std::to_string(bits / 1'000) + "k";
+    }
+    return std::to_string(bits);
+}
+
+std::string build_low_latency_bufsize(const std::string& bitrate, double fps) {
+    const std::int64_t bitrate_bits = parse_bitrate_bits(bitrate);
+    if (bitrate_bits <= 0) {
+        return bitrate;
+    }
+    const double safe_fps = std::max(1.0, fps);
+    const auto per_frame_bits =
+        std::max<std::int64_t>(1, static_cast<std::int64_t>(std::llround(static_cast<double>(bitrate_bits) / safe_fps)));
+    const auto quarter_second_bits = std::max<std::int64_t>(1, bitrate_bits / 4);
+    const auto chosen_bits = std::min<std::int64_t>(
+        bitrate_bits,
+        std::max<std::int64_t>(quarter_second_bits, per_frame_bits * 2));
+    return format_bitrate_bits(chosen_bits);
+}
+
 bool requires_even_dimensions(const std::string& codec) {
     const auto lowered = codec;
     return lowered == "libx264" ||
@@ -33,9 +103,10 @@ std::string build_video_filter_chain(
     const hogak::engine::OutputConfig& config,
     int width,
     int height,
-    const std::string& codec) {
+    const std::string& codec,
+    bool input_prepared) {
     std::vector<std::string> filters;
-    const bool force_size = config.width > 0 && config.height > 0;
+    const bool force_size = !input_prepared && config.width > 0 && config.height > 0;
     if (force_size) {
         std::ostringstream scale_pad;
         scale_pad << "scale=" << config.width << ':' << config.height
@@ -72,7 +143,8 @@ bool FfmpegOutputWriter::start(
     const std::string& ffmpeg_bin,
     int width,
     int height,
-    double fps) {
+    double fps,
+    bool input_prepared) {
     stop();
     if (config.runtime != "ffmpeg" || config.target.empty() || width <= 0 || height <= 0) {
         return false;
@@ -82,11 +154,12 @@ bool FfmpegOutputWriter::start(
         std::lock_guard<std::mutex> lock(mutex_);
         config_ = config;
         ffmpeg_bin_ = resolve_ffmpeg_bin(ffmpeg_bin);
-        effective_codec_ = resolve_output_codec(config.codec, width, height);
+        effective_codec_ = resolve_output_codec(config.codec, width, height, config.target, config.profile);
         muxer_ = config.muxer.empty() ? infer_muxer(config.target) : config.muxer;
         width_ = width;
         height_ = height;
         fps_ = std::max(1.0, fps);
+        input_prepared_ = input_prepared;
         latest_frame_.release();
         frame_pending_ = false;
         last_error_.clear();
@@ -181,22 +254,45 @@ void FfmpegOutputWriter::run() {
         return;
     }
 
+    cv::Mat current_frame;
+    bool has_current_frame = false;
+    bool wrote_first_frame = false;
+    const auto frame_period = std::chrono::duration_cast<std::chrono::steady_clock::duration>(
+        std::chrono::duration<double>(1.0 / std::max(1.0, fps_)));
+    auto next_write_time = std::chrono::steady_clock::now();
+
     while (running_.load()) {
         cv::Mat frame;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            condition_.wait(lock, [this]() { return !running_.load() || frame_pending_; });
+            if (!has_current_frame) {
+                condition_.wait(lock, [this]() { return !running_.load() || frame_pending_; });
+            } else {
+                condition_.wait_until(lock, next_write_time, [this]() { return !running_.load() || frame_pending_; });
+            }
             if (!running_.load()) {
                 break;
             }
-            latest_frame_.copyTo(frame);
-            frame_pending_ = false;
+            if (frame_pending_) {
+                latest_frame_.copyTo(current_frame);
+                frame_pending_ = false;
+                has_current_frame = !current_frame.empty();
+            }
         }
 
-        if (frame.empty()) {
+        if (!has_current_frame) {
             continue;
         }
 
+        const auto now = std::chrono::steady_clock::now();
+        if (wrote_first_frame && now < next_write_time) {
+            continue;
+        }
+
+        current_frame.copyTo(frame);
+        if (frame.empty()) {
+            continue;
+        }
         if (!frame.isContinuous()) {
             frame = frame.clone();
         }
@@ -218,6 +314,8 @@ void FfmpegOutputWriter::run() {
 
         std::lock_guard<std::mutex> lock(mutex_);
         frames_written_ += 1;
+        wrote_first_frame = true;
+        next_write_time = now + frame_period;
     }
 
     sink.stop();
@@ -249,12 +347,17 @@ std::string FfmpegOutputWriter::build_command_line() const {
         << quote_arg(ffmpeg_bin_)
         << " -hide_banner -loglevel warning -y"
         << " -flush_packets 1"
+        << " -fflags +genpts"
         << " -f rawvideo"
         << " -pix_fmt bgr24"
         << " -s " << build_size_text(width_, height_)
-        << " -r " << std::max(1.0, fps_)
+        << " -framerate " << std::max(1.0, fps_)
         << " -i - -an"
         << " -c:v " << effective_codec_;
+
+    if (muxer_ == "tee") {
+        command << " -map 0:v:0";
+    }
 
     if (effective_codec_.find("_nvenc") != std::string::npos) {
         command << " -preset " << config_.preset
@@ -267,7 +370,15 @@ std::string FfmpegOutputWriter::build_command_line() const {
                 << " -keyint_min " << std::max(1, static_cast<int>(std::round(fps_)));
     }
 
-    const auto video_filter = build_video_filter_chain(config_, width_, height_, effective_codec_);
+    if (effective_codec_ == "libx264") {
+        command << " -tune zerolatency"
+                << " -bf 0"
+                << " -g " << std::max(1, static_cast<int>(std::round(fps_)))
+                << " -keyint_min " << std::max(1, static_cast<int>(std::round(fps_)))
+                << " -sc_threshold 0";
+    }
+
+    const auto video_filter = build_video_filter_chain(config_, width_, height_, effective_codec_, input_prepared_);
     if (!video_filter.empty()) {
         command << " -vf " << quote_arg(video_filter);
     }
@@ -275,9 +386,10 @@ std::string FfmpegOutputWriter::build_command_line() const {
     command << " -pix_fmt yuv420p";
 
     if (!config_.bitrate.empty()) {
+        const auto bufsize = build_low_latency_bufsize(config_.bitrate, fps_);
         command << " -b:v " << config_.bitrate
                 << " -maxrate " << config_.bitrate
-                << " -bufsize " << config_.bitrate;
+                << " -bufsize " << bufsize;
     }
 
     if (!muxer_.empty()) {
@@ -315,7 +427,12 @@ std::string FfmpegOutputWriter::resolve_ffmpeg_bin(const std::string& explicit_p
     return "ffmpeg";
 }
 
-std::string FfmpegOutputWriter::resolve_output_codec(const std::string& requested_codec, int width, int height) {
+std::string FfmpegOutputWriter::resolve_output_codec(
+    const std::string& requested_codec,
+    int width,
+    int height,
+    const std::string& /*target*/,
+    const std::string& /*profile*/) {
     if ((requested_codec == "h264_nvenc") && (width > 4096 || height > 4096)) {
         return "hevc_nvenc";
     }
@@ -324,6 +441,9 @@ std::string FfmpegOutputWriter::resolve_output_codec(const std::string& requeste
 
 std::string FfmpegOutputWriter::infer_muxer(const std::string& target) {
     const auto text = target;
+    if (text.find('|') != std::string::npos) {
+        return "tee";
+    }
     if (text.rfind("rtsp://", 0) == 0) {
         return "rtsp";
     }

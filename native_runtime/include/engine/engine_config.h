@@ -14,10 +14,12 @@ struct StreamConfig {
     std::string video_codec = "h264";
     int32_t width = 1920;
     int32_t height = 1080;
+    int32_t max_buffered_frames = 8;
 };
 
 struct OutputConfig {
     std::string runtime = "none";
+    std::string profile = "inspection";
     std::string target;
     std::string codec = "h264_nvenc";
     std::string bitrate = "12M";
@@ -25,18 +27,24 @@ struct OutputConfig {
     std::string muxer;
     int32_t width = 0;
     int32_t height = 0;
+    double fps = 30.0;
+    bool debug_overlay = false;
 };
 
 struct EngineConfig {
     StreamConfig left;
     StreamConfig right;
     OutputConfig output;
+    OutputConfig production_output;
     std::string ffmpeg_bin;
     std::string homography_file;
     std::string input_runtime = "ffmpeg-cuda";
     std::string sync_pair_mode = "none";
+    bool allow_frame_reuse = false;
     double sync_match_max_delta_ms = 35.0;
     double sync_manual_offset_ms = 0.0;
+    double pair_reuse_max_age_ms = 90.0;
+    int32_t pair_reuse_max_consecutive = 2;
     double process_scale = 1.0;
     double stitch_output_scale = 1.0;
     int32_t stitch_every_n = 1;

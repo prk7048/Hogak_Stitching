@@ -26,7 +26,8 @@ public:
         const std::string& ffmpeg_bin,
         int width,
         int height,
-        double fps);
+        double fps,
+        bool input_prepared = false);
     void submit(const cv::Mat& frame, std::int64_t timestamp_ns);
     void stop();
 
@@ -42,7 +43,12 @@ private:
     void run();
     std::string build_command_line() const;
     static std::string resolve_ffmpeg_bin(const std::string& explicit_path);
-    static std::string resolve_output_codec(const std::string& requested_codec, int width, int height);
+    static std::string resolve_output_codec(
+        const std::string& requested_codec,
+        int width,
+        int height,
+        const std::string& target,
+        const std::string& profile);
     static std::string infer_muxer(const std::string& target);
     static std::string quote_arg(const std::string& text);
 
@@ -58,6 +64,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     double fps_ = 30.0;
+    bool input_prepared_ = false;
     cv::Mat latest_frame_{};
     bool frame_pending_ = false;
     std::string last_error_{};

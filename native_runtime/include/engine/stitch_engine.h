@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <mutex>
 #include <memory>
-
 #include <opencv2/core.hpp>
 #include <opencv2/core/cuda.hpp>
 
@@ -50,8 +49,27 @@ private:
     void update_metrics_locked();
     bool restart_reader_locked(bool left_reader, const char* reason);
     bool ensure_calibration_locked(const cv::Mat& left_frame, const cv::Mat& right_frame);
-    bool stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& right_frame, std::int64_t pair_ts_ns);
+    bool stitch_pair_locked(
+        const cv::Mat& left_frame,
+        const cv::Mat& right_frame,
+        std::int64_t pair_ts_ns,
+        const SelectedPair& selected_pair,
+        bool left_reused,
+        bool right_reused,
+        double pair_age_ms);
     bool load_homography_locked(cv::Mat* homography_out);
+    bool prepare_output_frame_locked(
+        const OutputConfig& output_config,
+        const cv::Mat& stitched_cpu,
+        const cv::cuda::GpuMat* stitched_gpu,
+        cv::Mat* prepared_frame_out);
+    void annotate_output_debug_overlay_locked(
+        cv::Mat* frame,
+        const char* label,
+        const SelectedPair& selected_pair,
+        bool left_reused,
+        bool right_reused,
+        double pair_age_ms) const;
     bool select_pair_locked(
         const hogak::input::ReaderSnapshot& left_snapshot,
         const hogak::input::ReaderSnapshot& right_snapshot,
@@ -66,6 +84,8 @@ private:
     std::int64_t last_worker_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;
     std::int64_t last_output_timestamp_ns_ = 0;
+    std::int64_t last_production_output_frames_written_ = 0;
+    std::int64_t last_production_output_timestamp_ns_ = 0;
     std::int32_t consecutive_left_reuse_ = 0;
     std::int32_t consecutive_right_reuse_ = 0;
     std::int64_t left_reader_restart_count_ = 0;
@@ -111,7 +131,10 @@ private:
     cv::cuda::GpuMat gpu_right_part_{};
     cv::cuda::GpuMat gpu_overlap_f_{};
     cv::cuda::GpuMat gpu_overlap_u8_{};
+    cv::cuda::GpuMat gpu_output_scaled_{};
+    cv::cuda::GpuMat gpu_output_canvas_{};
     std::unique_ptr<hogak::output::FfmpegOutputWriter> output_writer_{};
+    std::unique_ptr<hogak::output::FfmpegOutputWriter> production_output_writer_{};
 };
 
 }  // namespace hogak::engine

@@ -9,6 +9,7 @@
 2. [02_calibration_and_matching_strategy.md](/c:/Users/Pixellot/Hogak_Stitching/reports/02_calibration_and_matching_strategy.md)
 3. [03_native_runtime_current_status.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_native_runtime_current_status.md)
 4. [04_next_steps_and_release_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/04_next_steps_and_release_plan.md)
+5. [05_60fps_service_pipeline_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/05_60fps_service_pipeline_plan.md)
 
 문서 역할:
 
@@ -16,6 +17,7 @@
 - `02`: calibration 전략, assisted matching 방향, deep matching 확장 방향
 - `03`: 현재 코드 기준 진행 상태와 운영 판단
 - `04`: 다음 단계, v0.1 마감 기준, 이후 확장 방향
+- `05`: `2x60 input -> 60fps transmit` 목표를 위한 본선 파이프라인 재설계 계획
 
 루트 [`README.md`](/c:/Users/Pixellot/Hogak_Stitching/README.md)는 사용법 중심이고,
 `reports/`는 판단 배경과 현재 상태를 정리한 보조 문서 세트다.

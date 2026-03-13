@@ -18,6 +18,7 @@ struct EngineMetrics {
     double stitch_fps = 0.0;
     double worker_fps = 0.0;
     double output_written_fps = 0.0;
+    double production_output_written_fps = 0.0;
     double pair_skew_ms_mean = 0.0;
     int32_t matches = 0;
     int32_t inliers = 0;
@@ -50,6 +51,8 @@ struct EngineMetrics {
     int32_t manual_target = 0;
     int64_t left_frames_total = 0;
     int64_t right_frames_total = 0;
+    int64_t left_buffered_frames = 0;
+    int64_t right_buffered_frames = 0;
     int64_t left_stale_drops = 0;
     int64_t right_stale_drops = 0;
     bool left_content_frozen = false;
@@ -64,9 +67,17 @@ struct EngineMetrics {
     std::string output_target;
     std::string output_effective_codec;
     std::string output_last_error;
+    bool production_output_active = false;
+    int64_t production_output_frames_written = 0;
+    int64_t production_output_frames_dropped = 0;
+    std::string production_output_target;
+    std::string production_output_effective_codec;
+    std::string production_output_last_error;
     bool calibrated = false;
     int32_t output_width = 0;
     int32_t output_height = 0;
+    int32_t production_output_width = 0;
+    int32_t production_output_height = 0;
     std::string left_last_error;
     std::string right_last_error;
 };

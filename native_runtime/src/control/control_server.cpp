@@ -2,7 +2,6 @@
 
 #include <chrono>
 #include <string>
-
 #include "control/json_line_protocol.h"
 #include "engine/stitch_engine.h"
 
@@ -141,6 +140,7 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
 
     if (command_type_is(line, "request_snapshot")) {
         emit_metrics(0, engine);
+        output_.flush();
         return true;
     }
 
@@ -168,11 +168,32 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         if (extract_json_string(line, "output_runtime", &text_value)) {
             config.output.runtime = text_value;
         }
+        if (extract_json_string(line, "output_profile", &text_value)) {
+            config.output.profile = text_value;
+        }
+        if (extract_json_string(line, "production_output_runtime", &text_value)) {
+            config.production_output.runtime = text_value;
+        }
+        if (extract_json_string(line, "production_output_profile", &text_value)) {
+            config.production_output.profile = text_value;
+        }
+        if (extract_json_bool(line, "debug_overlay", &bool_value)) {
+            config.output.debug_overlay = bool_value;
+        }
+        if (extract_json_bool(line, "output_debug_overlay", &bool_value)) {
+            config.output.debug_overlay = bool_value;
+        }
+        if (extract_json_bool(line, "production_output_debug_overlay", &bool_value)) {
+            config.production_output.debug_overlay = bool_value;
+        }
         if (extract_json_string(line, "target", &text_value)) {
             config.output.target = text_value;
         }
         if (extract_json_string(line, "output_target", &text_value)) {
             config.output.target = text_value;
+        }
+        if (extract_json_string(line, "production_output_target", &text_value)) {
+            config.production_output.target = text_value;
         }
         if (extract_json_string(line, "codec", &text_value)) {
             config.output.codec = text_value;
@@ -180,11 +201,17 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         if (extract_json_string(line, "output_codec", &text_value)) {
             config.output.codec = text_value;
         }
+        if (extract_json_string(line, "production_output_codec", &text_value)) {
+            config.production_output.codec = text_value;
+        }
         if (extract_json_string(line, "bitrate", &text_value)) {
             config.output.bitrate = text_value;
         }
         if (extract_json_string(line, "output_bitrate", &text_value)) {
             config.output.bitrate = text_value;
+        }
+        if (extract_json_string(line, "production_output_bitrate", &text_value)) {
+            config.production_output.bitrate = text_value;
         }
         if (extract_json_string(line, "preset", &text_value)) {
             config.output.preset = text_value;
@@ -192,18 +219,37 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         if (extract_json_string(line, "output_preset", &text_value)) {
             config.output.preset = text_value;
         }
+        if (extract_json_string(line, "production_output_preset", &text_value)) {
+            config.production_output.preset = text_value;
+        }
         if (extract_json_string(line, "muxer", &text_value)) {
             config.output.muxer = text_value;
         }
         if (extract_json_string(line, "output_muxer", &text_value)) {
             config.output.muxer = text_value;
         }
+        if (extract_json_string(line, "production_output_muxer", &text_value)) {
+            config.production_output.muxer = text_value;
+        }
         if (extract_json_string(line, "rtsp_transport", &text_value) || extract_json_string(line, "transport", &text_value)) {
             config.left.transport = text_value;
             config.right.transport = text_value;
         }
+        if (extract_json_number(line, "input_buffer_frames", &number_value)) {
+            config.left.max_buffered_frames = static_cast<std::int32_t>(number_value);
+            config.right.max_buffered_frames = config.left.max_buffered_frames;
+        }
         if (extract_json_string(line, "sync_pair_mode", &text_value)) {
             config.sync_pair_mode = text_value;
+        }
+        if (extract_json_bool(line, "allow_frame_reuse", &bool_value)) {
+            config.allow_frame_reuse = bool_value;
+        }
+        if (extract_json_number(line, "pair_reuse_max_age_ms", &number_value)) {
+            config.pair_reuse_max_age_ms = number_value;
+        }
+        if (extract_json_number(line, "pair_reuse_max_consecutive", &number_value)) {
+            config.pair_reuse_max_consecutive = static_cast<std::int32_t>(number_value);
         }
         if (extract_json_string(line, "gpu_mode", &text_value)) {
             config.gpu_mode = text_value;
@@ -242,6 +288,18 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         }
         if (extract_json_number(line, "output_height", &number_value)) {
             config.output.height = static_cast<std::int32_t>(number_value);
+        }
+        if (extract_json_number(line, "output_fps", &number_value)) {
+            config.output.fps = number_value;
+        }
+        if (extract_json_number(line, "production_output_width", &number_value)) {
+            config.production_output.width = static_cast<std::int32_t>(number_value);
+        }
+        if (extract_json_number(line, "production_output_height", &number_value)) {
+            config.production_output.height = static_cast<std::int32_t>(number_value);
+        }
+        if (extract_json_number(line, "production_output_fps", &number_value)) {
+            config.production_output.fps = number_value;
         }
         if (extract_json_bool(line, "headless_benchmark", &bool_value)) {
             config.headless_benchmark = bool_value;

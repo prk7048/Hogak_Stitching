@@ -16,7 +16,6 @@ namespace hogak::input {
 
 namespace {
 
-constexpr std::size_t kMaxBufferedFrames = 8;
 constexpr int kFreezeProbeWidth = 64;
 constexpr int kFreezeProbeHeight = 36;
 constexpr double kFreezeMotionThreshold = 0.01;
@@ -53,12 +52,11 @@ cv::Mat make_freeze_probe_gray(const cv::Mat& current_bgr) {
     return gray;
 }
 
-double frame_motion_score(const cv::Mat& previous_probe_gray, const cv::Mat& current_bgr) {
-    if (previous_probe_gray.empty() || current_bgr.empty()) {
+double frame_motion_score(const cv::Mat& previous_probe_gray, const cv::Mat& current_probe_gray) {
+    if (previous_probe_gray.empty() || current_probe_gray.empty()) {
         return 0.0;
     }
-    cv::Mat current_probe_gray = make_freeze_probe_gray(current_bgr);
-    if (current_probe_gray.empty()) {
+    if (current_probe_gray.size() != previous_probe_gray.size()) {
         return 0.0;
     }
     cv::Mat diff;
@@ -66,11 +64,10 @@ double frame_motion_score(const cv::Mat& previous_probe_gray, const cv::Mat& cur
     return cv::mean(diff)[0];
 }
 
-bool is_effectively_identical_frame(const cv::Mat& previous_probe_gray, const cv::Mat& current_bgr) {
-    if (previous_probe_gray.empty() || current_bgr.empty()) {
+bool is_effectively_identical_probe(const cv::Mat& previous_probe_gray, const cv::Mat& current_probe_gray) {
+    if (previous_probe_gray.empty() || current_probe_gray.empty()) {
         return false;
     }
-    cv::Mat current_probe_gray = make_freeze_probe_gray(current_bgr);
     if (current_probe_gray.empty() || current_probe_gray.size() != previous_probe_gray.size()) {
         return false;
     }
@@ -254,9 +251,10 @@ void FfmpegRtspReader::run() {
                 config_.width,
                 CV_8UC3,
                 frame_buffer.data());
-            const bool identical_frame = is_effectively_identical_frame(previous_probe_gray, frame_view);
-            const double motion_mean = frame_motion_score(previous_probe_gray, frame_view);
-            previous_probe_gray = make_freeze_probe_gray(frame_view);
+            cv::Mat current_probe_gray = make_freeze_probe_gray(frame_view);
+            const bool identical_frame = is_effectively_identical_probe(previous_probe_gray, current_probe_gray);
+            const double motion_mean = frame_motion_score(previous_probe_gray, current_probe_gray);
+            previous_probe_gray = current_probe_gray;
             if (!previous_probe_gray.empty()) {
                 if (identical_frame && motion_mean <= kFreezeMotionThreshold) {
                     if (freeze_started_ns <= 0) {
@@ -270,7 +268,9 @@ void FfmpegRtspReader::run() {
                 (freeze_started_ns > 0) ? static_cast<double>(ts_ns - freeze_started_ns) / 1'000'000'000.0 : 0.0;
 
             std::lock_guard<std::mutex> lock(mutex_);
-            if (frames_.size() >= kMaxBufferedFrames) {
+            const auto max_buffered_frames =
+                static_cast<std::size_t>(std::max(1, config_.max_buffered_frames));
+            if (frames_.size() >= max_buffered_frames) {
                 frames_.pop_front();
                 snapshot_.stale_drops += 1;
             }

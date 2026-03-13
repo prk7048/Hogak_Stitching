@@ -5,8 +5,10 @@
 #include <chrono>
 #include <cmath>
 #include <cctype>
+#include <ctime>
 #include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iterator>
 #include <sstream>
 #include <string>
@@ -17,6 +19,7 @@
 #include <opencv2/core/cuda.hpp>
 #include <opencv2/cudaarithm.hpp>
 #include <opencv2/cudawarping.hpp>
+#include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
 #include "input/ffmpeg_rtsp_reader.h"
@@ -30,10 +33,11 @@ input::FfmpegRtspReader g_left_reader;
 input::FfmpegRtspReader g_right_reader;
 constexpr int kMotionProbeWidth = 64;
 constexpr int kMotionProbeHeight = 36;
-constexpr double kRealtimeFallbackMaxAgeMs = 90.0;
-constexpr int kRealtimeFallbackMaxConsecutiveReuse = 2;
 constexpr double kReaderRestartAgeMs = 1500.0;
 constexpr double kReaderRestartCooldownSec = 3.0;
+constexpr int kSeamFeatherMinWidth = 48;
+constexpr int kSeamFeatherMaxWidth = 192;
+constexpr double kSeamFeatherFraction = 0.14;
 
 double fps_from_period_ns(std::int64_t delta_ns) {
     if (delta_ns <= 0) {
@@ -69,12 +73,11 @@ cv::Mat make_motion_probe_gray(const cv::Mat& image) {
     return gray;
 }
 
-double probe_motion_mean(const cv::Mat& previous_probe_gray, const cv::Mat& image) {
-    if (previous_probe_gray.empty() || image.empty()) {
+double probe_motion_mean(const cv::Mat& previous_probe_gray, const cv::Mat& current_probe_gray) {
+    if (previous_probe_gray.empty() || current_probe_gray.empty()) {
         return 0.0;
     }
-    cv::Mat current_probe_gray = make_motion_probe_gray(image);
-    if (current_probe_gray.empty()) {
+    if (current_probe_gray.size() != previous_probe_gray.size()) {
         return 0.0;
     }
     cv::Mat diff;
@@ -100,6 +103,25 @@ cv::Mat resize_frame_for_runtime(const cv::Mat& frame, double scale) {
     return resized;
 }
 
+cv::Size resolve_output_frame_size(const OutputConfig& config, const cv::Size& fallback) {
+    if (config.width > 0 && config.height > 0) {
+        return cv::Size(config.width, config.height);
+    }
+    return fallback;
+}
+
+cv::Size fit_aspect_inside(const cv::Size& source, const cv::Size& target) {
+    if (source.width <= 0 || source.height <= 0 || target.width <= 0 || target.height <= 0) {
+        return source;
+    }
+    const double scale = std::min(
+        static_cast<double>(target.width) / static_cast<double>(source.width),
+        static_cast<double>(target.height) / static_cast<double>(source.height));
+    return cv::Size(
+        std::max(2, static_cast<int>(std::round(static_cast<double>(source.width) * scale))),
+        std::max(2, static_cast<int>(std::round(static_cast<double>(source.height) * scale))));
+}
+
 cv::Mat scale_homography_for_runtime(const cv::Mat& homography, double scale) {
     if (homography.empty() || std::abs(scale - 1.0) < 1e-6) {
         return homography;
@@ -113,6 +135,54 @@ cv::Mat scale_homography_for_runtime(const cv::Mat& homography, double scale) {
         0.0, 1.0 / scale, 0.0,
         0.0, 0.0, 1.0);
     return scale_matrix * homography * inv_scale_matrix;
+}
+
+void build_seam_blend_weights(
+    const cv::Mat& overlap_mask,
+    const cv::Rect& overlap_roi,
+    cv::Mat* weight_left_out,
+    cv::Mat* weight_right_out) {
+    if (weight_left_out == nullptr || weight_right_out == nullptr) {
+        return;
+    }
+
+    *weight_left_out = cv::Mat::zeros(overlap_mask.size(), CV_32FC1);
+    *weight_right_out = cv::Mat::zeros(overlap_mask.size(), CV_32FC1);
+    if (overlap_mask.empty() || overlap_roi.area() <= 0) {
+        return;
+    }
+
+    const int band_width = std::clamp(
+        static_cast<int>(std::round(static_cast<double>(overlap_roi.width) * kSeamFeatherFraction)),
+        kSeamFeatherMinWidth,
+        std::min(kSeamFeatherMaxWidth, std::max(kSeamFeatherMinWidth, overlap_roi.width)));
+    const int half_band = std::max(1, band_width / 2);
+    const int seam_center_x = overlap_roi.x + overlap_roi.width / 2;
+    const int transition_start_x = std::max(overlap_roi.x, seam_center_x - half_band);
+    const int transition_end_x = std::min(overlap_roi.x + overlap_roi.width - 1, seam_center_x + half_band);
+    const float denom = static_cast<float>(std::max(1, transition_end_x - transition_start_x));
+
+    for (int y = overlap_roi.y; y < overlap_roi.y + overlap_roi.height; ++y) {
+        const auto* mask_row = overlap_mask.ptr<std::uint8_t>(y);
+        auto* left_row = weight_left_out->ptr<float>(y);
+        auto* right_row = weight_right_out->ptr<float>(y);
+        for (int x = overlap_roi.x; x < overlap_roi.x + overlap_roi.width; ++x) {
+            if (mask_row[x] == 0) {
+                continue;
+            }
+            if (x <= transition_start_x) {
+                left_row[x] = 1.0f;
+                right_row[x] = 0.0f;
+            } else if (x >= transition_end_x) {
+                left_row[x] = 0.0f;
+                right_row[x] = 1.0f;
+            } else {
+                const float alpha = static_cast<float>(x - transition_start_x) / denom;
+                left_row[x] = 1.0f - alpha;
+                right_row[x] = alpha;
+            }
+        }
+    }
 }
 
 std::string sanitize_numeric_text(const std::string& text) {
@@ -209,6 +279,25 @@ bool load_homography_from_file(const std::string& path, cv::Mat* homography_out)
     }
 
     return parse_homography_numbers(text, homography_out);
+}
+
+std::string format_overlay_clock_now() {
+    const auto now = std::chrono::system_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()) % 1000;
+    const std::time_t now_time = std::chrono::system_clock::to_time_t(now);
+    std::tm local_tm{};
+#ifdef _WIN32
+    localtime_s(&local_tm, &now_time);
+#else
+    localtime_r(&now_time, &local_tm);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&local_tm, "%H:%M:%S")
+        << '.'
+        << std::setw(3)
+        << std::setfill('0')
+        << ms.count();
+    return out.str();
 }
 
 bool prepare_warp_plan(
@@ -376,6 +465,8 @@ void StitchEngine::clear_calibration_state_locked() {
     gpu_right_part_.release();
     gpu_overlap_f_.release();
     gpu_overlap_u8_.release();
+    gpu_output_scaled_.release();
+    gpu_output_canvas_.release();
     left_roi_ = cv::Rect();
     overlap_roi_ = cv::Rect();
     output_size_ = cv::Size();
@@ -383,6 +474,8 @@ void StitchEngine::clear_calibration_state_locked() {
     metrics_.calibrated = false;
     metrics_.output_width = 0;
     metrics_.output_height = 0;
+    metrics_.production_output_width = 0;
+    metrics_.production_output_height = 0;
     metrics_.matches = 0;
     metrics_.inliers = 0;
     metrics_.overlap_diff_mean = 0.0;
@@ -435,11 +528,15 @@ bool StitchEngine::start(const EngineConfig& config) {
     metrics_.status = "starting";
     metrics_.gpu_enabled = (config.gpu_mode != "off");
     metrics_.gpu_reason = metrics_.gpu_enabled ? "native runtime stitch pipeline" : "gpu disabled by config";
+    metrics_.output_target = config.output.target;
+    metrics_.production_output_target = config.production_output.target;
     last_left_seq_ = 0;
     last_right_seq_ = 0;
     last_worker_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    last_production_output_frames_written_ = 0;
+    last_production_output_timestamp_ns_ = 0;
     consecutive_left_reuse_ = 0;
     consecutive_right_reuse_ = 0;
     left_reader_restart_count_ = 0;
@@ -448,6 +545,7 @@ bool StitchEngine::start(const EngineConfig& config) {
     last_right_reader_restart_ns_ = 0;
     clear_calibration_state_locked();
     output_writer_.reset();
+    production_output_writer_.reset();
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
     if (metrics_.gpu_enabled && !gpu_available_) {
         metrics_.gpu_reason = "cuda requested but unavailable";
@@ -478,12 +576,19 @@ void StitchEngine::stop() {
         output_writer_->stop();
         output_writer_.reset();
     }
+    if (production_output_writer_ != nullptr) {
+        production_output_writer_->stop();
+        production_output_writer_.reset();
+    }
     g_left_reader.stop();
     g_right_reader.stop();
     metrics_.status = "stopped";
     metrics_.output_written_fps = 0.0;
+    metrics_.production_output_written_fps = 0.0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    last_production_output_frames_written_ = 0;
+    last_production_output_timestamp_ns_ = 0;
     consecutive_left_reuse_ = 0;
     consecutive_right_reuse_ = 0;
 }
@@ -503,14 +608,20 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
         (config.right.video_codec != config_.right.video_codec) ||
         (config.left.width != config_.left.width) ||
         (config.left.height != config_.left.height) ||
+        (config.left.max_buffered_frames != config_.left.max_buffered_frames) ||
         (config.right.width != config_.right.width) ||
         (config.right.height != config_.right.height) ||
+        (config.right.max_buffered_frames != config_.right.max_buffered_frames) ||
         (config.input_runtime != config_.input_runtime) ||
         (config.ffmpeg_bin != config_.ffmpeg_bin);
 
     if (output_writer_ != nullptr) {
         output_writer_->stop();
         output_writer_.reset();
+    }
+    if (production_output_writer_ != nullptr) {
+        production_output_writer_->stop();
+        production_output_writer_.reset();
     }
     if (restart_readers) {
         g_left_reader.stop();
@@ -524,15 +635,21 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
     last_worker_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    last_production_output_frames_written_ = 0;
+    last_production_output_timestamp_ns_ = 0;
     consecutive_left_reuse_ = 0;
     consecutive_right_reuse_ = 0;
     metrics_.output_written_fps = 0.0;
+    metrics_.production_output_written_fps = 0.0;
     metrics_.gpu_enabled = (config.gpu_mode != "off");
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
     metrics_.gpu_reason = gpu_available_ ? "reloaded config" : "gpu disabled or unavailable";
     metrics_.output_last_error.clear();
     metrics_.output_effective_codec.clear();
     metrics_.output_target = config.output.target;
+    metrics_.production_output_last_error.clear();
+    metrics_.production_output_effective_codec.clear();
+    metrics_.production_output_target = config.production_output.target;
     metrics_.status = "config reloaded";
 
     if (restart_readers) {
@@ -556,16 +673,25 @@ void StitchEngine::reset_calibration() {
         output_writer_->stop();
         output_writer_.reset();
     }
+    if (production_output_writer_ != nullptr) {
+        production_output_writer_->stop();
+        production_output_writer_.reset();
+    }
     clear_calibration_state_locked();
     metrics_.output_last_error.clear();
     metrics_.output_effective_codec.clear();
+    metrics_.production_output_last_error.clear();
+    metrics_.production_output_effective_codec.clear();
     metrics_.status = "calibration reset";
     last_left_seq_ = 0;
     last_right_seq_ = 0;
     last_worker_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
     last_output_timestamp_ns_ = 0;
+    last_production_output_frames_written_ = 0;
+    last_production_output_timestamp_ns_ = 0;
     metrics_.output_written_fps = 0.0;
+    metrics_.production_output_written_fps = 0.0;
 }
 
 EngineConfig StitchEngine::current_config() const {
@@ -663,24 +789,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Mat& left_frame, const cv
     if (cv::countNonZero(overlap_mask_) > 0) {
         overlap_roi_ = cv::boundingRect(overlap_mask_);
         overlap_mask_roi_ = overlap_mask_(overlap_roi_).clone();
-        if (full_overlap_) {
-            weight_left_ = cv::Mat(output_size_, CV_32FC1, cv::Scalar(0.5f));
-            weight_right_ = cv::Mat(output_size_, CV_32FC1, cv::Scalar(0.5f));
-        } else {
-            cv::Mat left_valid;
-            cv::Mat right_valid;
-            left_mask_template_.convertTo(left_valid, CV_8UC1, 1.0 / 255.0);
-            right_mask_template_.convertTo(right_valid, CV_8UC1, 1.0 / 255.0);
-
-            cv::Mat dist_left;
-            cv::Mat dist_right;
-            cv::distanceTransform(left_valid, dist_left, cv::DIST_L2, 3);
-            cv::distanceTransform(right_valid, dist_right, cv::DIST_L2, 3);
-
-            cv::Mat denom = dist_left + dist_right + 1e-6f;
-            cv::divide(dist_left, denom, weight_left_);
-            cv::divide(dist_right, denom, weight_right_);
-        }
+        build_seam_blend_weights(overlap_mask_, overlap_roi_, &weight_left_, &weight_right_);
 
         std::vector<cv::Mat> wl(3, weight_left_);
         std::vector<cv::Mat> wr(3, weight_right_);
@@ -716,12 +825,151 @@ bool StitchEngine::ensure_calibration_locked(const cv::Mat& left_frame, const cv
     metrics_.calibrated = true;
     metrics_.output_width = (config_.output.width > 0) ? config_.output.width : output_size_.width;
     metrics_.output_height = (config_.output.height > 0) ? config_.output.height : output_size_.height;
-    metrics_.blend_mode = "feather";
+    if (config_.production_output.runtime == "ffmpeg" && !config_.production_output.target.empty()) {
+        metrics_.production_output_width =
+            (config_.production_output.width > 0) ? config_.production_output.width : output_size_.width;
+        metrics_.production_output_height =
+            (config_.production_output.height > 0) ? config_.production_output.height : output_size_.height;
+    } else {
+        metrics_.production_output_width = 0;
+        metrics_.production_output_height = 0;
+    }
+    metrics_.blend_mode = "seam_feather";
     metrics_.status = "calibrated";
     return true;
 }
 
-bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& right_frame, std::int64_t pair_ts_ns) {
+bool StitchEngine::prepare_output_frame_locked(
+    const OutputConfig& output_config,
+    const cv::Mat& stitched_cpu,
+    const cv::cuda::GpuMat* stitched_gpu,
+    cv::Mat* prepared_frame_out) {
+    if (prepared_frame_out == nullptr || stitched_cpu.empty()) {
+        return false;
+    }
+
+    const cv::Size source_size(stitched_cpu.cols, stitched_cpu.rows);
+    const cv::Size target_size = resolve_output_frame_size(output_config, source_size);
+    if (target_size.width <= 0 || target_size.height <= 0) {
+        return false;
+    }
+    if (target_size == source_size) {
+        *prepared_frame_out = stitched_cpu;
+        return true;
+    }
+
+    const cv::Size scaled_size = fit_aspect_inside(source_size, target_size);
+    if (gpu_available_ && stitched_gpu != nullptr && !stitched_gpu->empty()) {
+        try {
+            const cv::cuda::GpuMat* scaled_source = stitched_gpu;
+            if (scaled_size != source_size) {
+                cv::cuda::resize(*stitched_gpu, gpu_output_scaled_, scaled_size, 0.0, 0.0, cv::INTER_LINEAR);
+                scaled_source = &gpu_output_scaled_;
+            }
+
+            gpu_output_canvas_.create(target_size, CV_8UC3);
+            gpu_output_canvas_.setTo(cv::Scalar::all(0));
+            const cv::Rect roi(
+                std::max(0, (target_size.width - scaled_size.width) / 2),
+                std::max(0, (target_size.height - scaled_size.height) / 2),
+                scaled_size.width,
+                scaled_size.height);
+            cv::cuda::GpuMat target_roi(gpu_output_canvas_, roi);
+            scaled_source->copyTo(target_roi);
+            gpu_output_canvas_.download(*prepared_frame_out);
+            return true;
+        } catch (const cv::Exception& e) {
+            gpu_available_ = false;
+            metrics_.gpu_errors += 1;
+            metrics_.gpu_reason = std::string("cuda output prep failed: ") + e.what();
+        }
+    }
+
+    cv::Mat scaled_frame;
+    if (scaled_size == source_size) {
+        scaled_frame = stitched_cpu;
+    } else {
+        cv::resize(stitched_cpu, scaled_frame, scaled_size, 0.0, 0.0, cv::INTER_LINEAR);
+    }
+    prepared_frame_out->create(target_size, CV_8UC3);
+    prepared_frame_out->setTo(cv::Scalar::all(0));
+    const cv::Rect roi(
+        std::max(0, (target_size.width - scaled_size.width) / 2),
+        std::max(0, (target_size.height - scaled_size.height) / 2),
+        scaled_size.width,
+        scaled_size.height);
+    scaled_frame.copyTo((*prepared_frame_out)(roi));
+    return true;
+}
+
+void StitchEngine::annotate_output_debug_overlay_locked(
+    cv::Mat* frame,
+    const char* label,
+    const SelectedPair& selected_pair,
+    bool left_reused,
+    bool right_reused,
+    double pair_age_ms) const {
+    if (frame == nullptr || frame->empty()) {
+        return;
+    }
+
+    const double min_dim = static_cast<double>(std::min(frame->cols, frame->rows));
+    const double font_scale = std::clamp(min_dim / 1200.0, 0.55, 1.15);
+    const int thickness = std::max(1, static_cast<int>(std::round(font_scale * 2.0)));
+    const int pad = std::max(10, static_cast<int>(std::round(font_scale * 14.0)));
+    const int line_gap = std::max(24, static_cast<int>(std::round(font_scale * 30.0)));
+    const int baseline_pad = std::max(6, static_cast<int>(std::round(font_scale * 8.0)));
+
+    const std::string reuse_text =
+        std::string(left_reused ? "L" : "-") + std::string(right_reused ? "R" : "-");
+    const std::vector<std::string> lines = {
+        std::string(label) + " frame=" + std::to_string(metrics_.frame_index) +
+            " status=" + metrics_.status,
+        "seq L=" + std::to_string(selected_pair.left_seq) +
+            " R=" + std::to_string(selected_pair.right_seq) +
+            " reuse=" + reuse_text +
+            " pair_age=" + std::to_string(static_cast<int>(std::llround(pair_age_ms))) + "ms" +
+            " skew=" + std::to_string(static_cast<int>(std::llround(metrics_.pair_skew_ms_mean))) + "ms",
+        "input_age L=" + std::to_string(static_cast<int>(std::llround(metrics_.left_age_ms))) +
+            "ms R=" + std::to_string(static_cast<int>(std::llround(metrics_.right_age_ms))) +
+            "ms time=" + format_overlay_clock_now(),
+    };
+
+    int max_text_width = 0;
+    for (const auto& line : lines) {
+        int baseline = 0;
+        const auto size = cv::getTextSize(line, cv::FONT_HERSHEY_SIMPLEX, font_scale, thickness, &baseline);
+        max_text_width = std::max(max_text_width, size.width);
+    }
+
+    const int box_width = std::min(frame->cols, max_text_width + (pad * 2));
+    const int box_height = std::min(frame->rows, pad + static_cast<int>(lines.size()) * line_gap + baseline_pad);
+    cv::rectangle(*frame, cv::Rect(0, 0, box_width, box_height), cv::Scalar(8, 8, 8), cv::FILLED);
+
+    int y = pad + line_gap - baseline_pad;
+    for (std::size_t index = 0; index < lines.size(); ++index) {
+        const cv::Scalar color = (index == 0) ? cv::Scalar(90, 255, 90) : cv::Scalar(240, 240, 240);
+        cv::putText(
+            *frame,
+            lines[index],
+            cv::Point(pad, y),
+            cv::FONT_HERSHEY_SIMPLEX,
+            font_scale,
+            color,
+            thickness,
+            cv::LINE_AA);
+        y += line_gap;
+    }
+}
+
+bool StitchEngine::stitch_pair_locked(
+    const cv::Mat& left_frame,
+    const cv::Mat& right_frame,
+    std::int64_t pair_ts_ns,
+    const SelectedPair& selected_pair,
+    bool left_reused,
+    bool right_reused,
+    double pair_age_ms) {
     if (!ensure_calibration_locked(left_frame, right_frame)) {
         metrics_.stitch_fps = 0.0;
         return false;
@@ -760,41 +1008,31 @@ bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& 
             gpu_right_warped_.copyTo(gpu_stitched_, gpu_only_right_mask_);
 
             if (overlap_roi_.area() > 0) {
-                if (full_overlap_) {
-                    cv::cuda::addWeighted(
-                        gpu_left_canvas_,
-                        0.5,
-                        gpu_right_warped_,
-                        0.5,
-                        0.0,
-                        gpu_stitched_);
-                } else {
-                    cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
-                    cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
-                    cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
+                cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
+                cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
+                cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
 
-                    cv::cuda::GpuMat left_overlap_f;
-                    cv::cuda::GpuMat right_overlap_f;
-                    left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
-                    right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
+                cv::cuda::GpuMat left_overlap_f;
+                cv::cuda::GpuMat right_overlap_f;
+                left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
+                right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
 
-                    std::vector<cv::cuda::GpuMat> left_channels;
-                    std::vector<cv::cuda::GpuMat> right_channels;
-                    std::vector<cv::cuda::GpuMat> blended_channels(3);
-                    cv::cuda::split(left_overlap_f, left_channels);
-                    cv::cuda::split(right_overlap_f, right_channels);
-                    for (int channel = 0; channel < 3; ++channel) {
-                        cv::cuda::GpuMat left_part;
-                        cv::cuda::GpuMat right_part;
-                        cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
-                        cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
-                        cv::cuda::add(left_part, right_part, blended_channels[channel]);
-                    }
-
-                    cv::cuda::merge(blended_channels, gpu_overlap_f_);
-                    gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
-                    gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
+                std::vector<cv::cuda::GpuMat> left_channels;
+                std::vector<cv::cuda::GpuMat> right_channels;
+                std::vector<cv::cuda::GpuMat> blended_channels(3);
+                cv::cuda::split(left_overlap_f, left_channels);
+                cv::cuda::split(right_overlap_f, right_channels);
+                for (int channel = 0; channel < 3; ++channel) {
+                    cv::cuda::GpuMat left_part;
+                    cv::cuda::GpuMat right_part;
+                    cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
+                    cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
+                    cv::cuda::add(left_part, right_part, blended_channels[channel]);
                 }
+
+                cv::cuda::merge(blended_channels, gpu_overlap_f_);
+                gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
+                gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
             }
 
             gpu_stitched_.download(stitched);
@@ -854,8 +1092,9 @@ bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& 
     }
 
     latest_stitched_ = stitched;
-    metrics_.stitched_motion_mean = probe_motion_mean(previous_stitched_probe_gray_, stitched);
-    previous_stitched_probe_gray_ = make_motion_probe_gray(stitched);
+    cv::Mat current_stitched_probe_gray = make_motion_probe_gray(stitched);
+    metrics_.stitched_motion_mean = probe_motion_mean(previous_stitched_probe_gray_, current_stitched_probe_gray);
+    previous_stitched_probe_gray_ = current_stitched_probe_gray;
     if (!stitched.empty()) {
         cv::Mat stitched_gray;
         cv::cvtColor(stitched, stitched_gray, cv::COLOR_BGR2GRAY);
@@ -866,29 +1105,90 @@ bool StitchEngine::stitch_pair_locked(const cv::Mat& left_frame, const cv::Mat& 
     metrics_.stitched_count += 1;
     metrics_.frame_index += 1;
     metrics_.status = "stitching";
-    metrics_.blend_mode = "feather";
+    metrics_.blend_mode = "seam_feather";
     if (last_worker_timestamp_ns_ > 0) {
         metrics_.stitch_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
         metrics_.stitch_fps = 0.0;
     }
 
-    if (config_.output.runtime == "ffmpeg" && !config_.output.target.empty()) {
-        if (output_writer_ == nullptr) {
-            output_writer_ = std::make_unique<hogak::output::FfmpegOutputWriter>();
-            const double output_fps = std::max({metrics_.worker_fps, metrics_.left_fps, metrics_.right_fps, 30.0});
-            if (!output_writer_->start(config_.output, config_.ffmpeg_bin, stitched.cols, stitched.rows, output_fps)) {
-                metrics_.output_last_error = "failed to start ffmpeg output writer";
-                output_writer_.reset();
-            } else {
-                metrics_.output_target = config_.output.target;
-                metrics_.output_effective_codec = output_writer_->effective_codec();
+    const auto launch_output_writer = [&](const char* overlay_label,
+                                          const OutputConfig& output_config,
+                                          std::unique_ptr<hogak::output::FfmpegOutputWriter>* writer,
+                                          std::string* last_error,
+                                          std::string* target,
+                                          std::string* effective_codec) {
+        if (writer == nullptr || last_error == nullptr || target == nullptr || effective_codec == nullptr) {
+            return;
+        }
+        if (output_config.runtime != "ffmpeg" || output_config.target.empty()) {
+            if (*writer != nullptr) {
+                (*writer)->stop();
+                writer->reset();
             }
+            return;
         }
-        if (output_writer_ != nullptr) {
-            output_writer_->submit(stitched, pair_ts_ns);
+        cv::Mat prepared_frame;
+        const bool prepared_ok = prepare_output_frame_locked(
+            output_config,
+            stitched,
+            used_gpu_blend ? &gpu_stitched_ : nullptr,
+            &prepared_frame);
+        const cv::Mat& frame_to_submit = (prepared_ok && !prepared_frame.empty()) ? prepared_frame : stitched;
+        cv::Mat annotated_frame;
+        const cv::Mat* submit_frame = &frame_to_submit;
+        if (output_config.debug_overlay) {
+            annotated_frame = frame_to_submit.clone();
+            annotate_output_debug_overlay_locked(
+                &annotated_frame,
+                overlay_label,
+                selected_pair,
+                left_reused,
+                right_reused,
+                pair_age_ms);
+            submit_frame = &annotated_frame;
         }
-    }
+        const bool input_prepared =
+            (submit_frame->cols != stitched.cols) || (submit_frame->rows != stitched.rows);
+        if (*writer == nullptr) {
+            *writer = std::make_unique<hogak::output::FfmpegOutputWriter>();
+            const double requested_output_fps = (output_config.fps > 0.0) ? output_config.fps : 0.0;
+            const double output_fps = (requested_output_fps > 0.0)
+                ? requested_output_fps
+                : std::max({metrics_.worker_fps, metrics_.left_fps, metrics_.right_fps, 30.0});
+            if (!(*writer)->start(
+                    output_config,
+                    config_.ffmpeg_bin,
+                    submit_frame->cols,
+                    submit_frame->rows,
+                    output_fps,
+                    input_prepared)) {
+                *last_error = "failed to start ffmpeg output writer";
+                writer->reset();
+                return;
+            }
+            *target = output_config.target;
+            *effective_codec = (*writer)->effective_codec();
+        }
+        if (*writer != nullptr) {
+            (*writer)->submit(*submit_frame, pair_ts_ns);
+        }
+    };
+
+    launch_output_writer(
+        "PROBE",
+        config_.output,
+        &output_writer_,
+        &metrics_.output_last_error,
+        &metrics_.output_target,
+        &metrics_.output_effective_codec);
+    launch_output_writer(
+        "TX",
+        config_.production_output,
+        &production_output_writer_,
+        &metrics_.production_output_last_error,
+        &metrics_.production_output_target,
+        &metrics_.production_output_effective_codec);
 
     return true;
 }
@@ -910,6 +1210,8 @@ void StitchEngine::update_metrics_locked() {
     metrics_.right_motion_mean = right.motion_mean;
     metrics_.left_frames_total = left.frames_total;
     metrics_.right_frames_total = right.frames_total;
+    metrics_.left_buffered_frames = left.buffered_frames;
+    metrics_.right_buffered_frames = right.buffered_frames;
     metrics_.left_stale_drops = left.stale_drops;
     metrics_.right_stale_drops = right.stale_drops;
     metrics_.left_content_frozen = left.content_frozen;
@@ -927,12 +1229,35 @@ void StitchEngine::update_metrics_locked() {
     metrics_.calibrated = calibrated_;
     metrics_.output_width = (config_.output.width > 0) ? config_.output.width : output_size_.width;
     metrics_.output_height = (config_.output.height > 0) ? config_.output.height : output_size_.height;
+    if (config_.production_output.runtime == "ffmpeg" && !config_.production_output.target.empty()) {
+        metrics_.production_output_width =
+            (config_.production_output.width > 0) ? config_.production_output.width : output_size_.width;
+        metrics_.production_output_height =
+            (config_.production_output.height > 0) ? config_.production_output.height : output_size_.height;
+    } else {
+        metrics_.production_output_width = 0;
+        metrics_.production_output_height = 0;
+    }
     metrics_.output_active = (output_writer_ != nullptr) && output_writer_->active();
     metrics_.output_frames_written = (output_writer_ != nullptr) ? output_writer_->frames_written() : 0;
     metrics_.output_frames_dropped = (output_writer_ != nullptr) ? output_writer_->frames_dropped() : 0;
     metrics_.output_effective_codec =
         (output_writer_ != nullptr) ? output_writer_->effective_codec() : metrics_.output_effective_codec;
     metrics_.output_last_error = (output_writer_ != nullptr) ? output_writer_->last_error() : metrics_.output_last_error;
+    metrics_.production_output_active =
+        (production_output_writer_ != nullptr) && production_output_writer_->active();
+    metrics_.production_output_frames_written =
+        (production_output_writer_ != nullptr) ? production_output_writer_->frames_written() : 0;
+    metrics_.production_output_frames_dropped =
+        (production_output_writer_ != nullptr) ? production_output_writer_->frames_dropped() : 0;
+    metrics_.production_output_effective_codec =
+        (production_output_writer_ != nullptr)
+            ? production_output_writer_->effective_codec()
+            : metrics_.production_output_effective_codec;
+    metrics_.production_output_last_error =
+        (production_output_writer_ != nullptr)
+            ? production_output_writer_->last_error()
+            : metrics_.production_output_last_error;
     if (metrics_.output_frames_written < last_output_frames_written_) {
         last_output_frames_written_ = metrics_.output_frames_written;
         last_output_timestamp_ns_ = 0;
@@ -948,6 +1273,23 @@ void StitchEngine::update_metrics_locked() {
         last_output_timestamp_ns_ = now_ns;
     } else if (!metrics_.output_active) {
         metrics_.output_written_fps = 0.0;
+    }
+    if (metrics_.production_output_frames_written < last_production_output_frames_written_) {
+        last_production_output_frames_written_ = metrics_.production_output_frames_written;
+        last_production_output_timestamp_ns_ = 0;
+    }
+    if (metrics_.production_output_frames_written > last_production_output_frames_written_) {
+        const auto delta_frames =
+            metrics_.production_output_frames_written - last_production_output_frames_written_;
+        const auto delta_ns = now_ns - last_production_output_timestamp_ns_;
+        if (last_production_output_timestamp_ns_ > 0 && delta_frames > 0 && delta_ns > 0) {
+            metrics_.production_output_written_fps =
+                static_cast<double>(delta_frames) * 1'000'000'000.0 / static_cast<double>(delta_ns);
+        }
+        last_production_output_frames_written_ = metrics_.production_output_frames_written;
+        last_production_output_timestamp_ns_ = now_ns;
+    } else if (!metrics_.production_output_active) {
+        metrics_.production_output_written_fps = 0.0;
     }
 
     if (!left.has_frame || !right.has_frame) {
@@ -981,18 +1323,24 @@ void StitchEngine::update_metrics_locked() {
         return;
     }
     if (!has_new_left || !has_new_right) {
+        if (!config_.allow_frame_reuse) {
+            metrics_.status = "waiting paired fresh frame";
+            return;
+        }
         const bool left_reused = !has_new_left;
         const bool right_reused = !has_new_right;
+        const double max_reuse_age_ms = std::max(1.0, config_.pair_reuse_max_age_ms);
+        const int max_consecutive_reuse = std::max(1, config_.pair_reuse_max_consecutive);
         const double left_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.left_ts_ns)) / 1'000'000.0;
         const double right_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.right_ts_ns)) / 1'000'000.0;
         const bool can_reuse_left =
             left_reused &&
-            left_age_ms <= kRealtimeFallbackMaxAgeMs &&
-            consecutive_left_reuse_ < kRealtimeFallbackMaxConsecutiveReuse;
+            left_age_ms <= max_reuse_age_ms &&
+            consecutive_left_reuse_ < max_consecutive_reuse;
         const bool can_reuse_right =
             right_reused &&
-            right_age_ms <= kRealtimeFallbackMaxAgeMs &&
-            consecutive_right_reuse_ < kRealtimeFallbackMaxConsecutiveReuse;
+            right_age_ms <= max_reuse_age_ms &&
+            consecutive_right_reuse_ < max_consecutive_reuse;
         if ((left_reused && !can_reuse_left) || (right_reused && !can_reuse_right)) {
             metrics_.status = "waiting paired fresh frame";
             return;
@@ -1001,6 +1349,7 @@ void StitchEngine::update_metrics_locked() {
     }
 
     const auto pair_ts_ns = std::max(pair.left_ts_ns, pair.right_ts_ns);
+    const double pair_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair_ts_ns)) / 1'000'000.0;
     if (last_worker_timestamp_ns_ > 0) {
         metrics_.worker_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
@@ -1029,7 +1378,14 @@ void StitchEngine::update_metrics_locked() {
     const double output_scale = clamp_output_scale(config_.stitch_output_scale);
     cv::Mat left_frame = resize_frame_for_runtime(pair.left_frame, output_scale);
     cv::Mat right_frame = resize_frame_for_runtime(pair.right_frame, output_scale);
-    const bool stitched_ok = stitch_pair_locked(left_frame, right_frame, pair_ts_ns);
+    const bool stitched_ok = stitch_pair_locked(
+        left_frame,
+        right_frame,
+        pair_ts_ns,
+        pair,
+        !has_new_left,
+        !has_new_right,
+        pair_age_ms);
     last_worker_timestamp_ns_ = pair_ts_ns;
 
     if (!stitched_ok) {

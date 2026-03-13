@@ -61,6 +61,7 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"stitch_fps\":" << metrics.stitch_fps << ','
         << "\"worker_fps\":" << metrics.worker_fps << ','
         << "\"output_written_fps\":" << metrics.output_written_fps << ','
+        << "\"production_output_written_fps\":" << metrics.production_output_written_fps << ','
         << "\"pair_skew_ms_mean\":" << metrics.pair_skew_ms_mean << ','
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
@@ -68,9 +69,13 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"calibrated\":" << (metrics.calibrated ? "true" : "false") << ','
         << "\"output_width\":" << metrics.output_width << ','
         << "\"output_height\":" << metrics.output_height << ','
+        << "\"production_output_width\":" << metrics.production_output_width << ','
+        << "\"production_output_height\":" << metrics.production_output_height << ','
         << "\"stitched_count\":" << metrics.stitched_count << ','
         << "\"left_frames_total\":" << metrics.left_frames_total << ','
         << "\"right_frames_total\":" << metrics.right_frames_total << ','
+        << "\"left_buffered_frames\":" << metrics.left_buffered_frames << ','
+        << "\"right_buffered_frames\":" << metrics.right_buffered_frames << ','
         << "\"left_stale_drops\":" << metrics.left_stale_drops << ','
         << "\"right_stale_drops\":" << metrics.right_stale_drops << ','
         << "\"left_content_frozen\":" << (metrics.left_content_frozen ? "true" : "false") << ','
@@ -85,6 +90,12 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"output_target\":\"" << json_escape(metrics.output_target) << "\","
         << "\"output_effective_codec\":\"" << json_escape(metrics.output_effective_codec) << "\","
         << "\"output_last_error\":\"" << json_escape(metrics.output_last_error) << "\","
+        << "\"production_output_active\":" << (metrics.production_output_active ? "true" : "false") << ','
+        << "\"production_output_frames_written\":" << metrics.production_output_frames_written << ','
+        << "\"production_output_frames_dropped\":" << metrics.production_output_frames_dropped << ','
+        << "\"production_output_target\":\"" << json_escape(metrics.production_output_target) << "\","
+        << "\"production_output_effective_codec\":\"" << json_escape(metrics.production_output_effective_codec) << "\","
+        << "\"production_output_last_error\":\"" << json_escape(metrics.production_output_last_error) << "\","
         << "\"left_last_error\":\"" << json_escape(metrics.left_last_error) << "\","
         << "\"right_last_error\":\"" << json_escape(metrics.right_last_error) << "\","
         << "\"gpu_warp_count\":" << metrics.gpu_warp_count << ','

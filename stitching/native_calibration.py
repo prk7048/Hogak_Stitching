@@ -38,6 +38,7 @@ class NativeCalibrationConfig(StitchConfig):
     assisted_reproj_threshold: float = 12.0
     assisted_max_auto_matches: int = 600
     match_backend: str = "auto"
+    deep_backend: str = "auto"
 
 
 @dataclass(slots=True)
@@ -52,6 +53,18 @@ class _CalibrationCandidate:
     seed_guidance_model: str
     score: float
     inliers_count: int
+    match_count: int
+    inlier_ratio: float
+    mean_reprojection_error: float
+    match_score: float
+    geometry_score: float
+    visual_score: float
+    output_width: int
+    output_height: int
+    overlap_luma_diff: float
+    overlap_edge_diff: float
+    ghosting_score: float
+    backend_name: str
 
 
 class _AssistedCalibrationUi:
@@ -574,12 +587,12 @@ def _build_assisted_matches(
     config: NativeCalibrationConfig,
     left_points: list[tuple[float, float]],
     right_points: list[tuple[float, float]],
-) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], str, str]:
+) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], str, str, str]:
     if not left_points:
-        keypoints_left, keypoints_right, matches = _detect_auto_matches(left, right, config)
-        return keypoints_left, keypoints_right, matches, "auto", "none"
+        keypoints_left, keypoints_right, matches, backend_name = _detect_auto_matches(left, right, config)
+        return keypoints_left, keypoints_right, matches, "auto", "none", backend_name
 
-    keypoints_left_auto, keypoints_right_auto, auto_matches = _detect_auto_matches(left, right, config)
+    keypoints_left_auto, keypoints_right_auto, auto_matches, backend_name = _detect_auto_matches(left, right, config)
     seed_transform, seed_model = _estimate_seed_guidance_transform(left_points, right_points, config)
     threshold_px = _guidance_threshold_px(config, seed_model)
     filtered_auto_matches = []
@@ -600,19 +613,19 @@ def _build_assisted_matches(
             ErrorCode.OVERLAP_LOW,
             f"seed-guided matches below threshold: {len(filtered_auto_matches)} < {_assisted_min_matches(config)}",
         )
-    return keypoints_left_auto, keypoints_right_auto, filtered_auto_matches, "assisted", seed_model
+    return keypoints_left_auto, keypoints_right_auto, filtered_auto_matches, "assisted", seed_model, backend_name
 
 
 def _detect_auto_matches(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
-) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch]]:
+) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], str]:
     backend = str(config.match_backend).lower().strip()
     if backend in {"auto", "deep"}:
         try:
             deep_result = detect_and_match_deep(left, right, config)
-            return deep_result.keypoints_left, deep_result.keypoints_right, deep_result.matches
+            return deep_result.keypoints_left, deep_result.keypoints_right, deep_result.matches, deep_result.backend_name
         except StitchingFailure as exc:
             if backend == "deep":
                 raise
@@ -624,7 +637,8 @@ def _detect_auto_matches(
             ErrorCode.OVERLAP_LOW,
             f"matches below threshold: {len(matches)} < {int(config.min_matches)}",
         )
-    return keypoints_left, keypoints_right, matches
+    backend_name = "classic" if backend != "deep" else "classic_fallback"
+    return keypoints_left, keypoints_right, matches, backend_name
 
 
 def _validate_calibration_quality(
@@ -770,21 +784,105 @@ def _estimate_overlap_hints(
 
 def _candidate_score(
     *,
+    match_score: float,
+    geometry_score: float,
+    visual_score: float,
+) -> float:
+    return (match_score * 0.40) + (geometry_score * 0.30) + (visual_score * 0.30)
+
+
+def _clamp_unit(value: float) -> float:
+    return max(0.0, min(1.0, float(value)))
+
+
+def _mean_reprojection_error(
+    homography: np.ndarray,
+    keypoints_left: list[cv2.KeyPoint],
+    keypoints_right: list[cv2.KeyPoint],
+    matches: list[cv2.DMatch],
+    inlier_mask: np.ndarray,
+) -> float:
+    errors: list[float] = []
+    mask_values = inlier_mask.ravel().tolist()
+    for match, keep in zip(matches, mask_values):
+        if not int(keep):
+            continue
+        left_pt = keypoints_left[match.queryIdx].pt
+        right_pt = keypoints_right[match.trainIdx].pt
+        errors.append(_reprojection_error(homography, right_pt, left_pt))
+    if not errors:
+        return 9999.0
+    return float(np.mean(np.asarray(errors, dtype=np.float32)))
+
+
+def _compute_match_score(
+    *,
     inliers_count: int,
     match_count: int,
+    inlier_ratio: float,
+    mean_reprojection_error: float,
+    config: NativeCalibrationConfig,
+) -> float:
+    min_inliers = max(12.0, float(config.min_inliers))
+    target_inliers = max(min_inliers * 2.5, 50.0)
+    inliers_term = _clamp_unit(inliers_count / target_inliers)
+    ratio_term = _clamp_unit(inlier_ratio / 0.70)
+    match_term = _clamp_unit(match_count / max(float(config.min_matches) * 2.0, 100.0))
+    reproj_term = _clamp_unit(1.0 - (mean_reprojection_error / 8.0))
+    return (
+        (inliers_term * 0.45)
+        + (ratio_term * 0.25)
+        + (match_term * 0.10)
+        + (reproj_term * 0.20)
+    )
+
+
+def _compute_geometry_score(
+    *,
     plan_width: int,
     plan_height: int,
     left: np.ndarray,
     right: np.ndarray,
-) -> float:
+) -> tuple[float, float]:
     left_h, left_w = left.shape[:2]
     right_h, right_w = right.shape[:2]
     max_input_w = max(left_w, right_w)
     max_input_h = max(left_h, right_h)
-    width_bonus = min(1.35, plan_width / float(max(1, max_input_w)))
-    height_penalty = max(0.0, (plan_height / float(max(1, max_input_h))) - 1.0)
-    geometry_penalty = height_penalty * 18.0
-    return (float(inliers_count) * 4.0) + min(float(match_count), 80.0) * 0.12 + width_bonus - geometry_penalty
+
+    width_ratio = plan_width / float(max(1, max_input_w))
+    height_ratio = plan_height / float(max(1, max_input_h))
+    width_penalty = max(0.0, width_ratio - 2.8) / 1.2
+    height_penalty = max(0.0, height_ratio - 1.35) / 0.65
+    pano_penalty = max(0.0, 1.0 - width_ratio) * 0.5
+    distortion_penalty = _clamp_unit((width_penalty * 0.45) + (height_penalty * 0.45) + pano_penalty)
+    return (1.0 - distortion_penalty), distortion_penalty
+
+
+def _compute_visual_metrics(
+    *,
+    canvas_left: np.ndarray,
+    warped_right: np.ndarray,
+    left_mask: np.ndarray,
+    right_mask: np.ndarray,
+) -> tuple[float, float, float, float]:
+    overlap_mask = cv2.bitwise_and(left_mask, right_mask)
+    overlap_pixels = int(cv2.countNonZero(overlap_mask))
+    if overlap_pixels <= 0:
+        return 0.50, 0.50, 0.50, 0.25
+
+    left_gray = cv2.cvtColor(canvas_left, cv2.COLOR_BGR2GRAY)
+    right_gray = cv2.cvtColor(warped_right, cv2.COLOR_BGR2GRAY)
+    diff = cv2.absdiff(left_gray, right_gray)
+    luma_diff = float(cv2.mean(diff, mask=overlap_mask)[0] / 255.0)
+
+    left_edges = cv2.Canny(left_gray, 48, 144)
+    right_edges = cv2.Canny(right_gray, 48, 144)
+    edge_diff = cv2.absdiff(left_edges, right_edges)
+    edge_diff_mean = float(cv2.mean(edge_diff, mask=overlap_mask)[0] / 255.0)
+
+    ghosting = min(1.0, (luma_diff * 0.55) + (edge_diff_mean * 0.45))
+    visual_score = 1.0 - min(1.0, (luma_diff * 0.45) + (edge_diff_mean * 0.30) + (ghosting * 0.25))
+    return visual_score, luma_diff, edge_diff_mean, ghosting
 
 
 def _build_candidate(
@@ -796,6 +894,7 @@ def _build_candidate(
     matches: list[cv2.DMatch],
     calibration_mode: str,
     seed_guidance_model: str,
+    backend_name: str,
     config: NativeCalibrationConfig,
     enforce_quality_gate: bool,
 ) -> _CalibrationCandidate:
@@ -809,15 +908,51 @@ def _build_candidate(
         transform_model = "affine_fallback"
     plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
     inliers_count = int(inlier_mask.ravel().sum())
+    match_count = int(len(matches))
+    inlier_ratio = float(inliers_count / float(max(1, match_count)))
+    mean_reprojection_error = _mean_reprojection_error(homography, keypoints_left, keypoints_right, matches, inlier_mask)
     if enforce_quality_gate:
         _validate_calibration_quality(left, right, plan.width, plan.height, inliers_count, config)
-    score = _candidate_score(
+
+    warped_right = cv2.warpPerspective(
+        right,
+        plan.homography_adjusted,
+        (plan.width, plan.height),
+    )
+    right_mask = cv2.warpPerspective(
+        np.ones(right.shape[:2], dtype=np.uint8) * 255,
+        plan.homography_adjusted,
+        (plan.width, plan.height),
+    )
+    canvas_left = np.zeros((plan.height, plan.width, 3), dtype=np.uint8)
+    left_mask = np.zeros((plan.height, plan.width), dtype=np.uint8)
+    left_h, left_w = left.shape[:2]
+    canvas_left[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = left
+    left_mask[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = 255
+
+    match_score = _compute_match_score(
         inliers_count=inliers_count,
-        match_count=len(matches),
+        match_count=match_count,
+        inlier_ratio=inlier_ratio,
+        mean_reprojection_error=mean_reprojection_error,
+        config=config,
+    )
+    geometry_score, _distortion_penalty = _compute_geometry_score(
         plan_width=plan.width,
         plan_height=plan.height,
         left=left,
         right=right,
+    )
+    visual_score, overlap_luma_diff, overlap_edge_diff, ghosting_score = _compute_visual_metrics(
+        canvas_left=canvas_left,
+        warped_right=warped_right,
+        left_mask=left_mask,
+        right_mask=right_mask,
+    )
+    score = _candidate_score(
+        match_score=match_score,
+        geometry_score=geometry_score,
+        visual_score=visual_score,
     )
     return _CalibrationCandidate(
         homography=homography,
@@ -830,6 +965,18 @@ def _build_candidate(
         seed_guidance_model=seed_guidance_model,
         score=score,
         inliers_count=inliers_count,
+        match_count=match_count,
+        inlier_ratio=inlier_ratio,
+        mean_reprojection_error=mean_reprojection_error,
+        match_score=match_score,
+        geometry_score=geometry_score,
+        visual_score=visual_score,
+        output_width=int(plan.width),
+        output_height=int(plan.height),
+        overlap_luma_diff=overlap_luma_diff,
+        overlap_edge_diff=overlap_edge_diff,
+        ghosting_score=ghosting_score,
+        backend_name=backend_name,
     )
 
 
@@ -886,7 +1033,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
 
     # Baseline auto path is always preserved and evaluated first.
     try:
-        auto_kp_left, auto_kp_right, auto_matches = _detect_auto_matches(left, right, config)
+        auto_kp_left, auto_kp_right, auto_matches, auto_backend_name = _detect_auto_matches(left, right, config)
         candidates.append(
             _build_candidate(
                 left=left,
@@ -896,6 +1043,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
                 matches=auto_matches,
                 calibration_mode="auto",
                 seed_guidance_model="none",
+                backend_name=auto_backend_name,
                 config=config,
                 enforce_quality_gate=False,
             )
@@ -906,7 +1054,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
     # Assisted/manual points only propose an improvement candidate; they never replace auto unless better.
     if left_points:
         try:
-            assisted_kp_left, assisted_kp_right, assisted_matches, assisted_mode, seed_guidance_model = _build_assisted_matches(
+            assisted_kp_left, assisted_kp_right, assisted_matches, assisted_mode, seed_guidance_model, assisted_backend_name = _build_assisted_matches(
                 left,
                 right,
                 config,
@@ -922,6 +1070,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
                     matches=assisted_matches,
                     calibration_mode=assisted_mode,
                     seed_guidance_model=seed_guidance_model,
+                    backend_name=assisted_backend_name,
                     config=config,
                     enforce_quality_gate=True,
                 )
@@ -935,7 +1084,12 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
             raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, f"no valid calibration candidate ({detail})")
         raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "no valid calibration candidate")
 
+    auto_candidate = next((item for item in candidates if item.calibration_mode == "auto"), None)
     best_candidate = max(candidates, key=lambda item: item.score)
+    score_margin = 0.03
+    if auto_candidate is not None and best_candidate is not auto_candidate:
+        if float(best_candidate.score) < float(auto_candidate.score) + score_margin:
+            best_candidate = auto_candidate
     homography = best_candidate.homography
     inlier_mask = best_candidate.inlier_mask
     keypoints_left = best_candidate.keypoints_left
@@ -967,8 +1121,10 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
     inliers_count = int(inlier_mask.ravel().sum())
     review_lines = [
         f"mode={calibration_mode_effective}  seed={seed_guidance_model}  model={transform_model}",
-        f"matches={len(matches)}  inliers={inliers_count}  manual_points={min(len(left_points), len(right_points))}",
-        f"output={plan.width}x{plan.height}",
+        f"score={best_candidate.score:.3f}  match={best_candidate.match_score:.3f}  geom={best_candidate.geometry_score:.3f}  visual={best_candidate.visual_score:.3f}",
+        f"matches={len(matches)}  inliers={inliers_count}  inlier_ratio={best_candidate.inlier_ratio:.3f}  repr_err={best_candidate.mean_reprojection_error:.2f}px",
+        f"output={plan.width}x{plan.height}  luma_diff={best_candidate.overlap_luma_diff:.3f}  edge_diff={best_candidate.overlap_edge_diff:.3f}  ghost={best_candidate.ghosting_score:.3f}",
+        f"manual_points={min(len(left_points), len(right_points))}  backend={best_candidate.backend_name}",
         "CONFIRM saves this homography and launches runtime. CANCEL stops here.",
     ]
     if not _CalibrationReviewUi(
@@ -988,17 +1144,50 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "process_scale": float(config.process_scale),
         "manual_points_count": int(min(len(left_points), len(right_points))),
         "match_backend_requested": str(config.match_backend),
+        "deep_backend_requested": str(config.deep_backend),
+        "match_backend_effective": best_candidate.backend_name,
+        "selected_candidate": calibration_mode_effective,
         "seed_guidance_model": seed_guidance_model,
         "candidate_failures": failures,
         "candidate_count": int(len(candidates)),
         "candidate_score": float(best_candidate.score),
+        "match_score": float(best_candidate.match_score),
+        "geometry_score": float(best_candidate.geometry_score),
+        "visual_score": float(best_candidate.visual_score),
         "matches_count": int(len(matches)),
         "inliers_count": inliers_count,
+        "inlier_ratio": float(best_candidate.inlier_ratio),
+        "mean_reprojection_error": float(best_candidate.mean_reprojection_error),
+        "overlap_luma_diff": float(best_candidate.overlap_luma_diff),
+        "overlap_edge_diff": float(best_candidate.overlap_edge_diff),
+        "ghosting_score": float(best_candidate.ghosting_score),
         "transform_model": transform_model,
         "left_resolution": [int(left.shape[1]), int(left.shape[0])],
         "right_resolution": [int(right.shape[1]), int(right.shape[0])],
         "output_resolution": [int(plan.width), int(plan.height)],
         "debug_dir": str(config.debug_dir),
+        "candidates": [
+            {
+                "name": item.calibration_mode,
+                "seed_guidance_model": item.seed_guidance_model,
+                "backend_name": item.backend_name,
+                "transform_model": item.transform_model,
+                "score": float(item.score),
+                "match_score": float(item.match_score),
+                "geometry_score": float(item.geometry_score),
+                "visual_score": float(item.visual_score),
+                "matches_count": int(item.match_count),
+                "inliers_count": int(item.inliers_count),
+                "inlier_ratio": float(item.inlier_ratio),
+                "mean_reprojection_error": float(item.mean_reprojection_error),
+                "output_resolution": [int(item.output_width), int(item.output_height)],
+                "overlap_luma_diff": float(item.overlap_luma_diff),
+                "overlap_edge_diff": float(item.overlap_edge_diff),
+                "ghosting_score": float(item.ghosting_score),
+                "accepted": bool(item is best_candidate),
+            }
+            for item in candidates
+        ],
     }
     _save_homography_file(config.output_path, homography, metadata)
     return {
@@ -1011,7 +1200,14 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "seed_guidance_model": seed_guidance_model,
         "candidate_failures": failures,
         "transform_model": transform_model,
+        "candidate_score": float(best_candidate.score),
+        "match_score": float(best_candidate.match_score),
+        "geometry_score": float(best_candidate.geometry_score),
+        "visual_score": float(best_candidate.visual_score),
+        "inlier_ratio": float(best_candidate.inlier_ratio),
+        "mean_reprojection_error": float(best_candidate.mean_reprojection_error),
         "output_resolution": [int(plan.width), int(plan.height)],
+        "match_backend": best_candidate.backend_name,
     }
 
 
@@ -1029,6 +1225,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         assisted_reproj_threshold=max(1.0, float(args.assisted_reproj_threshold)),
         assisted_max_auto_matches=max(0, int(args.assisted_max_auto_matches)),
         match_backend=str(args.match_backend),
+        deep_backend=str(args.deep_backend),
         min_matches=max(8, int(args.min_matches)),
         min_inliers=max(6, int(args.min_inliers)),
         ratio_test=float(args.ratio_test),
@@ -1055,7 +1252,10 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         f"manual_points={result['manual_points_count']} "
         f"mode={result['calibration_mode']} "
         f"seed_model={result['seed_guidance_model']} "
-        f"model={result['transform_model']}"
+        f"model={result['transform_model']} "
+        f"backend={result['match_backend']} "
+        f"score={result['candidate_score']:.3f} "
+        f"repr_err={result['mean_reprojection_error']:.2f}"
     )
     if bool(getattr(args, "launch_runtime", False)):
         repo_root = Path(__file__).resolve().parent.parent

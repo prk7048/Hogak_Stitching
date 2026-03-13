@@ -25,7 +25,7 @@
 - runtime launcher
 - runtime client
 - dashboard monitor
-- viewer launch helper
+- encoded output probe viewer helper
 - assisted-first calibration UI
 - runtime launch after calibration confirmation
 
@@ -44,8 +44,9 @@
 - calibration homography load
 - GPU warp/blend path 동작
 - stitched output stream 송출
+- transmit 활성 시 single encode 결과를 local debug receive까지 mirror하는 경로
 - monitor에서 output/input/system 상태 확인
-- viewer launch path 연결
+- encoded output probe path 연결
 - calibration -> confirm -> runtime launch 운영 흐름
 
 즉 end-to-end 구조 자체는 이미 살아 있다.

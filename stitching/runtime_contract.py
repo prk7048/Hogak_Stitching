@@ -30,7 +30,6 @@ EventType = Literal[
     "warning",
     "error",
     "manual_state",
-    "snapshot_ready",
 ]
 
 SUPPORTED_RELOAD_CONFIG_FIELDS = (
@@ -40,15 +39,33 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "ffmpeg_bin",
     "homography_file",
     "output_runtime",
+    "output_profile",
     "output_target",
     "output_codec",
     "output_bitrate",
     "output_preset",
     "output_muxer",
+    "output_width",
+    "output_height",
+    "output_fps",
+    "production_output_runtime",
+    "production_output_profile",
+    "production_output_target",
+    "production_output_codec",
+    "production_output_bitrate",
+    "production_output_preset",
+    "production_output_muxer",
+    "production_output_width",
+    "production_output_height",
+    "production_output_fps",
     "rtsp_transport",
+    "input_buffer_frames",
     "rtsp_timeout_sec",
     "reconnect_cooldown_sec",
     "sync_pair_mode",
+    "allow_frame_reuse",
+    "pair_reuse_max_age_ms",
+    "pair_reuse_max_consecutive",
     "sync_match_max_delta_ms",
     "sync_manual_offset_ms",
     "process_scale",
@@ -76,26 +93,23 @@ class StreamSpec:
     name: str
     url: str
     transport: Transport = "tcp"
+    max_buffered_frames: int = 8
     timeout_sec: float = 10.0
     reconnect_cooldown_sec: float = 1.0
 
 
 @dataclass(slots=True)
-class PreviewSpec:
-    enabled: bool = False
-    max_fps: float = 2.0
-    max_width: int = 1280
-    jpeg_quality: int = 80
-
-
-@dataclass(slots=True)
 class OutputSpec:
     runtime: OutputRuntime = "none"
+    profile: str = "inspection"
     target: str = ""
     codec: str = "h264_nvenc"
     bitrate: str = "12M"
     preset: str = "p4"
     muxer: str = ""
+    width: int = 0
+    height: int = 0
+    fps: float = 0.0
 
 
 @dataclass(slots=True)
@@ -104,8 +118,11 @@ class EngineConfig:
     right: StreamSpec | None = None
     input_runtime: InputRuntime = "ffmpeg-cuda"
     output: OutputSpec = field(default_factory=OutputSpec)
-    preview: PreviewSpec = field(default_factory=PreviewSpec)
+    production_output: OutputSpec = field(default_factory=OutputSpec)
     sync_pair_mode: SyncPairMode = "none"
+    allow_frame_reuse: bool = False
+    pair_reuse_max_age_ms: float = 90.0
+    pair_reuse_max_consecutive: int = 2
     sync_match_max_delta_ms: float = 35.0
     sync_manual_offset_ms: float = 0.0
     process_scale: float = 1.0
@@ -166,6 +183,8 @@ class EngineMetrics:
     right_fps: float = 0.0
     stitch_fps: float = 0.0
     worker_fps: float = 0.0
+    output_written_fps: float = 0.0
+    production_output_written_fps: float = 0.0
     pair_skew_ms_mean: float = 0.0
     matches: int = 0
     inliers: int = 0
@@ -191,6 +210,8 @@ class EngineMetrics:
     manual_target: int = 0
     left_frames_total: int = 0
     right_frames_total: int = 0
+    left_buffered_frames: int = 0
+    right_buffered_frames: int = 0
     left_stale_drops: int = 0
     right_stale_drops: int = 0
     output_active: bool = False
@@ -199,6 +220,16 @@ class EngineMetrics:
     output_target: str = ""
     output_effective_codec: str = ""
     output_last_error: str = ""
+    production_output_active: bool = False
+    production_output_frames_written: int = 0
+    production_output_frames_dropped: int = 0
+    production_output_target: str = ""
+    production_output_effective_codec: str = ""
+    production_output_last_error: str = ""
+    output_width: int = 0
+    output_height: int = 0
+    production_output_width: int = 0
+    production_output_height: int = 0
     left_last_error: str = ""
     right_last_error: str = ""
 

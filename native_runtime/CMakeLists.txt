@@ -18,7 +18,7 @@ if(NOT OpenCV_DIR AND EXISTS "${HOGAK_LOCAL_OPENCV_DIR}/OpenCVConfig.cmake")
     set(OpenCV_DIR "${HOGAK_LOCAL_OPENCV_DIR}" CACHE PATH "Local OpenCV config path")
 endif()
 
-find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc calib3d cudaarithm cudaimgproc cudawarping)
+find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d cudaarithm cudaimgproc cudawarping)
 
 add_library(
     stitch_engine_core

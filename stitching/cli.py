@@ -123,6 +123,12 @@ def _add_native_calibration_args(
         help="Match backend for auto/assisted reinforcement. auto falls back to classic if deep is unavailable.",
     )
     cmd.add_argument(
+        "--deep-backend",
+        choices=["auto", "lightglue", "loftr"],
+        default="auto",
+        help="Preferred deep matcher backend when match-backend uses deep. auto tries LightGlue first, then LoFTR.",
+    )
+    cmd.add_argument(
         "--launch-runtime",
         action="store_true",
         help="Launch native runtime immediately after calibration succeeds",

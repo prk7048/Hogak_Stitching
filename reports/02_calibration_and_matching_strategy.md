@@ -75,6 +75,40 @@ manual point 선택을 쉽게 하기 위해 UI에는 overlap suggestion guide가
 
 즉 assisted는 baseline을 대체하는 게 아니라 개선 후보로만 들어간다.
 
+## Deferred Design: Pooled Matching
+
+현재 구현은 `auto`, `assisted`, `deep`를 각각 후보로 만들고 그중 가장 좋은 하나를 고르는 방식이다.
+
+하지만 더 강한 방향은 아래 구조다.
+
+1. `auto`가 찾은 match 수집
+2. `assisted`가 찾은 match 수집
+3. `deep`가 찾은 match 수집
+4. 세 match set을 하나로 합침
+5. 중복 제거
+6. source별 confidence와 reprojection 기준으로 재정렬
+7. pooled matches로 최종 homography 계산
+8. `auto only`, `deep only`, `pooled` 결과를 다시 비교
+
+이 방식의 장점:
+
+- `auto`의 안정성 유지
+- `assisted`의 방향성 활용
+- `deep`의 강한 matching 보강
+- 한 후보만 고를 때 버려지던 좋은 점을 같이 사용할 수 있음
+
+이 방식의 단점:
+
+- 구현 복잡도가 높음
+- 중복 제거와 outlier 정리가 까다로움
+- 잘못 합치면 오히려 결과가 나빠질 수 있음
+
+현재 판단:
+
+- 방향 자체는 좋다
+- 하지만 지금 단계에서는 calibration 품질 기준과 deep backend 기본 연결이 먼저다
+- 따라서 pooled matching은 다음 단계 설계안으로 문서에만 유지하고, 당장은 구현하지 않는다
+
 ## Deep Learning Direction
 
 딥러닝은 runtime hot path에 넣을 대상이 아니다.
@@ -86,8 +120,10 @@ manual point 선택을 쉽게 하기 위해 UI에는 overlap suggestion guide가
 - user seed point를 anchor로 사용
 - 그 주변 match를 더 정교하게 보강
 - 최종 homography quality가 baseline보다 좋을 때만 채택
+- backend 선택은 `LightGlue/SuperPoint` 우선, `LoFTR` 보조 경로로 두고, 없으면 classic fallback 유지
 
-현재 코드에는 deep backend hook가 준비돼 있지만, 실제 model runtime은 아직 연결되지 않았다.
+현재 코드는 optional deep backend 연결까지는 되어 있다.
+다만 `torch`, `lightglue`, `kornia` 같은 런타임과 모델이 설치된 환경에서만 실제 deep candidate가 계산된다.
 
 ## Practical Conclusion
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import os
+import shutil
 import subprocess
 
 
@@ -19,10 +20,12 @@ class RuntimeLaunchSpec:
     frame_width: int = 1920
     frame_height: int = 1080
     transport: str = "tcp"
+    input_buffer_frames: int = 8
     video_codec: str = "h264"
     timeout_sec: float = 10.0
     reconnect_cooldown_sec: float = 1.0
     output_runtime: str = "none"
+    output_profile: str = "inspection"
     output_target: str = ""
     output_codec: str = "h264_nvenc"
     output_bitrate: str = "12M"
@@ -30,7 +33,23 @@ class RuntimeLaunchSpec:
     output_muxer: str = ""
     output_width: int = 0
     output_height: int = 0
+    output_fps: float = 0.0
+    output_debug_overlay: bool = False
+    production_output_runtime: str = "none"
+    production_output_profile: str = "production-compatible"
+    production_output_target: str = ""
+    production_output_codec: str = "h264_nvenc"
+    production_output_bitrate: str = "12M"
+    production_output_preset: str = "p4"
+    production_output_muxer: str = ""
+    production_output_width: int = 0
+    production_output_height: int = 0
+    production_output_fps: float = 0.0
+    production_output_debug_overlay: bool = False
     sync_pair_mode: str = "none"
+    allow_frame_reuse: bool = False
+    pair_reuse_max_age_ms: float = 90.0
+    pair_reuse_max_consecutive: int = 2
     sync_match_max_delta_ms: float = 35.0
     sync_manual_offset_ms: float = 0.0
     stitch_output_scale: float = 1.0
@@ -53,6 +72,10 @@ def resolve_ffmpeg_binary(explicit_path: str = "") -> Path:
     env_path = os.environ.get("FFMPEG_BIN", "").strip()
     if env_path:
         candidates.append(Path(env_path).expanduser())
+
+    found = shutil.which("ffmpeg")
+    if found:
+        candidates.append(Path(found))
 
     candidates.extend(
         [
@@ -113,12 +136,15 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
     command.extend(["--height", str(max(1, int(spec.frame_height)))])
     if spec.transport:
         command.extend(["--transport", spec.transport])
+    command.extend(["--input-buffer-frames", str(max(1, int(spec.input_buffer_frames)))])
     if spec.video_codec:
         command.extend(["--video-codec", spec.video_codec])
     command.extend(["--timeout-sec", f"{float(spec.timeout_sec):.3f}"])
     command.extend(["--reconnect-cooldown-sec", f"{float(spec.reconnect_cooldown_sec):.3f}"])
     if spec.output_runtime:
         command.extend(["--output-runtime", spec.output_runtime])
+    if spec.output_profile:
+        command.extend(["--output-profile", spec.output_profile])
     if spec.output_target:
         command.extend(["--output-target", spec.output_target])
     if spec.output_codec:
@@ -133,8 +159,38 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
         command.extend(["--output-width", str(int(spec.output_width))])
     if spec.output_height > 0:
         command.extend(["--output-height", str(int(spec.output_height))])
+    if spec.output_fps > 0.0:
+        command.extend(["--output-fps", f"{float(spec.output_fps):.3f}"])
+    if spec.output_debug_overlay:
+        command.append("--output-debug-overlay")
+    if spec.production_output_runtime:
+        command.extend(["--production-output-runtime", spec.production_output_runtime])
+    if spec.production_output_profile:
+        command.extend(["--production-output-profile", spec.production_output_profile])
+    if spec.production_output_target:
+        command.extend(["--production-output-target", spec.production_output_target])
+    if spec.production_output_codec:
+        command.extend(["--production-output-codec", spec.production_output_codec])
+    if spec.production_output_bitrate:
+        command.extend(["--production-output-bitrate", spec.production_output_bitrate])
+    if spec.production_output_preset:
+        command.extend(["--production-output-preset", spec.production_output_preset])
+    if spec.production_output_muxer:
+        command.extend(["--production-output-muxer", spec.production_output_muxer])
+    if spec.production_output_width > 0:
+        command.extend(["--production-output-width", str(int(spec.production_output_width))])
+    if spec.production_output_height > 0:
+        command.extend(["--production-output-height", str(int(spec.production_output_height))])
+    if spec.production_output_fps > 0.0:
+        command.extend(["--production-output-fps", f"{float(spec.production_output_fps):.3f}"])
+    if spec.production_output_debug_overlay:
+        command.append("--production-output-debug-overlay")
     if spec.sync_pair_mode:
         command.extend(["--sync-pair-mode", spec.sync_pair_mode])
+    if spec.allow_frame_reuse:
+        command.append("--allow-frame-reuse")
+    command.extend(["--pair-reuse-max-age-ms", f"{float(spec.pair_reuse_max_age_ms):.3f}"])
+    command.extend(["--pair-reuse-max-consecutive", str(max(1, int(spec.pair_reuse_max_consecutive)))])
     command.extend(["--sync-match-max-delta-ms", f"{float(spec.sync_match_max_delta_ms):.3f}"])
     command.extend(["--sync-manual-offset-ms", f"{float(spec.sync_manual_offset_ms):.3f}"])
     command.extend(["--stitch-output-scale", f"{float(spec.stitch_output_scale):.3f}"])
