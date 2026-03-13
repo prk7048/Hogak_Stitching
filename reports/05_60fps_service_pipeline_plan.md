@@ -428,6 +428,15 @@ probe는 아래 둘 중 하나만 허용한다.
 먼저 현재 코드가 새 backend를 꽂을 수 있게 구조를 정리하고,
 동시에 측정 기준을 고정한다.
 
+현재 이 다음의 실제 분기점은 아래 둘 중 하나다.
+
+1. `Dependency Track`
+   OpenCV 또는 별도 SDK/libav 경로를 정비해서 실제 GPU encode 재료를 확보한다.
+2. `Integration Track`
+   준비된 encode 재료를 `gpu-direct` backend에 연결한다.
+
+현재 상태에서는 `Dependency Track` 확인이 먼저다.
+
 ## Current Active Step
 
 현재 `v1.0` 브랜치에서 가장 먼저 착수하는 작업은 아래다.
@@ -450,6 +459,20 @@ probe는 아래 둘 중 하나만 허용한다.
 - heavy stitched/warped metrics `sampled update` 시작
 - 진단 스크립트에 `60fps service_goal` pass/fail summary 반영 완료
 - 다음 단계는 `future GPU writer`가 실제로 들어올 자리와 metrics 기준을 더 분명히 만드는 것
+
+현재 확인된 구현 제약:
+
+- 로컬 OpenCV에는 `cudacodec` header/lib/symbol은 보인다
+- 하지만 build info 기준 `NVCUVENC`, `NVCUVID`는 현재 잡혀 있지 않다
+- 즉 "OpenCV cudacodec API는 보이지만 실제 NVENC/NVDEC 기능은 꺼져 있는 빌드"일 가능성이 높다
+
+의미:
+
+- `GpuMat -> OpenCV cudacodec::VideoWriter -> NVENC` 경로는 현재 환경에서 바로 쓸 수 없을 수 있다
+- 따라서 `Phase 4`의 실제 본체 구현은 다음 둘 중 하나를 먼저 만족해야 한다
+
+1. OpenCV를 `NVCUVENC/NVCUVID` 활성 상태로 재구성
+2. OpenCV 대신 별도 `libavcodec/NVENC` 또는 Video Codec SDK 직접 경로를 붙이기
 
 ## Working Rule
 

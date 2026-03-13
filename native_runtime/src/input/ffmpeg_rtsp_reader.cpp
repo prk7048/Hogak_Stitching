@@ -18,6 +18,7 @@ namespace {
 
 constexpr int kFreezeProbeWidth = 64;
 constexpr int kFreezeProbeHeight = 36;
+constexpr int kFreezeProbeEveryN = 4;
 constexpr double kFreezeMotionThreshold = 0.01;
 constexpr double kFreezeRestartSec = 5.0;
 
@@ -209,6 +210,8 @@ void FfmpegRtspReader::run() {
     receive_times_ns.reserve(128);
     cv::Mat previous_probe_gray;
     std::int64_t freeze_started_ns = 0;
+    std::int64_t freeze_probe_index = 0;
+    double last_motion_mean = 0.0;
 
     while (running_.load()) {
         platform::WinProcessPipe pipe;
@@ -251,17 +254,22 @@ void FfmpegRtspReader::run() {
                 config_.width,
                 CV_8UC3,
                 frame_buffer.data());
-            cv::Mat current_probe_gray = make_freeze_probe_gray(frame_view);
-            const bool identical_frame = is_effectively_identical_probe(previous_probe_gray, current_probe_gray);
-            const double motion_mean = frame_motion_score(previous_probe_gray, current_probe_gray);
-            previous_probe_gray = current_probe_gray;
-            if (!previous_probe_gray.empty()) {
-                if (identical_frame && motion_mean <= kFreezeMotionThreshold) {
-                    if (freeze_started_ns <= 0) {
-                        freeze_started_ns = ts_ns;
+            freeze_probe_index += 1;
+            const bool sample_freeze_probe =
+                previous_probe_gray.empty() || (freeze_probe_index % kFreezeProbeEveryN) == 0;
+            if (sample_freeze_probe) {
+                cv::Mat current_probe_gray = make_freeze_probe_gray(frame_view);
+                const bool identical_frame = is_effectively_identical_probe(previous_probe_gray, current_probe_gray);
+                last_motion_mean = frame_motion_score(previous_probe_gray, current_probe_gray);
+                previous_probe_gray = current_probe_gray;
+                if (!previous_probe_gray.empty()) {
+                    if (identical_frame && last_motion_mean <= kFreezeMotionThreshold) {
+                        if (freeze_started_ns <= 0) {
+                            freeze_started_ns = ts_ns;
+                        }
+                    } else {
+                        freeze_started_ns = 0;
                     }
-                } else {
-                    freeze_started_ns = 0;
                 }
             }
             const double frozen_duration_sec =
@@ -286,7 +294,7 @@ void FfmpegRtspReader::run() {
             snapshot_.oldest_timestamp_ns = frames_.front().timestamp_ns;
             snapshot_.buffered_frames = static_cast<std::int64_t>(frames_.size());
             snapshot_.frames_total += 1;
-            snapshot_.motion_mean = motion_mean;
+            snapshot_.motion_mean = last_motion_mean;
             snapshot_.frozen_duration_sec = frozen_duration_sec;
             snapshot_.content_frozen = frozen_duration_sec >= kFreezeRestartSec;
             if (receive_times_ns.size() >= 2) {
