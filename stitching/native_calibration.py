@@ -27,6 +27,7 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
 )
+from stitching.runtime_site_config import require_configured_rtsp_urls
 
 
 @dataclass(slots=True)
@@ -1217,6 +1218,11 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
 
 
 def run_native_calibration(args: argparse.Namespace) -> int:
+    require_configured_rtsp_urls(
+        str(args.left_rtsp),
+        str(args.right_rtsp),
+        context="native calibration",
+    )
     config = NativeCalibrationConfig(
         left_rtsp=str(args.left_rtsp),
         right_rtsp=str(args.right_rtsp),

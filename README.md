@@ -96,6 +96,10 @@ python -m stitching.cli native-calibrate
 - probe/transmit UDP target
 - 기본 output cadence / transport / input buffer
 
+repo에 들어 있는 `config/runtime.json`의 RTSP 값은 placeholder다.
+처음 실행하기 전에 현장 카메라 주소로 바꾸거나, `HOGAK_LEFT_RTSP` / `HOGAK_RIGHT_RTSP` 환경변수를 써야 한다.
+현재 PC에서만 유지할 값은 `config/runtime.local.json`에 두면 기본 config 위에 자동으로 덮어쓴다.
+
 현재 runtime homography는 [data/runtime_homography.json](/c:/Users/Pixellot/Hogak_Stitching/data/runtime_homography.json)에 두고,
 calibration preview 같은 재생성 가능한 산출물만 [output](/c:/Users/Pixellot/Hogak_Stitching/output)에 남긴다.
 

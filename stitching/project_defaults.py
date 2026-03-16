@@ -9,8 +9,8 @@ from stitching.runtime_site_config import (
     site_config_str,
 )
 
-_FALLBACK_LEFT_RTSP = "rtsp://admin:admin123@192.168.0.137:554/cam/realmonitor?channel=1&subtype=0"
-_FALLBACK_RIGHT_RTSP = "rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0"
+_FALLBACK_LEFT_RTSP = "rtsp://admin:password@left-camera.example.invalid:554/cam/realmonitor?channel=1&subtype=0"
+_FALLBACK_RIGHT_RTSP = "rtsp://admin:password@right-camera.example.invalid:554/cam/realmonitor?channel=1&subtype=0"
 _FALLBACK_NATIVE_HOMOGRAPHY_PATH = "data/runtime_homography.json"
 _FALLBACK_NATIVE_CALIBRATION_DEBUG_DIR = "output/calibration"
 _FALLBACK_OUTPUT_STANDARD = "realtime_hq_1080p"

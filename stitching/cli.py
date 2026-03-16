@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 import sys
 
+from stitching.runtime_site_config import RuntimeSiteConfigError
+
 
 CURRENT_MAIN_PATH_NOTE = (
     "Current Python entrypoints: native-calibrate -> native-runtime."
@@ -139,17 +141,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main() -> int:
-    args = parse_args()
+    try:
+        args = parse_args()
 
-    if args.command == "native-calibrate":
-        from stitching.native_calibration import run_native_calibration
+        if args.command == "native-calibrate":
+            from stitching.native_calibration import run_native_calibration
 
-        return int(run_native_calibration(args))
+            return int(run_native_calibration(args))
 
-    if args.command == "native-runtime":
-        from stitching.native_runtime_cli import run_native_runtime_monitor
+        if args.command == "native-runtime":
+            from stitching.native_runtime_cli import run_native_runtime_monitor
 
-        return int(run_native_runtime_monitor(args))
+            return int(run_native_runtime_monitor(args))
+    except RuntimeSiteConfigError as exc:
+        print(f"runtime config error: {exc}", file=sys.stderr)
+        return 2
 
     raise ValueError(f"unsupported command: {args.command}")
 

@@ -14,7 +14,7 @@ runtime launch / metrics / calibration / encoded probe viewer
 
 post-stitch 출력 역할은 두 개로 본다.
 
-- `probe`: transmit가 켜져 있으면 encoded transmit를 local UDP로 다시 받는 debug receive 경로다. transmit가 없을 때만 standalone local encode로 fallback한다.
+- `probe`: viewer가 켜져 있을 때 쓰는 standalone local debug stream이다.
 - `transmit`: 실제 외부 송출 출력. 필요할 때만 켠다.
 
 `mp4`/`file` 출력은 최종 제품 목표가 아니라, writer/codec 회귀 검증과 결과 샘플 보존을 위한 보조 경로다.
@@ -109,13 +109,13 @@ native_runtime\build\windows-release\Release\stitch_runtime.exe
 ### 기본 실행
 
 ```cmd
-python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p
+python -m stitching.cli native-runtime
 ```
 
 strict pair 기준으로 보고 싶으면:
 
 ```cmd
-python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service --no-allow-frame-reuse
+python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service
 ```
 
 기본 monitor mode는 `dashboard`다.
@@ -128,9 +128,9 @@ python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sy
 - 최근 status/warning/error event
 
 runtime viewer는 raw snapshot preview가 아니라 local probe를 다시 받아 보여주는 post-encode viewer다.
-transmit가 켜져 있으면 기본 viewer는 별도 encode가 아니라 mirrored transmit receive 결과를 본다.
-즉 operator가 보는 기본 viewer는 stitch 직후 raw frame이 아니라 송출 후 local receive 결과다.
-현재 기본 runtime 스크립트는 `transmit` 출력 위에 debug overlay를 넣는다. `frame`, `seq`, `reuse`, `pair_age`가 보여서 외부 VLC에서 보이는 정지가 실제 송출 정지인지 반복 프레임인지 구분할 수 있다.
+viewer를 켜면 기본 probe source는 `standalone`이고, `--no-viewer`면 `disabled`다.
+즉 operator가 보는 기본 viewer는 stitch 직후 raw frame이 아니라 probe encode 후 local receive 결과다.
+현재 기본 runtime 실행은 `transmit` 출력 위에 debug overlay를 넣는다. `frame`, `seq`, `reuse`, `pair_age`가 보여서 외부 플레이어에서 보이는 정지가 실제 송출 정지인지 반복 프레임인지 구분할 수 있다.
 
 를 터미널 한 화면으로 보여준다.
 
@@ -184,7 +184,7 @@ raw event가 필요할 때만 `--verbose-events`를 붙인다.
 python -m stitching.cli native-calibrate
 ```
 
-CLI는 기본 site config([config/runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json))를 사용하므로 바로 실행 가능하다.
+CLI는 기본 site config([config/runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json))를 사용한다. 다만 repo 기본 RTSP 값은 placeholder이므로 실행 전에 실제 현장 값이나 환경변수로 바꿔야 한다. 현재 PC 전용 값은 `config/runtime.local.json`에 두면 된다.
 
 ```cmd
 python -m stitching.cli native-calibrate
@@ -238,8 +238,9 @@ python -m stitching.cli native-calibrate --left-rtsp "rtsp://..." --right-rtsp "
 
 - `left_rtsp`, `right_rtsp`
 - `input_runtime`, `ffmpeg_bin`, `homography_file`
-- `output_runtime`, `output_target`, `output_codec`, `output_bitrate`, `output_preset`, `output_muxer`
-- Python CLI alias: `probe_output_*`, `transmit_output_*`, `probe_source`
+- `probe_output_runtime`, `probe_output_target`, `probe_output_codec`, `probe_output_bitrate`, `probe_output_preset`, `probe_output_muxer`
+- `transmit_output_runtime`, `transmit_output_target`, `transmit_output_codec`, `transmit_output_bitrate`, `transmit_output_preset`, `transmit_output_muxer`
+- Python CLI: `probe_output_*`, `transmit_output_*`, `probe_source`
 - `rtsp_transport`, `rtsp_timeout_sec`, `reconnect_cooldown_sec`
 - `sync_pair_mode`, `sync_match_max_delta_ms`, `sync_manual_offset_ms`
 - `process_scale`, `stitch_output_scale`, `stitch_every_n`
@@ -249,5 +250,5 @@ python -m stitching.cli native-calibrate --left-rtsp "rtsp://..." --right-rtsp "
 주의:
 
 - 현재 제어 채널은 전체 명세 대비 일부만 구현되어 있다.
-- raw JSONL metrics/config 이름은 아직 `output_*`, `production_output_*`를 유지한다. operator-facing monitor/CLI는 `probe`, `transmit` 이름을 쓴다.
-- 최신 전체 상태는 [reports/05_native_runtime_progress_and_finish_plan.md](c:/Users/Pixellot/Hogak_Stitching/reports/05_native_runtime_progress_and_finish_plan.md)를 같이 보는 편이 맞다.
+- engine 내부 메트릭 필드는 아직 `output_*`, `production_output_*` 이름을 유지한다. operator-facing monitor/CLI는 `probe`, `transmit` 이름을 쓴다.
+- 최신 전체 상태는 [03_native_runtime_current_status.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_native_runtime_current_status.md)와 [04_next_steps_and_release_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/04_next_steps_and_release_plan.md)를 같이 보는 편이 맞다.

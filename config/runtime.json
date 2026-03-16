@@ -1,7 +1,7 @@
 {
   "cameras": {
-    "left_rtsp": "rtsp://admin:admin123@192.168.0.137:554/cam/realmonitor?channel=1&subtype=0",
-    "right_rtsp": "rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0"
+    "left_rtsp": "rtsp://admin:password@left-camera.example.invalid:554/cam/realmonitor?channel=1&subtype=0",
+    "right_rtsp": "rtsp://admin:password@right-camera.example.invalid:554/cam/realmonitor?channel=1&subtype=0"
   },
   "paths": {
     "homography_file": "data/runtime_homography.json",

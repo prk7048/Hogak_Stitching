@@ -47,6 +47,7 @@ from stitching.project_defaults import (
 from stitching.runtime_client import RuntimeClient
 from stitching.runtime_launcher import RuntimeLaunchSpec
 from stitching.runtime_launcher import query_gpu_direct_status
+from stitching.runtime_site_config import require_configured_rtsp_urls
 
 
 DEFAULT_PROBE_TARGET = DEFAULT_NATIVE_PROBE_TARGET
@@ -54,6 +55,30 @@ DEFAULT_TRANSMIT_TARGET = DEFAULT_NATIVE_TRANSMIT_TARGET
 DEFAULT_VIEWER_TARGET = "udp://127.0.0.1:23000"
 DEFAULT_PROBE_SOURCE = DEFAULT_NATIVE_PROBE_SOURCE
 _OUTPUT_ROLE_FIELDS = ("runtime", "target", "codec", "bitrate", "preset", "muxer", "width", "height", "fps")
+_PROBE_OUTPUT_DEFAULTS = {
+    "runtime": DEFAULT_NATIVE_PROBE_RUNTIME,
+    "target": DEFAULT_NATIVE_PROBE_TARGET,
+    "codec": "h264_nvenc",
+    "bitrate": "",
+    "preset": "",
+    "muxer": "",
+    "width": 0,
+    "height": 0,
+    "fps": 0.0,
+    "debug_overlay": False,
+}
+_TRANSMIT_OUTPUT_DEFAULTS = {
+    "runtime": DEFAULT_NATIVE_TRANSMIT_RUNTIME,
+    "target": DEFAULT_NATIVE_TRANSMIT_TARGET,
+    "codec": "h264_nvenc",
+    "bitrate": DEFAULT_NATIVE_TRANSMIT_BITRATE,
+    "preset": DEFAULT_NATIVE_TRANSMIT_PRESET,
+    "muxer": "",
+    "width": DEFAULT_NATIVE_TRANSMIT_WIDTH,
+    "height": DEFAULT_NATIVE_TRANSMIT_HEIGHT,
+    "fps": 0.0,
+    "debug_overlay": DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
+}
 
 
 def _prompt_runtime_start(default_value: str, default_cadence_fps: float) -> tuple[str, float, bool]:
@@ -362,9 +387,9 @@ def _resolve_output_role(
     args: argparse.Namespace,
     *,
     alias_prefix: str,
-    legacy_prefix: str,
+    defaults: dict[str, Any],
 ) -> tuple[dict[str, Any], bool]:
-    config: dict[str, Any] = {}
+    config: dict[str, Any] = dict(defaults)
     explicit = False
     explicit_fields: set[str] = set()
     for field in _OUTPUT_ROLE_FIELDS:
@@ -374,16 +399,11 @@ def _resolve_output_role(
             config[field] = alias_value
             explicit = True
             explicit_fields.add(field)
-            continue
-        config[field] = getattr(args, f"{legacy_prefix}_{field}")
     alias_debug_overlay = getattr(args, f"{alias_prefix}_debug_overlay")
     if alias_debug_overlay is not None:
         config["debug_overlay"] = bool(alias_debug_overlay)
         explicit = True
         explicit_fields.add("debug_overlay")
-    else:
-        legacy_debug_overlay = getattr(args, f"{legacy_prefix}_debug_overlay")
-        config["debug_overlay"] = bool(legacy_debug_overlay) if legacy_debug_overlay is not None else False
     config["_explicit_fields"] = explicit_fields
     return config, explicit
 
@@ -660,44 +680,6 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
         "--homography-file",
         default=DEFAULT_NATIVE_HOMOGRAPHY_PATH,
         help="Optional fixed 3x3 homography JSON path (default: config/runtime.json)",
-    )
-    cmd.add_argument("--output-runtime", choices=["none", "ffmpeg", "gpu-direct"], default=DEFAULT_NATIVE_PROBE_RUNTIME)
-    cmd.add_argument("--output-profile", choices=["inspection", "production-compatible"], default="inspection")
-    cmd.add_argument("--output-target", default=DEFAULT_PROBE_TARGET, help="Compatibility alias for local encoded probe target")
-    cmd.add_argument("--output-codec", default="h264_nvenc")
-    cmd.add_argument("--output-bitrate", default="12M")
-    cmd.add_argument("--output-preset", default="p4")
-    cmd.add_argument("--output-muxer", default="")
-    cmd.add_argument("--output-width", type=int, default=0)
-    cmd.add_argument("--output-height", type=int, default=0)
-    cmd.add_argument("--output-fps", type=float, default=0.0)
-    cmd.add_argument("--output-debug-overlay", action="store_true", default=None)
-    cmd.add_argument(
-        "--production-output-runtime",
-        choices=["none", "ffmpeg", "gpu-direct"],
-        default=DEFAULT_NATIVE_TRANSMIT_RUNTIME,
-    )
-    cmd.add_argument(
-        "--production-output-profile",
-        choices=["inspection", "production-compatible"],
-        default="production-compatible",
-    )
-    cmd.add_argument(
-        "--production-output-target",
-        default=DEFAULT_TRANSMIT_TARGET,
-        help="Compatibility alias for final transmitted encoded output target",
-    )
-    cmd.add_argument("--production-output-codec", default="h264_nvenc")
-    cmd.add_argument("--production-output-bitrate", default=DEFAULT_NATIVE_TRANSMIT_BITRATE)
-    cmd.add_argument("--production-output-preset", default=DEFAULT_NATIVE_TRANSMIT_PRESET)
-    cmd.add_argument("--production-output-muxer", default="")
-    cmd.add_argument("--production-output-width", type=int, default=DEFAULT_NATIVE_TRANSMIT_WIDTH)
-    cmd.add_argument("--production-output-height", type=int, default=DEFAULT_NATIVE_TRANSMIT_HEIGHT)
-    cmd.add_argument("--production-output-fps", type=float, default=0.0)
-    cmd.add_argument(
-        "--production-output-debug-overlay",
-        action=argparse.BooleanOptionalAction,
-        default=DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
     )
     cmd.add_argument(
         "--probe-output-runtime",
@@ -1167,6 +1149,11 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     if not str(args.output_standard or "").strip():
         args.output_standard = default_output_standard()
     args.output_cadence_fps = 25.0 if float(args.output_cadence_fps) <= 25.0 else 30.0
+    require_configured_rtsp_urls(
+        str(args.left_rtsp),
+        str(args.right_rtsp),
+        context="native runtime",
+    )
 
     if run_calibration_first:
         repo_root = Path(__file__).resolve().parent.parent
@@ -1187,20 +1174,20 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     probe_output, probe_explicit = _resolve_output_role(
         args,
         alias_prefix="probe_output",
-        legacy_prefix="output",
+        defaults=_PROBE_OUTPUT_DEFAULTS,
     )
     transmit_output, transmit_explicit = _resolve_output_role(
         args,
         alias_prefix="transmit_output",
-        legacy_prefix="production_output",
+        defaults=_TRANSMIT_OUTPUT_DEFAULTS,
     )
     sync_pair_mode_explicit = _argv_has_option("--sync-pair-mode")
     allow_frame_reuse_explicit = _argv_has_option("--allow-frame-reuse")
     sync_match_max_delta_explicit = _argv_has_option("--sync-match-max-delta-ms")
-    probe_fps_explicit = _argv_has_option("--probe-output-fps") or _argv_has_option("--output-fps")
-    transmit_fps_explicit = _argv_has_option("--transmit-output-fps") or _argv_has_option("--production-output-fps")
-    transmit_width_explicit = _argv_has_option("--transmit-output-width") or _argv_has_option("--production-output-width")
-    transmit_height_explicit = _argv_has_option("--transmit-output-height") or _argv_has_option("--production-output-height")
+    probe_fps_explicit = _argv_has_option("--probe-output-fps")
+    transmit_fps_explicit = _argv_has_option("--transmit-output-fps")
+    transmit_width_explicit = _argv_has_option("--transmit-output-width")
+    transmit_height_explicit = _argv_has_option("--transmit-output-height")
     if str(args.output_standard or "").strip():
         preset = get_output_preset(str(args.output_standard))
         transmit_output = _apply_output_preset(
@@ -1274,7 +1261,7 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
         reconnect_cooldown_sec=max(0.1, float(args.reconnect_cooldown_sec)),
         output_runtime=str(launch_probe_output["runtime"] or "none"),
-        output_profile=str(args.output_profile or "inspection"),
+        output_profile="inspection",
         output_target=str(launch_probe_output["target"] or ""),
         output_codec=str(launch_probe_output["codec"] or ""),
         output_bitrate=str(launch_probe_output["bitrate"] or ""),
@@ -1285,7 +1272,7 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         output_fps=max(0.0, float(launch_probe_output["fps"] or 0.0)),
         output_debug_overlay=bool(launch_probe_output.get("debug_overlay")),
         production_output_runtime=str(launch_transmit_output["runtime"] or "none"),
-        production_output_profile=str(args.production_output_profile or "production-compatible"),
+        production_output_profile="production-compatible",
         production_output_target=str(launch_transmit_output["target"] or ""),
         production_output_codec=str(launch_transmit_output["codec"] or ""),
         production_output_bitrate=str(launch_transmit_output["bitrate"] or ""),

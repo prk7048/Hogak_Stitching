@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 
 InputRuntime = Literal["ffmpeg-cpu", "ffmpeg-cuda", "opencv"]
-OutputRuntime = Literal["none", "ffmpeg"]
+OutputRuntime = Literal["none", "ffmpeg", "gpu-direct"]
 Transport = Literal["tcp", "udp"]
 SyncPairMode = Literal["none", "latest", "oldest", "service"]
 GpuMode = Literal["off", "auto", "on"]
@@ -38,26 +38,24 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "input_runtime",
     "ffmpeg_bin",
     "homography_file",
-    "output_runtime",
-    "output_profile",
-    "output_target",
-    "output_codec",
-    "output_bitrate",
-    "output_preset",
-    "output_muxer",
-    "output_width",
-    "output_height",
-    "output_fps",
-    "production_output_runtime",
-    "production_output_profile",
-    "production_output_target",
-    "production_output_codec",
-    "production_output_bitrate",
-    "production_output_preset",
-    "production_output_muxer",
-    "production_output_width",
-    "production_output_height",
-    "production_output_fps",
+    "probe_output_runtime",
+    "probe_output_target",
+    "probe_output_codec",
+    "probe_output_bitrate",
+    "probe_output_preset",
+    "probe_output_muxer",
+    "probe_output_width",
+    "probe_output_height",
+    "probe_output_fps",
+    "transmit_output_runtime",
+    "transmit_output_target",
+    "transmit_output_codec",
+    "transmit_output_bitrate",
+    "transmit_output_preset",
+    "transmit_output_muxer",
+    "transmit_output_width",
+    "transmit_output_height",
+    "transmit_output_fps",
     "rtsp_transport",
     "input_buffer_frames",
     "rtsp_timeout_sec",

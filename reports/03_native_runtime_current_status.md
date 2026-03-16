@@ -17,7 +17,7 @@
 
 - `python -m stitching.cli native-runtime`
 - `python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p`
-- `python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service --no-allow-frame-reuse`
+- `python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service`
 
 ## What Is Implemented
 
@@ -47,10 +47,8 @@
 - transmit runtime: `gpu-direct`
 - transmit size: stitched output size 그대로
 - supported presets:
-  - `realtime_1080p`
   - `realtime_hq_1080p`
   - `realtime_gpu_1080p`
-  - `realtime_hq_1080p_strict`
 
 ## What Has Been Confirmed
 
@@ -60,7 +58,7 @@
 - calibration homography load
 - GPU warp/blend path 동작
 - stitched size 그대로의 transmit output 송출
-- Python UI 경로와 `.cmd` baseline 경로 정렬
+- Python UI 경로와 direct Python headless 경로 정렬
 - `gpu-direct` transmit 실제 동작
 - monitor에서 input/stitch/transmit/system 상태 확인
 - `ffplay`/`opencv` viewer fallback 동작
