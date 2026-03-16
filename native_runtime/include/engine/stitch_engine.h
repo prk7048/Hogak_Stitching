@@ -121,6 +121,16 @@ private:
     cv::Size output_size_{};
     bool full_overlap_ = false;
     cv::Mat latest_stitched_{};
+    std::int64_t cached_left_cpu_seq_ = 0;
+    std::int64_t cached_right_cpu_seq_ = 0;
+    std::int64_t cached_left_gpu_input_seq_ = 0;
+    std::int64_t cached_right_gpu_input_seq_ = 0;
+    std::int64_t cached_left_canvas_seq_ = 0;
+    std::int64_t cached_right_warped_seq_ = 0;
+    cv::Mat cached_left_cpu_frame_{};
+    cv::Mat cached_right_cpu_frame_{};
+    cv::Mat cached_left_canvas_cpu_{};
+    cv::Mat cached_right_warped_cpu_{};
     cv::cuda::GpuMat gpu_left_nv12_y_{};
     cv::cuda::GpuMat gpu_left_nv12_uv_{};
     cv::cuda::GpuMat gpu_left_decoded_{};
