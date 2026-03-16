@@ -106,11 +106,6 @@ def _add_native_calibration_args(
         action="store_true",
         help="Launch native runtime immediately after calibration succeeds",
     )
-    cmd.add_argument(
-        "--runtime-script",
-        default="",
-        help="Deprecated compatibility option. Runtime now launches directly via `python -m stitching.cli native-runtime`.",
-    )
     cmd.add_argument("--min-matches", type=int, default=40)
     cmd.add_argument("--min-inliers", type=int, default=20)
     cmd.add_argument("--ratio-test", type=float, default=0.75)

@@ -1264,9 +1264,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     )
     if bool(getattr(args, "launch_runtime", False)):
         repo_root = Path(__file__).resolve().parent.parent
-        runtime_script = str(getattr(args, "runtime_script", "") or "").strip()
-        if runtime_script:
-            print(f"native calibration note: ignoring deprecated --runtime-script={runtime_script}")
         runtime_command = [
             sys.executable,
             "-m",

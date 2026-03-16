@@ -123,13 +123,7 @@ python -m stitching.cli native-runtime
 viewer 없이 monitor만 보려면:
 
 ```cmd
-python -m stitching.cli native-runtime --no-viewer
-```
-
-Python UI로 같은 baseline을 띄우려면:
-
-```cmd
-python -m stitching.cli native-runtime
+python -m stitching.cli native-runtime --no-output-ui --no-viewer
 ```
 
 현재 기본 운영 진입점은 `python -m stitching.cli native-runtime`다.
@@ -149,7 +143,7 @@ stitched frame -> transmit encode -> external target
 - `probe`: viewer가 켜져 있을 때만 쓰는 standalone local debug stream이다.
 - `transmit`: 실제 외부 송출 경로
 - viewer는 raw preview가 아니라 `probe`를 다시 받아 보여준다
-- 기본 runtime 스크립트는 현재 `transmit`에 debug overlay를 넣는다. `frame`, `seq`, `reuse`, `pair_age`가 보여서 24000 화면이 진짜 멈춘 건지 반복 프레임인지 바로 구분할 수 있다.
+- 기본 runtime 실행은 현재 `transmit`에 debug overlay를 넣는다. `frame`, `seq`, `reuse`, `pair_age`가 보여서 24000 화면이 진짜 멈춘 건지 반복 프레임인지 바로 구분할 수 있다.
 - viewer backend는 `ffplay`와 `opencv`만 지원한다. 예전 VLC low-latency 경로는 제거했다.
 
 realtime 우선 프리셋:
@@ -158,10 +152,10 @@ realtime 우선 프리셋:
 python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p
 ```
 
-strict pair 우선 프리셋:
+25fps 카메라 profile:
 
 ```cmd
-python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service --no-allow-frame-reuse
+python -m stitching.cli --runtime-profile camera25 native-runtime
 ```
 
 ## Deployment Bundle
@@ -248,7 +242,8 @@ monitor에서 우선 볼 값:
 현재 상태를 짧게 요약하면:
 
 - native runtime main path는 이미 동작한다
-- calibration UX와 operator flow는 메인 경로 기준으로 정리됐다
-- 현재 남은 핵심은 `strict fresh 30fps` live baseline 검증과 source cadence 분리 진단이다
+- calibration UX와 operator flow는 direct Python entrypoint 기준으로 정리됐다
+- config/profile/data 구조도 현재 운영 경로 기준으로 정리됐다
+- 다음 핵심은 실제 서비스 기준에서 long-run 운영 검증과 source cadence 분리 진단이다
 
 즉 지금 phase는 구조를 새로 만드는 단계보다 운영 baseline을 마감하는 단계에 가깝다.
