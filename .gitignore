@@ -15,13 +15,18 @@ venv/
 .ruff_cache/
 .third_party/
 native_runtime/build/
+native_runtime/CMakeUserPresets.json
+dist/
 _tags.txt
 _cv2_check.py
 _native_check.py
 _tmp_*.py
 tmp_*.py
 __dump_reports.py
-*-arch=x64 -host_arch=x64 && set PATH
+
+# Local machine/site overrides
+config/runtime.local.json
+config/profiles/*.local.json
 
 # OS/editor
 .DS_Store
@@ -29,29 +34,9 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Local test data (keep folder structure only)
-input/images/*
-!input/images/.gitkeep
-input/videos/*
-!input/videos/.gitkeep
-
 # Generated outputs (keep folder structure only)
+output/calibration/
 output/debug/*
 !output/debug/.gitkeep
-output/images/*
-!output/images/.gitkeep
-output/native/
 output/videos/*
 !output/videos/.gitkeep
-
-# Backend runtime storage (keep folder structure only)
-storage/raw/*
-!storage/raw/.gitkeep
-storage/debug/*
-!storage/debug/.gitkeep
-storage/out/*
-!storage/out/.gitkeep
-storage/report/*
-!storage/report/.gitkeep
-storage/jobs/*
-!storage/jobs/.gitkeep

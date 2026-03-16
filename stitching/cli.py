@@ -1,21 +1,32 @@
 from __future__ import annotations
 
 import argparse
+import os
 from pathlib import Path
-
-from stitching.legacy_commands import add_legacy_subcommands, dispatch_legacy_command, is_legacy_command
-from stitching.project_defaults import (
-    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-    DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-    default_left_rtsp,
-    default_right_rtsp,
-)
+import sys
 
 
 CURRENT_MAIN_PATH_NOTE = (
-    "Current main path: native-calibrate -> native-runtime. "
-    "Legacy and secondary paths remain available under the legacy commands."
+    "Current Python entrypoints: native-calibrate -> native-runtime."
 )
+
+
+def _bootstrap_runtime_config(argv: list[str]) -> tuple[argparse.ArgumentParser, list[str]]:
+    bootstrap = argparse.ArgumentParser(add_help=False)
+    bootstrap.add_argument(
+        "--runtime-config",
+        help="Optional site config JSON path. Overrides config/runtime.json.",
+    )
+    bootstrap.add_argument(
+        "--runtime-profile",
+        help="Optional profile name under config/profiles/<name>.json. Merged on top of the base runtime config.",
+    )
+    known_args, remaining = bootstrap.parse_known_args(argv)
+    if known_args.runtime_config:
+        os.environ["HOGAK_RUNTIME_CONFIG"] = str(known_args.runtime_config)
+    if known_args.runtime_profile:
+        os.environ["HOGAK_RUNTIME_PROFILE"] = str(known_args.runtime_profile)
+    return bootstrap, remaining
 
 
 def _add_native_calibration_args(
@@ -23,28 +34,35 @@ def _add_native_calibration_args(
     *,
     include_stream_args: bool = True,
 ) -> None:
+    from stitching.project_defaults import (
+        DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+        DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+        default_left_rtsp,
+        default_right_rtsp,
+    )
+
     if include_stream_args:
         cmd.add_argument(
             "--left-rtsp",
             default=default_left_rtsp(),
-            help="Left RTSP URL (defaults to project camera or HOGAK_LEFT_RTSP)",
+            help="Left RTSP URL (default: config/runtime.json or HOGAK_LEFT_RTSP)",
         )
         cmd.add_argument(
             "--right-rtsp",
             default=default_right_rtsp(),
-            help="Right RTSP URL (defaults to project camera or HOGAK_RIGHT_RTSP)",
+            help="Right RTSP URL (default: config/runtime.json or HOGAK_RIGHT_RTSP)",
         )
         cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
         cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     cmd.add_argument(
         "--out",
         default=DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-        help="Output homography JSON path",
+        help="Output homography JSON path (default: config/runtime.json)",
     )
     cmd.add_argument(
         "--debug-dir",
         default=DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-        help="Calibration debug image directory",
+        help="Calibration debug image directory (default: config/runtime.json)",
     )
     cmd.add_argument(
         "--warmup-frames",
@@ -90,8 +108,8 @@ def _add_native_calibration_args(
     )
     cmd.add_argument(
         "--runtime-script",
-        default="scripts/run_native_runtime.cmd",
-        help="Script launched after successful calibration when --launch-runtime is set",
+        default="",
+        help="Deprecated compatibility option. Runtime now launches directly via `python -m stitching.cli native-runtime`.",
     )
     cmd.add_argument("--min-matches", type=int, default=40)
     cmd.add_argument("--min-inliers", type=int, default=20)
@@ -99,11 +117,13 @@ def _add_native_calibration_args(
     cmd.add_argument("--ransac-thresh", type=float, default=5.0)
     cmd.add_argument("--max-features", type=int, default=4000)
 
-
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    bootstrap, remaining = _bootstrap_runtime_config(argv)
     parser = argparse.ArgumentParser(
         description="Dual smartphone video stitching project CLI",
         epilog=CURRENT_MAIN_PATH_NOTE,
+        parents=[bootstrap],
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -120,9 +140,7 @@ def parse_args() -> argparse.Namespace:
     from stitching.native_runtime_cli import add_native_runtime_args
 
     add_native_runtime_args(native_cmd)
-
-    add_legacy_subcommands(subparsers)
-    return parser.parse_args()
+    return parser.parse_args(remaining)
 
 
 def main() -> int:
@@ -137,9 +155,6 @@ def main() -> int:
         from stitching.native_runtime_cli import run_native_runtime_monitor
 
         return int(run_native_runtime_monitor(args))
-
-    if is_legacy_command(args.command):
-        return int(dispatch_legacy_command(args))
 
     raise ValueError(f"unsupported command: {args.command}")
 

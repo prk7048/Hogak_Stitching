@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
+
 import numpy as np
+
 from stitching.errors import ErrorCode
 
 
@@ -8,18 +11,15 @@ from stitching.errors import ErrorCode
 class StitchConfig:
     """스티칭 매칭/정합/합성에 공통으로 사용하는 설정값."""
 
-    # 특징점 매칭 관련 기본 임계값
     min_matches: int = 80
     min_inliers: int = 30
     ratio_test: float = 0.75
     ransac_reproj_threshold: float = 5.0
     max_features: int = 4000
 
-    # 비정상적으로 큰 캔버스가 만들어지는 것을 막는 안전장치
     max_output_scale: float = 4.0
     max_output_pixels: int = 40_000_000
 
-    # 블렌딩/노출 보정 관련 설정
     seam_transition_px: int = 40
     exposure_compensation: bool = True
     exposure_gain_min: float = 0.7

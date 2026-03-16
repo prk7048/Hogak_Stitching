@@ -1,5 +1,7 @@
 # 60fps Service Pipeline Plan
 
+> Note: this report preserves historical implementation notes. Some `scripts/...` references below point to legacy helper files that have since been removed after the Python direct-entry cleanup.
+
 ## Why This Document Exists
 
 이 문서는 현재 프로젝트의 다음 최우선 목표를 고정하기 위한 기준 문서다.
@@ -21,6 +23,23 @@
 2. 최종 목표는 `2x60 input -> 60fps stitch -> 60fps transmit`이다.
 3. 현재 구조는 GPU 성능 부족보다 `GPU 앞뒤 CPU 경계`가 더 큰 문제다.
 4. 따라서 지금 단계는 단순 preset 튜닝이 아니라 `main transmit path re-architecture` 단계다.
+
+## Current Baseline Note
+
+아래 본문에는 이전 실험 기록도 함께 남아 있다.
+현재 기준으로 읽을 때는 아래 baseline을 우선 사실로 본다.
+
+- 현재 live 카메라는 `30fps`급 입력이다.
+- 따라서 단기 목표는 `strict fresh 30fps` 안정화다.
+- 현재 preferred live baseline은 대체로
+  `ffmpeg-cuda + nv12 + input_buffer_frames=8 + gpu-direct + stitched-size transmit`
+  조합이다.
+- viewer를 켜면 probe는 `standalone` local debug stream을 사용하고,
+  `--no-viewer`면 probe는 기본적으로 꺼진다.
+- viewer backend는 `ffplay`와 `opencv`만 유지한다.
+  예전 VLC low-latency preview 경로는 제거했다.
+- 현재 남은 가장 강한 병목 후보는 output path보다
+  `right-side input cadence/source jitter`다.
 
 ## What We Confirmed
 
@@ -244,9 +263,9 @@ probe는 아래 둘 중 하나만 허용한다.
 
 운영 메모:
 
-- VLC 같은 외부 플레이어 preview는 raw UDP 본선에 직접 매달지 않는다.
-- 기본 원칙은 `UDP service transmit + local TCP preview leg` 분리다.
-- 즉 "서비스 전송 경로"와 "VLC 확인 경로"는 transport까지 분리할 수 있어야 한다.
+- viewer는 본선 transmit mirror가 아니라 standalone probe를 기본으로 본다.
+- 기본 원칙은 `service transmit`과 `local debug probe`를 분리하는 것이다.
+- 즉 "서비스 전송 경로"와 "로컬 확인 경로"는 기본값부터 분리되어 있어야 한다.
 
 ### Workstream C. Input Path Upgrade
 

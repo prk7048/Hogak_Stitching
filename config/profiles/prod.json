@@ -1,0 +1,10 @@
+{
+  "runtime": {
+    "output_standard": "realtime_hq_1080p",
+    "output_cadence_fps": 30.0,
+    "status_interval_sec": 10.0,
+    "transmit": {
+      "debug_overlay": false
+    }
+  }
+}

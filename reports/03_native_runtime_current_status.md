@@ -1,40 +1,56 @@
-# Native Runtime Current Status
-
 ## Summary
 
-현재 프로젝트는 구조 전환 단계는 대부분 끝났고, 운영 기준과 calibration 품질 UX를 마무리하는 단계에 들어와 있다.
+현재 프로젝트의 메인 runtime 경로는 이미 `Python control plane + C++ native runtime`으로 정착했다.
 
 핵심 상태를 한 줄로 요약하면 다음과 같다.
 
-> 실시간 stitching main engine은 이미 native runtime으로 옮겨졌고, 남은 일은 운영 기준 확정과 calibration/operator 경험 정리다.
+> 본선 transmit 경로는 `gpu-direct` 기준으로 정리됐고, 지금 남은 핵심은 input/source cadence를 안정화해서 `strict fresh 30fps` live baseline을 닫는 일이다.
+
+## Current Main Path
+
+현재 운영 기준 메인 경로는 아래 둘이다.
+
+1. `python -m stitching.cli native-calibrate`
+2. `python -m stitching.cli native-runtime`
+
+동일한 baseline을 직접 실행할 때는 아래를 쓴다.
+
+- `python -m stitching.cli native-runtime`
+- `python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p`
+- `python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p --sync-pair-mode service --no-allow-frame-reuse`
 
 ## What Is Implemented
 
 ### Native Runtime
 
 - RTSP input reader
-- ffmpeg decode path
-- pair/sync handling
-- GPU warp
-- GPU blend
-- ffmpeg output writer
-- JSON line control/metrics channel
+- `ffmpeg-cuda` input baseline
+- `service` pair scheduler
+- GPU warp / GPU blend
+- `gpu-direct` production transmit writer
+- JSON metrics / compact dashboard monitor
 
 ### Python Control Plane
 
+- calibration launcher and confirm flow
 - runtime launcher
-- runtime client
-- dashboard monitor
-- encoded output probe viewer helper
-- assisted-first calibration UI
-- runtime launch after calibration confirmation
+- compact/dashboard monitor
+- preset selection UI
+- probe viewer launch (`ffplay` / `opencv`)
 
-### Operating Presets
+### Current Operating Defaults
 
-- realtime-oriented runtime scripts
-- strict/runtime split direction
-- `1920x1080` output baseline
-- `h264_nvenc` default-friendly path
+- input runtime: `ffmpeg-cuda`
+- input pipe format: `nv12`
+- input buffer: `8`
+- probe source: viewer on이면 `standalone`, `--no-viewer`면 `disabled`
+- transmit runtime: `gpu-direct`
+- transmit size: stitched output size 그대로
+- supported presets:
+  - `realtime_1080p`
+  - `realtime_hq_1080p`
+  - `realtime_gpu_1080p`
+  - `realtime_hq_1080p_strict`
 
 ## What Has Been Confirmed
 
@@ -43,44 +59,54 @@
 - 좌/우 RTSP 입력 수신
 - calibration homography load
 - GPU warp/blend path 동작
-- stitched output stream 송출
-- transmit 활성 시 single encode 결과를 local debug receive까지 mirror하는 경로
-- monitor에서 output/input/system 상태 확인
-- encoded output probe path 연결
-- calibration -> confirm -> runtime launch 운영 흐름
+- stitched size 그대로의 transmit output 송출
+- Python UI 경로와 `.cmd` baseline 경로 정렬
+- `gpu-direct` transmit 실제 동작
+- monitor에서 input/stitch/transmit/system 상태 확인
+- `ffplay`/`opencv` viewer fallback 동작
 
-즉 end-to-end 구조 자체는 이미 살아 있다.
+즉 end-to-end 운영 경로 자체는 이미 살아 있고, 예전처럼 구조가 흔들리는 단계는 지났다.
+
+## Current Constraints
+
+지금 운영 판단에서 중요한 제약은 아래다.
+
+1. 현재 live 카메라는 사실상 `30fps`급 입력이다.
+2. 그래서 현재 현실적인 live 목표는 `strict fresh 30fps`다.
+3. `60fps fresh stitch`는 입력이 `2x60`으로 바뀐 뒤 다시 여는 목표다.
 
 ## Current Risks
 
-아직 운영 관점에서 남아 있는 리스크는 다음이다.
+아직 남아 있는 리스크는 다음이다.
 
-1. 장시간 실행 안정성
-2. 입력 freeze / content stall에 대한 운영 판정
-3. calibration 품질이 장면에 따라 흔들리는 문제
-4. deep matching backend가 아직 placeholder인 점
-5. viewer/monitor 경험을 더 다듬을 필요
+1. right-side input cadence/source jitter
+2. long-run strict fresh `30fps` 미검증
+3. OpenCV CUDA build에서 `NV12 -> BGR` GPU 변환 미지원
+4. source 문제와 code 문제를 완전히 분리 진단하지 않은 상태
+
+핵심은 더 이상 viewer나 output writer가 아니라,
+`input/pair/source` 쪽 변동성이다.
+
+## Current Best Interpretation
+
+지금까지의 측정을 종합하면:
+
+- output path는 많이 정리됐다
+- GPU는 아직 꽉 차지 않는다
+- pair scheduler도 예전보다 좋아졌다
+- 하지만 fresh pair 공급은 아직 source cadence 영향을 크게 받는다
+
+즉 현재 병목은 아래처럼 읽는 게 맞다.
+
+> scheduler가 frame을 고르는 방식 자체보다, 특히 right-side 입력이 fresh frame을 일정하게 못 주는 문제가 더 크다.
 
 ## Progress Estimate
 
 실무적으로 보면 현재 진척은 이 정도로 보는 게 맞다.
 
-- 구조 전환: `80~85%`
-- 운영 준비도: `65~75%`
+- 구조 전환: `90%+`
+- 운영 baseline 정리: `75~80%`
+- strict fresh `30fps` 검증: 진행 중
 
-즉 “엔진을 새로 만드는 단계”는 거의 지났고,
-지금은 “운영 가능한 기준으로 닫는 단계”라고 보면 된다.
-
-## Current Best Interpretation
-
-현재 프로젝트는 실패한 실험 단계가 아니다.
-반대로 핵심 구조 결정은 이미 끝났고, 실제로 stitched stream이 나오는 상태까지 왔다.
-
-남은 일은 새로운 대형 아키텍처 변경이 아니라 아래 성격에 가깝다.
-
-- calibration 품질 정리
-- 운영 기준 정의
-- long-run validation
-- 문서와 실행 흐름 마감
-
-즉 현재 phase는 build보다 finish에 더 가깝다.
+즉 지금 phase는 "새 엔진을 만드는 단계"가 아니라,
+"현재 운영 baseline을 닫고 다음 단계로 넘길 기준을 만드는 단계"다.

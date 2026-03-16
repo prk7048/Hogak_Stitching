@@ -1,0 +1,39 @@
+{
+  "cameras": {
+    "left_rtsp": "rtsp://admin:admin123@192.168.0.137:554/cam/realmonitor?channel=1&subtype=0",
+    "right_rtsp": "rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0"
+  },
+  "paths": {
+    "homography_file": "data/runtime_homography.json",
+    "calibration_debug_dir": "output/calibration"
+  },
+  "runtime": {
+    "output_standard": "realtime_hq_1080p",
+    "input_runtime": "ffmpeg-cuda",
+    "input_pipe_format": "nv12",
+    "rtsp_transport": "udp",
+    "input_buffer_frames": 8,
+    "rtsp_timeout_sec": 10.0,
+    "reconnect_cooldown_sec": 0.5,
+    "pair_reuse_max_age_ms": 140.0,
+    "pair_reuse_max_consecutive": 4,
+    "sync_match_max_delta_ms": 35.0,
+    "status_interval_sec": 5.0,
+    "viewer_backend": "auto",
+    "output_cadence_fps": 30.0,
+    "probe": {
+      "source": "standalone",
+      "runtime": "ffmpeg",
+      "target": "udp://127.0.0.1:23000?pkt_size=1316"
+    },
+    "transmit": {
+      "runtime": "gpu-direct",
+      "target": "udp://127.0.0.1:24000?pkt_size=1316",
+      "bitrate": "16M",
+      "preset": "p4",
+      "width": 0,
+      "height": 0,
+      "debug_overlay": true
+    }
+  }
+}

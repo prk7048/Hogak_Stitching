@@ -47,7 +47,7 @@ RTSP input -> decode -> pair/sync -> stitch -> encode -> output stream
 
 현재 사용 흐름은 아래처럼 정리된다.
 
-1. [`scripts/run_native_calibrate.cmd`](/c:/Users/Pixellot/Hogak_Stitching/scripts/run_native_calibrate.cmd) 실행
+1. [`python -m stitching.cli native-calibrate`](/c:/Users/Pixellot/Hogak_Stitching/stitching/cli.py) 실행
 2. 좌/우 대표 프레임 확인
 3. 필요하면 overlap guide를 참고해서 seed point 선택
 4. `COMPLETE`

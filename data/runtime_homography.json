@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "saved_at_epoch_sec": 1773640283,
+  "homography": [
+    [
+      0.8391504531573526,
+      0.0343510210138103,
+      428.02043176323673
+    ],
+    [
+      -0.06027112622610677,
+      1.0526384005534815,
+      -13.65839043569632
+    ],
+    [
+      -0.0001197795534810165,
+      3.049136249900341e-05,
+      1.0
+    ]
+  ],
+  "metadata": {
+    "source": "native_runtime_calibration",
+    "calibration_mode_requested": "assisted",
+    "calibration_mode_effective": "auto",
+    "left_rtsp": "rtsp://admin:admin123@192.168.0.137:554/cam/realmonitor?channel=1&subtype=0",
+    "right_rtsp": "rtsp://admin:admin123@192.168.0.138:554/cam/realmonitor?channel=1&subtype=0",
+    "rtsp_transport": "tcp",
+    "process_scale": 1.0,
+    "manual_points_count": 0,
+    "match_backend_requested": "auto",
+    "deep_backend_requested": "auto",
+    "match_backend_effective": "classic",
+    "selected_candidate": "auto",
+    "seed_guidance_model": "none",
+    "candidate_failures": [],
+    "candidate_count": 1,
+    "candidate_score": 0.8830253889720059,
+    "match_score": 0.8018580392935482,
+    "geometry_score": 1.0,
+    "visual_score": 0.8742739108486219,
+    "matches_count": 242,
+    "inliers_count": 74,
+    "inlier_ratio": 0.30578512396694213,
+    "mean_reprojection_error": 2.294037342071533,
+    "overlap_luma_diff": 0.13672799192292892,
+    "overlap_edge_diff": 0.11005671247674488,
+    "ghosting_score": 0.12472591617214612,
+    "transform_model": "homography",
+    "left_resolution": [
+      1920,
+      1080
+    ],
+    "right_resolution": [
+      1920,
+      1080
+    ],
+    "output_resolution": [
+      2649,
+      1424
+    ],
+    "debug_dir": "output\\calibration",
+    "candidates": [
+      {
+        "name": "auto",
+        "seed_guidance_model": "none",
+        "backend_name": "classic",
+        "transform_model": "homography",
+        "score": 0.8830253889720059,
+        "match_score": 0.8018580392935482,
+        "geometry_score": 1.0,
+        "visual_score": 0.8742739108486219,
+        "matches_count": 242,
+        "inliers_count": 74,
+        "inlier_ratio": 0.30578512396694213,
+        "mean_reprojection_error": 2.294037342071533,
+        "output_resolution": [
+          2649,
+          1424
+        ],
+        "overlap_luma_diff": 0.13672799192292892,
+        "overlap_edge_diff": 0.11005671247674488,
+        "ghosting_score": 0.12472591617214612,
+        "accepted": true
+      }
+    ]
+  }
+}

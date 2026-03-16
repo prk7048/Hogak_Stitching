@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from typing import Iterator
@@ -22,14 +23,18 @@ from stitching.core import (
 )
 from stitching.deep_feature_matching import detect_and_match_deep
 from stitching.errors import ErrorCode
+from stitching.project_defaults import (
+    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+    DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+)
 
 
 @dataclass(slots=True)
 class NativeCalibrationConfig(StitchConfig):
     left_rtsp: str = ""
     right_rtsp: str = ""
-    output_path: Path = Path("output/native/runtime_homography.json")
-    debug_dir: Path = Path("output/native/calibration")
+    output_path: Path = Path(DEFAULT_NATIVE_HOMOGRAPHY_PATH)
+    debug_dir: Path = Path(DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR)
     rtsp_transport: str = "tcp"
     rtsp_timeout_sec: float = 10.0
     warmup_frames: int = 45
@@ -1259,15 +1264,21 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     )
     if bool(getattr(args, "launch_runtime", False)):
         repo_root = Path(__file__).resolve().parent.parent
-        runtime_script = Path(str(getattr(args, "runtime_script", "scripts/run_native_runtime.cmd")))
-        runtime_script_path = runtime_script if runtime_script.is_absolute() else (repo_root / runtime_script)
-        if not runtime_script_path.exists():
-            print(f"native calibration warning: runtime script not found: {runtime_script_path}")
-            return 0
-        print(f"launching_runtime={runtime_script_path}")
+        runtime_script = str(getattr(args, "runtime_script", "") or "").strip()
+        if runtime_script:
+            print(f"native calibration note: ignoring deprecated --runtime-script={runtime_script}")
+        runtime_command = [
+            sys.executable,
+            "-m",
+            "stitching.cli",
+            "native-runtime",
+            "--no-output-ui",
+        ]
+        print(f"launching_runtime={' '.join(runtime_command)}")
         completed = subprocess.run(
-            ["cmd", "/c", str(runtime_script_path)],
+            runtime_command,
             cwd=str(repo_root),
+            env=os.environ.copy(),
             check=False,
         )
         return int(completed.returncode)

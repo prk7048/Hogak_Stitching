@@ -12,12 +12,19 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
     DEFAULT_NATIVE_INPUT_PIPE_FORMAT,
     DEFAULT_NATIVE_INPUT_RUNTIME,
+    DEFAULT_NATIVE_PROBE_RUNTIME,
     DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS,
     DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE,
     DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC,
     DEFAULT_NATIVE_RTSP_TRANSPORT,
     DEFAULT_NATIVE_RTSP_TIMEOUT_SEC,
     DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
+    DEFAULT_NATIVE_TRANSMIT_BITRATE,
+    DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
+    DEFAULT_NATIVE_TRANSMIT_HEIGHT,
+    DEFAULT_NATIVE_TRANSMIT_PRESET,
+    DEFAULT_NATIVE_TRANSMIT_RUNTIME,
+    DEFAULT_NATIVE_TRANSMIT_WIDTH,
 )
 
 
@@ -40,7 +47,7 @@ class RuntimeLaunchSpec:
     video_codec: str = "h264"
     timeout_sec: float = DEFAULT_NATIVE_RTSP_TIMEOUT_SEC
     reconnect_cooldown_sec: float = DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC
-    output_runtime: str = "none"
+    output_runtime: str = DEFAULT_NATIVE_PROBE_RUNTIME
     output_profile: str = "inspection"
     output_target: str = ""
     output_codec: str = "h264_nvenc"
@@ -51,17 +58,17 @@ class RuntimeLaunchSpec:
     output_height: int = 0
     output_fps: float = 0.0
     output_debug_overlay: bool = False
-    production_output_runtime: str = "none"
+    production_output_runtime: str = DEFAULT_NATIVE_TRANSMIT_RUNTIME
     production_output_profile: str = "production-compatible"
     production_output_target: str = ""
     production_output_codec: str = "h264_nvenc"
-    production_output_bitrate: str = "12M"
-    production_output_preset: str = "p4"
+    production_output_bitrate: str = DEFAULT_NATIVE_TRANSMIT_BITRATE
+    production_output_preset: str = DEFAULT_NATIVE_TRANSMIT_PRESET
     production_output_muxer: str = ""
-    production_output_width: int = 0
-    production_output_height: int = 0
+    production_output_width: int = DEFAULT_NATIVE_TRANSMIT_WIDTH
+    production_output_height: int = DEFAULT_NATIVE_TRANSMIT_HEIGHT
     production_output_fps: float = 0.0
-    production_output_debug_overlay: bool = False
+    production_output_debug_overlay: bool = DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY
     sync_pair_mode: str = "none"
     allow_frame_reuse: bool = False
     pair_reuse_max_age_ms: float = DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS
@@ -80,17 +87,50 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _runtime_path_entries(repo_root: Path) -> list[str]:
-    return [
+def _cuda_bin_entries() -> list[str]:
+    candidates: list[Path] = []
+    for key, value in sorted(os.environ.items()):
+        if key == "CUDA_PATH" or key.startswith("CUDA_PATH_V"):
+            root = Path(value)
+            candidates.extend((root / "bin", root / "bin" / "x64"))
+    default_cuda_root = Path(r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA")
+    if default_cuda_root.exists():
+        for child in sorted(default_cuda_root.glob("v*"), reverse=True):
+            candidates.extend((child / "bin", child / "bin" / "x64"))
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        entry = str(candidate)
+        normalized = entry.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        entries.append(entry)
+    return entries
+
+
+def runtime_path_entries(repo_root: Path | None = None) -> list[str]:
+    repo_root = repo_root or _repo_root()
+    candidates = [
         str(repo_root / ".third_party" / "ffmpeg" / "current" / "bin"),
         str(repo_root / ".third_party" / "ffmpeg-dev" / "current" / "bin"),
-        r"C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\v13.1\bin\x64",
+        *_cuda_bin_entries(),
     ]
+    entries: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        normalized = candidate.lower()
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        entries.append(candidate)
+    return entries
 
 
 def _ensure_runtime_loader_paths(repo_root: Path | None = None) -> None:
     repo_root = repo_root or _repo_root()
-    path_entries = _runtime_path_entries(repo_root)
+    path_entries = runtime_path_entries(repo_root)
     current_path = os.environ.get("PATH", "")
     normalized_existing = current_path.lower()
     for entry in path_entries:
@@ -108,7 +148,7 @@ def _ensure_runtime_loader_paths(repo_root: Path | None = None) -> None:
 
 
 def _wrap_windows_runtime_command(command: list[str], repo_root: Path) -> list[str]:
-    path_prefix = ";".join(_runtime_path_entries(repo_root))
+    path_prefix = ";".join(runtime_path_entries(repo_root))
     command_text = subprocess.list2cmdline(command)
     wrapped = f'set "PATH={path_prefix};%PATH%" & {command_text}'
     return [
@@ -119,11 +159,11 @@ def _wrap_windows_runtime_command(command: list[str], repo_root: Path) -> list[s
     ]
 
 
-def _runtime_env(repo_root: Path | None = None) -> dict[str, str]:
+def runtime_env(repo_root: Path | None = None) -> dict[str, str]:
     repo_root = repo_root or _repo_root()
     _ensure_runtime_loader_paths(repo_root)
     env = os.environ.copy()
-    path_entries = _runtime_path_entries(repo_root)
+    path_entries = runtime_path_entries(repo_root)
     env["PATH"] = os.pathsep.join(path_entries + [env.get("PATH", "")])
     return env
 
@@ -323,7 +363,7 @@ def launch_native_runtime(
 ) -> subprocess.Popen[str]:
     command = build_runtime_command(spec)
     repo_root = _repo_root()
-    env = _runtime_env(repo_root)
+    env = runtime_env(repo_root)
     return subprocess.Popen(
         command,
         cwd=str(repo_root),
@@ -349,7 +389,7 @@ def query_gpu_direct_status() -> dict[str, object]:
         capture_output=True,
         text=True,
         encoding="utf-8",
-        env=_runtime_env(repo_root),
+        env=runtime_env(repo_root),
     )
     payload: dict[str, object] = {
         "ok": completed.returncode == 0,

@@ -1,0 +1,11 @@
+{
+  "runtime": {
+    "status_interval_sec": 2.0,
+    "probe": {
+      "source": "standalone"
+    },
+    "transmit": {
+      "debug_overlay": true
+    }
+  }
+}

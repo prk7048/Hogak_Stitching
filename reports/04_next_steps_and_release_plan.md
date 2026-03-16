@@ -1,85 +1,97 @@
-# Next Steps And Release Plan
-
 ## Immediate Goal
 
-지금 당장의 목표는 `v0.1 operational baseline`을 닫는 것이다.
+지금 당장의 목표는 `strict fresh 30fps live baseline`을 운영 기준으로 닫는 것이다.
 
 뜻:
 
-- calibration이 간단하게 실행되고
-- runtime이 stitched stream을 내보내고
-- operator가 monitor/viewer로 상태를 확인할 수 있고
-- 현재 구조와 사용법이 문서로 정리된 상태
+- 현재 `30fps`급 카메라 입력 조건에서
+- `gpu-direct` transmit baseline을 유지하고
+- input/source 흔들림이 실제 병목인지 분리 확인하고
+- 장시간 실행에서도 운영 가능한지 검증하는 상태
 
 ## Priority Order
 
-### 1. Calibration UX Finish
+### 1. Source / Cadence Diagnosis
 
 필요한 것:
 
-- assisted-first flow 안정화
-- inlier/preview review 확인
-- auto baseline을 깨지 않는 candidate selection
-- 장면별 calibration 실패 이유 정리
+- 좌/우 카메라를 바꿔서 문제가 `right 자리`를 따라가는지 확인
+- 좌/우 RTSP를 단독으로 받아 cadence/gap을 비교
+- 가능하면 Wi-Fi/UDP 영향과 source 자체 영향 분리
+- 카메라 fps / GOP / bitrate / transport 조건 재확인
 
-### 2. Runtime Operating Criteria
+목적:
 
-필요한 것:
+- 지금 남은 문제가 code path인지 source path인지 먼저 가른다.
 
-- realtime 기본 운영 기준 확정
-- strict mode의 역할 정리
-- `output_fps`, `age`, `motion`, `viewer` 기준으로 운영 판정 정리
-
-### 3. Long-Run Validation
+### 2. Strict Fresh 30 Long-Run Validation
 
 필요한 것:
 
-- 장시간 실행 중 freeze/stall 확인
-- output 유지 여부 확인
-- restart/reconnect 정책 확인
+- `ffmpeg-cuda + nv12 + input_buffer_frames=8 + gpu-direct`
+- viewer off / probe disabled baseline
+- 30분 이상 long-run
+- `active_stitch_fps`, `waiting_ratio`, `transmit_to_stitched_ratio`, read/restart 지표 기록
 
-자동 soak만이 아니라 실제 live run 검증도 중요하다.
+목적:
 
-### 4. Control Plane Finish
+- 현재 baseline이 운영 가능한 수준인지 먼저 판정한다.
 
-필요한 것:
-
-- `reload_homography`
-- output 변경
-- runtime control path 정리
-- recalibration operator flow 정리
-
-### 5. Documentation Freeze
+### 3. Limited Code Follow-Up Only If Needed
 
 필요한 것:
 
-- 루트 README 사용법 고정
-- reports 문서 구조 고정
-- “지금 프로젝트가 어디까지 됐는지”를 누구나 이해 가능하게 정리
+- source 문제가 아니라 code 병목으로 확인된 경우에만
+  - reader cadence 계측 추가
+  - queue/pair 정책 미세조정
+  - input boundary 최적화 추가
 
-## v0.1 Done Criteria
+원칙:
 
-다음 조건이 맞으면 `v0.1`로 묶을 수 있다.
+- 이미 효과가 작았던 queue 미세조정에 오래 머물지 않는다.
 
-1. calibration -> preview confirm -> runtime launch 흐름이 일관적이다
-2. runtime이 stitched stream을 안정적으로 보낸다
-3. operator가 monitor와 viewer로 상태를 바로 확인할 수 있다
-4. 실행 명령이 과하게 복잡하지 않다
-5. 문서가 현재 구조와 맞다
+### 4. Documentation Freeze
 
-## What Comes After v0.1
+필요한 것:
 
-`v0.1` 이후는 운영 baseline 이후의 개선 단계다.
+- 루트 README 실행 방법 고정
+- reports 현재 상태 반영
+- viewer/backend/preset 설명 정리
 
-- deep matcher 실제 연결
-- calibration quality 향상
-- 더 강한 recovery/watchdog
-- 더 높은 해상도 또는 더 낮은 지연
-- codec / pipeline tuning
+목적:
 
-즉 이후 단계는 “구조를 바꾸는 일”보다 “품질과 안정성을 끌어올리는 일”이다.
+- 누구나 현재 baseline과 다음 단계가 무엇인지 바로 이해할 수 있게 한다.
+
+## Done Criteria For Current Stage
+
+다음 조건이 맞으면 현재 단계를 닫을 수 있다.
+
+1. 메인 실행 경로가 문서와 일치한다
+2. `strict fresh 30fps` long-run 결과가 충분히 해석 가능하다
+3. source 문제인지 code 문제인지 분리 판단이 가능하다
+4. 운영 baseline과 장기 60fps 계획이 문서에서 구분된다
+
+## What Comes After This Stage
+
+이 단계가 끝나면 다음 갈래는 둘 중 하나다.
+
+### A. Source-Limited Case
+
+source/camera cadence가 주병목으로 확인되면:
+
+- camera/network 조건 개선을 우선한다
+- code 쪽은 현재 baseline 유지
+- 60fps fresh 목표는 `2x60` 입력 확보 뒤 다시 연다
+
+### B. Code-Limited Case
+
+source보다 code path 병목이 더 크다고 확인되면:
+
+- input boundary 재구성
+- OpenCV 밖 GPU path 검토
+- `future 2x60 -> 60fps` 본선 작업 재개
 
 ## Final Status In One Sentence
 
-현재 프로젝트는 architecture invention 단계가 아니라,
-실제로 돌아가는 native stitching runtime을 운영 가능한 baseline으로 마감하는 단계에 있다.
+현재 프로젝트의 다음 단계는
+"새 기능을 더 얹는 것"보다 "`strict fresh 30fps` 기준으로 source와 code 병목을 분리해서 운영 baseline을 닫는 것"에 가깝다.

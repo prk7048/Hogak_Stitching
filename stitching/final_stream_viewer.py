@@ -115,38 +115,6 @@ def resolve_ffplay_binary(explicit_path: str = "") -> Path:
     raise FileNotFoundError("ffplay binary not found. Set FFPLAY_BIN or install ffplay.")
 
 
-def resolve_vlc_binary(explicit_path: str = "") -> Path:
-    candidates: list[Path] = []
-    if explicit_path.strip():
-        explicit_candidate = Path(explicit_path).expanduser()
-        if explicit_candidate.name.lower() == "ffmpeg.exe":
-            candidates.append(explicit_candidate.with_name("vlc.exe"))
-        elif explicit_candidate.name.lower() == "ffplay.exe":
-            candidates.append(explicit_candidate.with_name("vlc.exe"))
-        else:
-            candidates.append(explicit_candidate)
-
-    env_path = os.environ.get("VLC_BIN", "").strip()
-    if env_path:
-        candidates.append(Path(env_path).expanduser())
-
-    found = shutil.which("vlc")
-    if found:
-        candidates.append(Path(found))
-
-    candidates.extend(
-        [
-            Path(r"C:\Program Files\VideoLAN\VLC\vlc.exe"),
-            Path(r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe"),
-        ]
-    )
-
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate.resolve()
-    raise FileNotFoundError("vlc binary not found. Set VLC_BIN or install VLC.")
-
-
 def resolve_ffmpeg_binary(explicit_path: str = "") -> Path:
     candidates: list[Path] = []
     if explicit_path.strip():
@@ -186,21 +154,6 @@ def _build_stream_receive_target(target: str) -> str:
     if value.startswith("tcp://"):
         endpoint = value.split("?", 1)[0][len("tcp://") :]
         return f"tcp://{endpoint}"
-    return value
-
-
-def _build_vlc_receive_target(target: str) -> str:
-    value = target.strip()
-    if value.startswith("udp://"):
-        endpoint = value.split("?", 1)[0][len("udp://") :]
-        if endpoint.startswith("@"):
-            return f"udp://{endpoint}"
-        if ":" in endpoint:
-            _host, port = endpoint.rsplit(":", 1)
-            return f"udp://@:{port}"
-        return f"udp://@:{endpoint}"
-    if value.startswith("tcp://"):
-        return value.split("?", 1)[0]
     return value
 
 
@@ -244,26 +197,6 @@ def _build_ffplay_command(spec: FinalStreamViewerSpec) -> list[str]:
         )
         target = target.split("?", 1)[0]
     command.extend(["-i", target])
-    return command
-
-
-def _build_vlc_command(spec: FinalStreamViewerSpec) -> list[str]:
-    target = _build_vlc_receive_target(spec.target)
-    cache_ms = "120"
-    command = [
-        str(resolve_vlc_binary(spec.ffplay_bin or spec.ffmpeg_bin)),
-        "--no-video-title-show",
-        f"--network-caching={cache_ms}",
-        f"--live-caching={cache_ms}",
-        f"--udp-caching={cache_ms}",
-        "--clock-jitter=0",
-        "--clock-synchro=0",
-        "--drop-late-frames",
-        "--skip-frames",
-        "--avcodec-hw=none",
-        f"--meta-title={spec.window_title}",
-        target,
-    ]
     return command
 
 
@@ -328,26 +261,11 @@ def _launch_ffplay_process(
     )
 
 
-def _launch_vlc_process(
-    spec: FinalStreamViewerSpec,
-    *,
-    startupinfo: subprocess.STARTUPINFO | None,
-) -> subprocess.Popen[bytes]:
-    return subprocess.Popen(
-        _build_vlc_command(spec),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-        creationflags=spec.creationflags,
-        startupinfo=startupinfo,
-    )
-
-
 def _viewer_backend_order(backend: str) -> tuple[str, ...]:
     selected = str(backend or "auto").strip().lower()
     if selected == "auto":
         return ("ffplay", "opencv")
-    if selected in {"ffplay", "opencv", "vlc-low-latency"}:
+    if selected in {"ffplay", "opencv"}:
         return (selected,)
     raise ValueError(f"unsupported viewer backend: {backend}")
 
@@ -365,14 +283,10 @@ def launch_final_stream_viewer(spec: FinalStreamViewerSpec) -> subprocess.Popen[
             process = (
                 _launch_ffplay_process(spec, startupinfo=startupinfo)
                 if backend_name == "ffplay"
-                else (
-                    _launch_vlc_process(spec, startupinfo=startupinfo)
-                    if backend_name == "vlc-low-latency"
-                    else _launch_viewer_process(spec, startupinfo=startupinfo)
-                )
+                else _launch_viewer_process(spec, startupinfo=startupinfo)
             )
             time.sleep(0.6)
-            if backend_name in {"ffplay", "vlc-low-latency"}:
+            if backend_name == "ffplay":
                 if process.poll() is None:
                     setattr(process, "_hogak_viewer_backend", backend_name)
                     return process
