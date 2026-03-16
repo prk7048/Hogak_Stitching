@@ -1,0 +1,21 @@
+{
+  "version": 6,
+  "configurePresets": [
+    {
+      "name": "windows-release-local",
+      "inherits": "windows-release",
+      "cacheVariables": {
+        "OpenCV_DIR": "C:/path/to/opencv/install/x64/vc17/staticlib",
+        "HOGAK_FFMPEG_DEV_ROOT": "C:/path/to/ffmpeg-dev/current",
+        "CUDAToolkit_ROOT": "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v13.1"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "build-windows-release-local",
+      "configurePreset": "windows-release-local",
+      "configuration": "Release"
+    }
+  ]
+}

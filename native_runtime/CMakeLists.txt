@@ -12,11 +12,39 @@ endif()
 option(NATIVE_RUNTIME_ENABLE_WARNINGS "Enable extra warnings" ON)
 option(HOGAK_ENABLE_GPU_DIRECT_AVCODEC "Enable dependency tracking for a future libavcodec/NVENC gpu-direct writer" ON)
 
-set(HOGAK_LOCAL_OPENCV_DIR
+set(HOGAK_REPO_LOCAL_OPENCV_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/opencv-python/_skbuild/win-amd64-3.12/cmake-install/x64/vc17/staticlib"
 )
-if(NOT OpenCV_DIR AND EXISTS "${HOGAK_LOCAL_OPENCV_DIR}/OpenCVConfig.cmake")
-    set(OpenCV_DIR "${HOGAK_LOCAL_OPENCV_DIR}" CACHE PATH "Local OpenCV config path")
+set(HOGAK_LOCAL_OPENCV_DIR "" CACHE PATH "Optional repo-local OpenCV config directory override")
+
+set(_hogak_opencv_candidates "")
+if(OpenCV_DIR)
+    list(APPEND _hogak_opencv_candidates "${OpenCV_DIR}")
+endif()
+if(DEFINED ENV{OpenCV_DIR} AND NOT "$ENV{OpenCV_DIR}" STREQUAL "")
+    list(APPEND _hogak_opencv_candidates "$ENV{OpenCV_DIR}")
+endif()
+if(DEFINED ENV{OPENCV_DIR} AND NOT "$ENV{OPENCV_DIR}" STREQUAL "")
+    list(APPEND _hogak_opencv_candidates "$ENV{OPENCV_DIR}")
+endif()
+if(HOGAK_LOCAL_OPENCV_DIR)
+    list(APPEND _hogak_opencv_candidates "${HOGAK_LOCAL_OPENCV_DIR}")
+endif()
+list(APPEND _hogak_opencv_candidates "${HOGAK_REPO_LOCAL_OPENCV_DIR}")
+
+set(_hogak_opencv_resolved "")
+foreach(_hogak_candidate IN LISTS _hogak_opencv_candidates)
+    if(NOT _hogak_candidate)
+        continue()
+    endif()
+    if(EXISTS "${_hogak_candidate}/OpenCVConfig.cmake")
+        set(_hogak_opencv_resolved "${_hogak_candidate}")
+        break()
+    endif()
+endforeach()
+
+if(NOT OpenCV_DIR AND _hogak_opencv_resolved)
+    set(OpenCV_DIR "${_hogak_opencv_resolved}" CACHE PATH "Resolved OpenCV config path" FORCE)
 endif()
 
 set(HOGAK_FFMPEG_DEV_ROOT "" CACHE PATH "FFmpeg development root containing include/ and lib/ for future gpu-direct writer work")
@@ -36,6 +64,12 @@ if(HOGAK_ENABLE_GPU_DIRECT_AVCODEC)
     set(_hogak_ffmpeg_dev_candidates "")
     if(HOGAK_FFMPEG_DEV_ROOT)
         list(APPEND _hogak_ffmpeg_dev_candidates "${HOGAK_FFMPEG_DEV_ROOT}")
+    endif()
+    if(DEFINED ENV{HOGAK_FFMPEG_DEV_ROOT} AND NOT "$ENV{HOGAK_FFMPEG_DEV_ROOT}" STREQUAL "")
+        list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{HOGAK_FFMPEG_DEV_ROOT}")
+    endif()
+    if(DEFINED ENV{FFMPEG_DEV_ROOT} AND NOT "$ENV{FFMPEG_DEV_ROOT}" STREQUAL "")
+        list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{FFMPEG_DEV_ROOT}")
     endif()
     list(APPEND _hogak_ffmpeg_dev_candidates
         "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/ffmpeg-dev/current"
@@ -73,6 +107,10 @@ else()
     set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS
         "disabled by HOGAK_ENABLE_GPU_DIRECT_AVCODEC=OFF")
 endif()
+
+message(STATUS "Hogak OpenCV_DIR=${OpenCV_DIR}")
+message(STATUS "Hogak FFmpeg dev root=${HOGAK_GPU_DIRECT_FFMPEG_DEV_ROOT}")
+message(STATUS "Hogak gpu-direct status=${HOGAK_GPU_DIRECT_DEPENDENCY_STATUS}")
 
 set(HOGAK_GPU_DIRECT_AVCODEC_ENABLED_INT 0)
 if(HOGAK_GPU_DIRECT_AVCODEC_ENABLED)

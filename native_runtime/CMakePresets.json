@@ -7,23 +7,27 @@
   },
   "configurePresets": [
     {
+      "name": "windows-base",
+      "hidden": true,
+      "generator": "Visual Studio 17 2022",
+      "cacheVariables": {}
+    },
+    {
       "name": "windows-debug",
       "displayName": "Windows Debug",
-      "generator": "Visual Studio 17 2022",
+      "inherits": "windows-base",
       "binaryDir": "${sourceDir}/build/windows-debug",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Debug",
-        "OpenCV_DIR": "${sourceDir}/../.third_party/opencv-python/_skbuild/win-amd64-3.12/cmake-install/x64/vc17/staticlib"
+        "CMAKE_BUILD_TYPE": "Debug"
       }
     },
     {
       "name": "windows-release",
       "displayName": "Windows Release",
-      "generator": "Visual Studio 17 2022",
+      "inherits": "windows-base",
       "binaryDir": "${sourceDir}/build/windows-release",
       "cacheVariables": {
-        "CMAKE_BUILD_TYPE": "Release",
-        "OpenCV_DIR": "${sourceDir}/../.third_party/opencv-python/_skbuild/win-amd64-3.12/cmake-install/x64/vc17/staticlib"
+        "CMAKE_BUILD_TYPE": "Release"
       }
     }
   ],
