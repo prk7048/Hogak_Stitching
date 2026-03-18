@@ -26,7 +26,7 @@ RTSP input -> decode -> pair/sync -> stitch -> encode -> output stream
   - ffmpeg decode
   - frame pairing and sync
   - GPU warp/blend
-  - ffmpeg encode and output
+  - ffmpeg/libav encode and output
 
 즉 Python은 운영 도구이고, 실제 메인 엔진은 C++ runtime이다.
 
@@ -63,11 +63,19 @@ RTSP input -> decode -> pair/sync -> stitch -> encode -> output stream
 
 현재 운영 기본값은 realtime 기준으로 정리되고 있다.
 
-- inspection target: local encoded output probe path
-- output resolution: `1920x1080`
+- inspection target: viewer on일 때의 local encoded probe path
+- transmit resolution: stitched output size 그대로
 - codec baseline: `h264_nvenc`
-- runtime preset: realtime 중심
+- runtime preset: `realtime_hq_1080p` baseline, `realtime_gpu_1080p` optional
 - calibration mode baseline: assisted-first
+
+추가 운영 기준:
+
+- input runtime: `ffmpeg-cuda`
+- input pipe format: `nv12`
+- pair mode baseline: `service`
+- transmit runtime baseline: `gpu-direct`
+- viewer off면 probe는 기본적으로 꺼진다
 
 ## What This Project Is Not
 

@@ -18,7 +18,7 @@
 완료 기준:
 
 - 기본 site config 위에 운영 profile을 덧씌울 수 있어야 한다
-- Python CLI와 `.cmd` 스크립트가 같은 profile을 읽어야 한다
+- Python CLI와 local override가 같은 profile 구조를 읽어야 한다
 
 현재 구조:
 
@@ -48,23 +48,20 @@
 
 완료 기준:
 
-- repo 전체를 들고 가지 않아도 runtime bundle을 만들 수 있어야 한다
-- bundle 안에 필요한 실행 파일, config, data, launch script가 같이 들어 있어야 한다
+- 실행에 필요한 파일 묶음을 repo 구조와 분리해서 설명할 수 있어야 한다
+- 다른 Windows 장비에서도 필요한 경로만 복사해서 direct Python 실행이 가능해야 한다
 
-현재는 별도 패키징 스크립트를 유지하지 않는다.
+현재는 별도 패키징 스크립트나 자동 bundle 경로를 유지하지 않는다.
+배포는 필요한 디렉터리를 수동으로 복사하는 방식을 기준으로 본다.
 
-생성 결과 기본 위치:
+기본 복사 대상:
 
-- `dist/runtime-bundle/`
-
-포함 내용:
-
-- `stitching/`
 - `config/`
 - `data/`
-- `output/` placeholder
+- `stitching/`
 - `native_runtime/build/windows-release/Release/stitch_runtime.exe`
-- `.third_party/ffmpeg/current/bin/*`
+- 필요한 FFmpeg runtime 파일
+- 필요한 OpenCV/CUDA runtime DLL
 
 예:
 
@@ -79,7 +76,7 @@ python -m stitching.cli native-runtime --no-output-ui --no-viewer --duration-sec
 - 어떤 환경이 지원 대상인지 짧고 명확하게 말할 수 있어야 한다
 - 현재 머신이 지원 대상인지 바로 점검할 수 있어야 한다
 
-현재는 별도 support checker 대신 headless runtime smoke를 지원 여부 기준으로 본다.
+현재는 별도 support checker보다 headless runtime smoke를 1차 지원 여부 기준으로 본다.
 
 예:
 
@@ -110,6 +107,6 @@ python -m stitching.cli native-runtime --no-output-ui --no-viewer --duration-sec
 
 남은 실무 작업:
 
-1. bundle을 다른 Windows 머신에 복사해서 실제 실행 검증
-2. `prod` profile을 현장 값으로 확정
+1. 필요한 실행 디렉터리를 다른 Windows 머신에 복사해서 실제 실행 검증
+2. `prod` profile과 `runtime.local.json` 운영 규칙 확정
 3. 운영자가 보는 “장비 점검 순서”를 한 장짜리 체크리스트로 더 축약
