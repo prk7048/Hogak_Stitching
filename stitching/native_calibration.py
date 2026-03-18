@@ -10,8 +10,12 @@ import time
 from dataclasses import dataclass
 from typing import Iterator
 
-import cv2
 import numpy as np
+
+try:
+    import cv2  # type: ignore
+except ModuleNotFoundError:
+    cv2 = None  # type: ignore[assignment]
 
 from stitching.core import (
     StitchConfig,
@@ -1218,6 +1222,9 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
 
 
 def run_native_calibration(args: argparse.Namespace) -> int:
+    if cv2 is None:
+        print("Missing dependency: opencv-python. Install requirements in your venv first.")
+        return 2
     require_configured_rtsp_urls(
         str(args.left_rtsp),
         str(args.right_rtsp),
@@ -1248,11 +1255,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     except StitchingFailure as exc:
         print(f"native calibration failed: {exc.code.value}: {exc.detail}")
         return 2
-    except ModuleNotFoundError as exc:
-        if exc.name == "cv2":
-            print("Missing dependency: opencv-python. Install requirements in your venv first.")
-            return 2
-        raise
 
     output_width, output_height = result["output_resolution"]
     print(
