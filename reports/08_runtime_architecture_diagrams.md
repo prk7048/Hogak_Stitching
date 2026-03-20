@@ -65,39 +65,39 @@ flowchart TB
 ```mermaid
 flowchart LR
     subgraph Cameras
-        LCam[Left Camera RTSP]
-        RCam[Right Camera RTSP]
+        LCam["Left Camera RTSP"]
+        RCam["Right Camera RTSP"]
     end
 
     subgraph Input[Input Layer]
-        LFfmpeg[left ffmpeg subprocess]
-        RFfmpeg[right ffmpeg subprocess]
-        LReader[Left Reader Thread]
-        RReader[Right Reader Thread]
-        LBuf[left ring buffer]
-        RBuf[right ring buffer]
+        LFfmpeg["left ffmpeg subprocess"]
+        RFfmpeg["right ffmpeg subprocess"]
+        LReader["Left Reader Thread"]
+        RReader["Right Reader Thread"]
+        LBuf["left ring buffer"]
+        RBuf["right ring buffer"]
     end
 
     subgraph Main[Main Stitch Engine]
-        Tick[Main Thread<br/>engine.tick()]
-        Pair[Pair selection / sync]
-        Decode[decode / resize / upload]
-        Warp[warpPerspective]
-        Blend[feather blend]
-        Reuse[stale reuse]
+        Tick["Main Thread - engine.tick()"]
+        Pair["Pair selection and sync"]
+        Decode["decode resize upload"]
+        Warp["warpPerspective"]
+        Blend["feather blend"]
+        Reuse["stale reuse"]
     end
 
     subgraph Output[Output Layer]
-        ProbeWriter[Probe Writer Thread]
-        TxWriter[Transmit Writer Thread]
-        ProbeOut[Probe stream]
-        TxOut[Transmit stream]
+        ProbeWriter["Probe Writer Thread"]
+        TxWriter["Transmit Writer Thread"]
+        ProbeOut["Probe stream"]
+        TxOut["Transmit stream"]
     end
 
     subgraph Control[Python Control Plane]
-        CLI[python -m stitching.cli native-runtime]
-        Config[config/runtime.json + profile]
-        Homo[data/runtime_homography.json]
+        CLI["python -m stitching.cli native-runtime"]
+        Config["config runtime.json plus profile"]
+        Homo["data runtime_homography.json"]
     end
 
     LCam --> LFfmpeg --> LReader --> LBuf
@@ -130,11 +130,11 @@ flowchart LR
 
 ```mermaid
 flowchart TB
-    M[Main Thread<br/>runtime_main.cpp -> engine.tick()]
-    L[Left Reader Thread]
-    R[Right Reader Thread]
-    P[Probe Writer Thread]
-    T[Transmit Writer Thread]
+    M["Main Thread - runtime_main.cpp to engine.tick()"]
+    L["Left Reader Thread"]
+    R["Right Reader Thread"]
+    P["Probe Writer Thread"]
+    T["Transmit Writer Thread"]
 
     L --> M
     R --> M
@@ -155,17 +155,17 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    A[RTSP stream<br/>H.264/H.265] --> B[ffmpeg decode]
-    B --> C[rawvideo input<br/>usually nv12]
-    C --> D[reader buffer<br/>frame + seq + timestamp]
-    D --> E[pair/sync selection]
-    E --> F[GPU upload / prepare]
-    F --> G[warpPerspective]
-    G --> H[feather blend]
-    H --> I[stitched frame]
-    I --> J[gpu-direct or ffmpeg writer]
-    J --> K[H.264 encode]
-    K --> L[UDP/TCP output]
+    A["RTSP stream - H.264 or H.265"] --> B["ffmpeg decode"]
+    B --> C["rawvideo input - usually nv12"]
+    C --> D["reader buffer - frame seq timestamp"]
+    D --> E["pair and sync selection"]
+    E --> F["GPU upload and prepare"]
+    F --> G["warpPerspective"]
+    G --> H["feather blend"]
+    H --> I["stitched frame"]
+    I --> J["gpu-direct or ffmpeg writer"]
+    J --> K["H.264 encode"]
+    K --> L["UDP or TCP output"]
 ```
 
 이 경로에서 중요한 점:
@@ -179,12 +179,12 @@ flowchart LR
 
 ```mermaid
 flowchart LR
-    A[Camera RTSP] --> B[ffmpeg decode]
-    B --> C[CPU RAM<br/>reader buffer]
-    C --> D[GPU upload]
-    D --> E[GPU VRAM<br/>warp + blend]
-    E --> F[gpu-direct encode]
-    F --> G[Network]
+    A["Camera RTSP"] --> B["ffmpeg decode"]
+    B --> C["CPU RAM - reader buffer"]
+    C --> D["GPU upload"]
+    D --> E["GPU VRAM - warp and blend"]
+    E --> F["gpu-direct encode"]
+    F --> G["Network"]
 ```
 
 현재 baseline에서 좋은 경로는 위와 같다.
@@ -209,4 +209,3 @@ flowchart LR
 6. [ffmpeg_rtsp_reader.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/input/ffmpeg_rtsp_reader.cpp)
 7. [stitch_engine.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/stitch_engine.cpp)
 8. [gpu_direct_output_writer.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/gpu_direct_output_writer.cpp)
-
