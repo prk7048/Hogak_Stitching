@@ -192,7 +192,6 @@ probe는 아래 둘 중 하나만 허용한다.
 이번 계획의 우선순위 밖인 것:
 
 - calibration 품질 개선
-- deep matcher 실제 연결
 - UI polish
 - 운영 편의 기능 추가
 

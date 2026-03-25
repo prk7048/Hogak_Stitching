@@ -93,15 +93,9 @@ def _add_native_calibration_args(
     )
     cmd.add_argument(
         "--match-backend",
-        choices=["auto", "classic", "deep"],
-        default="auto",
-        help="Match backend for auto/assisted reinforcement. auto falls back to classic if deep is unavailable.",
-    )
-    cmd.add_argument(
-        "--deep-backend",
-        choices=["auto", "lightglue", "loftr"],
-        default="auto",
-        help="Preferred deep matcher backend when match-backend uses deep. auto tries LightGlue first, then LoFTR.",
+        choices=["classic"],
+        default="classic",
+        help="Calibration match backend. The current path uses the classic matcher only.",
     )
     cmd.add_argument(
         "--launch-runtime",
@@ -110,8 +104,11 @@ def _add_native_calibration_args(
     )
     cmd.add_argument("--min-matches", type=int, default=40)
     cmd.add_argument("--min-inliers", type=int, default=20)
+    # ratio_test : 값이 작을수록 정확도가 높아지고, 매칭되는 점이 적어짐
     cmd.add_argument("--ratio-test", type=float, default=0.75)
+    # Ransac 알고리즘이 가짜 매칭(outlier)를 골라낼 떄 사용하는 허용 오차거리 (오차가 이 안으로 들어와야 진짜 매칭으로 인정)
     cmd.add_argument("--ransac-thresh", type=float, default=5.0)
+    # 이미지 한장에서 찾을 특징점의 최대 갯수
     cmd.add_argument("--max-features", type=int, default=4000)
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

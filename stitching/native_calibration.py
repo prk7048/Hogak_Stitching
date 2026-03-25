@@ -8,14 +8,26 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from typing import Iterator
+from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import numpy as np
 
+if TYPE_CHECKING:
+    import cv2 as cv2_types
+    CvDMatch = cv2_types.DMatch
+    CvKeyPoint = cv2_types.KeyPoint
+    CvVideoCapture = cv2_types.VideoCapture
+else:
+    CvDMatch = Any
+    CvKeyPoint = Any
+    CvVideoCapture = Any
+
 try:
-    import cv2  # type: ignore
+    import cv2 as _cv2  # type: ignore
 except ModuleNotFoundError:
-    cv2 = None  # type: ignore[assignment]
+    _cv2 = None
+
+cv2 = cast(Any, _cv2)
 
 from stitching.core import (
     StitchConfig,
@@ -25,7 +37,6 @@ from stitching.core import (
     _estimate_homography,
     _prepare_warp_plan,
 )
-from stitching.deep_feature_matching import detect_and_match_deep
 from stitching.errors import ErrorCode
 from stitching.project_defaults import (
     DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
@@ -47,17 +58,16 @@ class NativeCalibrationConfig(StitchConfig):
     calibration_mode: str = "assisted"
     assisted_reproj_threshold: float = 12.0
     assisted_max_auto_matches: int = 600
-    match_backend: str = "auto"
-    deep_backend: str = "auto"
+    match_backend: str = "classic"
 
 
 @dataclass(slots=True)
 class _CalibrationCandidate:
     homography: np.ndarray
     inlier_mask: np.ndarray
-    keypoints_left: list[cv2.KeyPoint]
-    keypoints_right: list[cv2.KeyPoint]
-    matches: list[cv2.DMatch]
+    keypoints_left: list[CvKeyPoint]
+    keypoints_right: list[CvKeyPoint]
+    matches: list[CvDMatch]
     calibration_mode: str
     transform_model: str
     seed_guidance_model: str
@@ -432,7 +442,7 @@ class _FfmpegCaptureEnv:
             os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = self._prev
 
 
-def _open_capture(url: str, transport: str, timeout_sec: float) -> cv2.VideoCapture:
+def _open_capture(url: str, transport: str, timeout_sec: float) -> CvVideoCapture:
     with _FfmpegCaptureEnv(transport=transport, timeout_sec=timeout_sec):
         cap = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
     if not cap.isOpened():
@@ -556,7 +566,7 @@ def _detect_and_match_classic_raw(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
-) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch]]:
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch]]:
     gray_left = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
     gray_right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
     detector = cv2.ORB_create(nfeatures=config.max_features)
@@ -566,7 +576,7 @@ def _detect_and_match_classic_raw(
         raise StitchingFailure(ErrorCode.OVERLAP_LOW, "descriptor extraction failed")
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     knn_matches = matcher.knnMatch(descriptors_left, descriptors_right, k=2)
-    good_matches: list[cv2.DMatch] = []
+    good_matches: list[CvDMatch] = []
     for pair in knn_matches:
         if len(pair) < 2:
             continue
@@ -597,7 +607,7 @@ def _build_assisted_matches(
     config: NativeCalibrationConfig,
     left_points: list[tuple[float, float]],
     right_points: list[tuple[float, float]],
-) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], str, str, str]:
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str, str, str]:
     if not left_points:
         keypoints_left, keypoints_right, matches, backend_name = _detect_auto_matches(left, right, config)
         return keypoints_left, keypoints_right, matches, "auto", "none", backend_name
@@ -606,7 +616,7 @@ def _build_assisted_matches(
     seed_transform, seed_model = _estimate_seed_guidance_transform(left_points, right_points, config)
     threshold_px = _guidance_threshold_px(config, seed_model)
     filtered_auto_matches = []
-    scored_matches: list[tuple[float, cv2.DMatch]] = []
+    scored_matches: list[tuple[float, CvDMatch]] = []
     for match in auto_matches:
         left_pt = keypoints_left_auto[match.queryIdx].pt
         right_pt = keypoints_right_auto[match.trainIdx].pt
@@ -630,25 +640,14 @@ def _detect_auto_matches(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
-) -> tuple[list[cv2.KeyPoint], list[cv2.KeyPoint], list[cv2.DMatch], str]:
-    backend = str(config.match_backend).lower().strip()
-    if backend in {"auto", "deep"}:
-        try:
-            deep_result = detect_and_match_deep(left, right, config)
-            return deep_result.keypoints_left, deep_result.keypoints_right, deep_result.matches, deep_result.backend_name
-        except StitchingFailure as exc:
-            if backend == "deep":
-                raise
-            if exc.code != ErrorCode.INTERNAL_ERROR:
-                raise
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
     keypoints_left, keypoints_right, matches = _detect_and_match_classic_raw(left, right, config)
     if len(matches) < int(config.min_matches):
         raise StitchingFailure(
             ErrorCode.OVERLAP_LOW,
             f"matches below threshold: {len(matches)} < {int(config.min_matches)}",
         )
-    backend_name = "classic" if backend != "deep" else "classic_fallback"
-    return keypoints_left, keypoints_right, matches, backend_name
+    return keypoints_left, keypoints_right, matches, "classic"
 
 
 def _validate_calibration_quality(
@@ -807,9 +806,9 @@ def _clamp_unit(value: float) -> float:
 
 def _mean_reprojection_error(
     homography: np.ndarray,
-    keypoints_left: list[cv2.KeyPoint],
-    keypoints_right: list[cv2.KeyPoint],
-    matches: list[cv2.DMatch],
+    keypoints_left: list[CvKeyPoint],
+    keypoints_right: list[CvKeyPoint],
+    matches: list[CvDMatch],
     inlier_mask: np.ndarray,
 ) -> float:
     errors: list[float] = []
@@ -899,9 +898,9 @@ def _build_candidate(
     *,
     left: np.ndarray,
     right: np.ndarray,
-    keypoints_left: list[cv2.KeyPoint],
-    keypoints_right: list[cv2.KeyPoint],
-    matches: list[cv2.DMatch],
+    keypoints_left: list[CvKeyPoint],
+    keypoints_right: list[CvKeyPoint],
+    matches: list[CvDMatch],
     calibration_mode: str,
     seed_guidance_model: str,
     backend_name: str,
@@ -993,9 +992,9 @@ def _build_candidate(
 def _draw_inlier_preview(
     left: np.ndarray,
     right: np.ndarray,
-    keypoints_left: list[cv2.KeyPoint],
-    keypoints_right: list[cv2.KeyPoint],
-    matches: list[cv2.DMatch],
+    keypoints_left: list[CvKeyPoint],
+    keypoints_right: list[CvKeyPoint],
+    matches: list[CvDMatch],
     inlier_mask: np.ndarray,
 ) -> np.ndarray:
     return cv2.drawMatches(
@@ -1154,7 +1153,6 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "process_scale": float(config.process_scale),
         "manual_points_count": int(min(len(left_points), len(right_points))),
         "match_backend_requested": str(config.match_backend),
-        "deep_backend_requested": str(config.deep_backend),
         "match_backend_effective": best_candidate.backend_name,
         "selected_candidate": calibration_mode_effective,
         "seed_guidance_model": seed_guidance_model,
@@ -1222,7 +1220,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
 
 
 def run_native_calibration(args: argparse.Namespace) -> int:
-    if cv2 is None:
+    if _cv2 is None:
         print("Missing dependency: opencv-python. Install requirements in your venv first.")
         return 2
     require_configured_rtsp_urls(
@@ -1243,7 +1241,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         assisted_reproj_threshold=max(1.0, float(args.assisted_reproj_threshold)),
         assisted_max_auto_matches=max(0, int(args.assisted_max_auto_matches)),
         match_backend=str(args.match_backend),
-        deep_backend=str(args.deep_backend),
         min_matches=max(8, int(args.min_matches)),
         min_inliers=max(6, int(args.min_inliers)),
         ratio_test=float(args.ratio_test),
