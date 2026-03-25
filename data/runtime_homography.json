@@ -1,20 +1,20 @@
 {
   "version": 1,
-  "saved_at_epoch_sec": 1773640283,
+  "saved_at_epoch_sec": 1774333065,
   "homography": [
     [
-      0.8391504531573526,
-      0.0343510210138103,
-      428.02043176323673
+      1.7493041406304475,
+      -0.038786391233034685,
+      -693.5985345999599
     ],
     [
-      -0.06027112622610677,
-      1.0526384005534815,
-      -13.65839043569632
+      0.2676248375622032,
+      1.5419839466595462,
+      -383.55645956573284
     ],
     [
-      -0.0001197795534810165,
-      3.049136249900341e-05,
+      0.00032732859152909014,
+      7.395621788262223e-05,
       1.0
     ]
   ],
@@ -34,17 +34,17 @@
     "seed_guidance_model": "none",
     "candidate_failures": [],
     "candidate_count": 1,
-    "candidate_score": 0.8830253889720059,
-    "match_score": 0.8018580392935482,
-    "geometry_score": 1.0,
-    "visual_score": 0.8742739108486219,
-    "matches_count": 242,
-    "inliers_count": 74,
-    "inlier_ratio": 0.30578512396694213,
-    "mean_reprojection_error": 2.294037342071533,
-    "overlap_luma_diff": 0.13672799192292892,
-    "overlap_edge_diff": 0.11005671247674488,
-    "ghosting_score": 0.12472591617214612,
+    "candidate_score": 0.9177453951288372,
+    "match_score": 0.9212693164887651,
+    "geometry_score": 0.9275641025641026,
+    "visual_score": 0.9032281258803347,
+    "matches_count": 611,
+    "inliers_count": 382,
+    "inlier_ratio": 0.6252045826513911,
+    "mean_reprojection_error": 2.080721378326416,
+    "overlap_luma_diff": 0.11020522106135551,
+    "overlap_edge_diff": 0.0776395315057428,
+    "ghosting_score": 0.0955506607613298,
     "transform_model": "homography",
     "left_resolution": [
       1920,
@@ -55,8 +55,8 @@
       1080
     ],
     "output_resolution": [
-      2649,
-      1424
+      2614,
+      1571
     ],
     "debug_dir": "output\\calibration",
     "candidates": [
@@ -65,21 +65,21 @@
         "seed_guidance_model": "none",
         "backend_name": "classic",
         "transform_model": "homography",
-        "score": 0.8830253889720059,
-        "match_score": 0.8018580392935482,
-        "geometry_score": 1.0,
-        "visual_score": 0.8742739108486219,
-        "matches_count": 242,
-        "inliers_count": 74,
-        "inlier_ratio": 0.30578512396694213,
-        "mean_reprojection_error": 2.294037342071533,
+        "score": 0.9177453951288372,
+        "match_score": 0.9212693164887651,
+        "geometry_score": 0.9275641025641026,
+        "visual_score": 0.9032281258803347,
+        "matches_count": 611,
+        "inliers_count": 382,
+        "inlier_ratio": 0.6252045826513911,
+        "mean_reprojection_error": 2.080721378326416,
         "output_resolution": [
-          2649,
-          1424
+          2614,
+          1571
         ],
-        "overlap_luma_diff": 0.13672799192292892,
-        "overlap_edge_diff": 0.11005671247674488,
-        "ghosting_score": 0.12472591617214612,
+        "overlap_luma_diff": 0.11020522106135551,
+        "overlap_edge_diff": 0.0776395315057428,
+        "ghosting_score": 0.0955506607613298,
         "accepted": true
       }
     ]

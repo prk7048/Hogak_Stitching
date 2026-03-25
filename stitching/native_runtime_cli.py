@@ -16,82 +16,33 @@ from typing import Any
 from stitching.final_stream_viewer import FinalStreamViewerSpec, launch_final_stream_viewer
 from stitching.output_presets import OUTPUT_PRESETS, get_output_preset
 from stitching.project_defaults import (
-    DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
-    DEFAULT_NATIVE_INPUT_PIPE_FORMAT,
-    DEFAULT_NATIVE_INPUT_RUNTIME,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-    DEFAULT_NATIVE_OUTPUT_CADENCE_FPS,
-    DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS,
-    DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE,
-    DEFAULT_NATIVE_PROBE_SOURCE,
-    DEFAULT_NATIVE_PROBE_RUNTIME,
-    DEFAULT_NATIVE_PROBE_TARGET,
-    DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC,
-    DEFAULT_NATIVE_RTSP_TIMEOUT_SEC,
-    DEFAULT_NATIVE_RTSP_TRANSPORT,
-    DEFAULT_NATIVE_STATUS_INTERVAL_SEC,
-    DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
-    DEFAULT_NATIVE_TRANSMIT_BITRATE,
-    DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
-    DEFAULT_NATIVE_TRANSMIT_HEIGHT,
-    DEFAULT_NATIVE_TRANSMIT_PRESET,
-    DEFAULT_NATIVE_TRANSMIT_TARGET,
-    DEFAULT_NATIVE_TRANSMIT_RUNTIME,
-    DEFAULT_NATIVE_TRANSMIT_WIDTH,
-    default_native_viewer_backend,
     default_left_rtsp,
-    default_native_output_cadence_fps,
     default_output_standard,
     default_right_rtsp,
 )
 from stitching.runtime_client import RuntimeClient
 from stitching.runtime_launcher import RuntimeLaunchSpec
-from stitching.runtime_launcher import query_gpu_direct_status
-from stitching.runtime_site_config import require_configured_rtsp_urls
 
 
-DEFAULT_PROBE_TARGET = DEFAULT_NATIVE_PROBE_TARGET
-DEFAULT_TRANSMIT_TARGET = DEFAULT_NATIVE_TRANSMIT_TARGET
+DEFAULT_PROBE_TARGET = "udp://127.0.0.1:23000?pkt_size=1316"
+DEFAULT_TRANSMIT_TARGET = "udp://127.0.0.1:24000?pkt_size=1316"
 DEFAULT_VIEWER_TARGET = "udp://127.0.0.1:23000"
-DEFAULT_PROBE_SOURCE = DEFAULT_NATIVE_PROBE_SOURCE
+DEFAULT_PROBE_SOURCE = "auto"
 _OUTPUT_ROLE_FIELDS = ("runtime", "target", "codec", "bitrate", "preset", "muxer", "width", "height", "fps")
-_PROBE_OUTPUT_DEFAULTS = {
-    "runtime": DEFAULT_NATIVE_PROBE_RUNTIME,
-    "target": DEFAULT_NATIVE_PROBE_TARGET,
-    "codec": "h264_nvenc",
-    "bitrate": "",
-    "preset": "",
-    "muxer": "",
-    "width": 0,
-    "height": 0,
-    "fps": 0.0,
-    "debug_overlay": False,
-}
-_TRANSMIT_OUTPUT_DEFAULTS = {
-    "runtime": DEFAULT_NATIVE_TRANSMIT_RUNTIME,
-    "target": DEFAULT_NATIVE_TRANSMIT_TARGET,
-    "codec": "h264_nvenc",
-    "bitrate": DEFAULT_NATIVE_TRANSMIT_BITRATE,
-    "preset": DEFAULT_NATIVE_TRANSMIT_PRESET,
-    "muxer": "",
-    "width": DEFAULT_NATIVE_TRANSMIT_WIDTH,
-    "height": DEFAULT_NATIVE_TRANSMIT_HEIGHT,
-    "fps": 0.0,
-    "debug_overlay": DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
-}
 
 
-def _prompt_runtime_start(default_value: str, default_cadence_fps: float) -> tuple[str, float, bool]:
+def _prompt_runtime_start(default_value: str, *, default_vlc_low_latency: bool = False) -> tuple[str, bool, bool]:
     try:
         import tkinter as tk
         from tkinter import ttk
     except Exception:
-        return default_value, default_cadence_fps, False
+        return default_value, False, default_vlc_low_latency
 
     selection = {
         "value": default_value,
-        "cadence_fps": default_cadence_fps,
         "run_calibration_first": True,
+        "use_vlc_low_latency": bool(default_vlc_low_latency),
     }
     root = tk.Tk()
     root.title("Hogak Native Runtime")
@@ -109,34 +60,34 @@ def _prompt_runtime_start(default_value: str, default_cadence_fps: float) -> tup
     combo.set(current_label)
     combo.grid(row=1, column=0, pady=(8, 12), sticky="ew")
 
-    ttk.Label(frame, text="Select output cadence").grid(row=2, column=0, sticky="w")
-    cadence_values = ["30 fps", "25 fps"]
-    default_cadence_label = "25 fps" if float(default_cadence_fps) <= 25.0 else "30 fps"
-    cadence_combo = ttk.Combobox(frame, values=cadence_values, state="readonly", width=34)
-    cadence_combo.set(default_cadence_label)
-    cadence_combo.grid(row=3, column=0, pady=(8, 12), sticky="ew")
-
     run_calibration_var = tk.BooleanVar(value=True)
     ttk.Checkbutton(
         frame,
         text="Run calibration first",
         variable=run_calibration_var,
-    ).grid(row=4, column=0, sticky="w", pady=(0, 12))
+    ).grid(row=2, column=0, sticky="w", pady=(0, 12))
+
+    vlc_low_latency_var = tk.BooleanVar(value=bool(default_vlc_low_latency))
+    ttk.Checkbutton(
+        frame,
+        text="Open VLC low-latency transmit",
+        variable=vlc_low_latency_var,
+    ).grid(row=3, column=0, sticky="w", pady=(0, 12))
 
     def on_run() -> None:
         selection["value"] = key_by_label.get(combo.get(), default_value)
-        selection["cadence_fps"] = 25.0 if cadence_combo.get().startswith("25") else 30.0
         selection["run_calibration_first"] = bool(run_calibration_var.get())
+        selection["use_vlc_low_latency"] = bool(vlc_low_latency_var.get())
         root.destroy()
 
     def on_cancel() -> None:
         selection["value"] = default_value
-        selection["cadence_fps"] = default_cadence_fps
         selection["run_calibration_first"] = False
+        selection["use_vlc_low_latency"] = bool(default_vlc_low_latency)
         root.destroy()
 
     buttons = ttk.Frame(frame)
-    buttons.grid(row=5, column=0, sticky="e")
+    buttons.grid(row=4, column=0, sticky="e")
     ttk.Button(buttons, text="Run", command=on_run).grid(row=0, column=0, padx=(0, 8))
     ttk.Button(buttons, text="Cancel", command=on_cancel).grid(row=0, column=1)
 
@@ -145,14 +96,9 @@ def _prompt_runtime_start(default_value: str, default_cadence_fps: float) -> tup
     root.mainloop()
     return (
         str(selection["value"] or default_value),
-        float(selection["cadence_fps"] or default_cadence_fps),
         bool(selection["run_calibration_first"]),
+        bool(selection["use_vlc_low_latency"]),
     )
-
-
-def _argv_has_option(option_name: str) -> bool:
-    prefix = f"{option_name}="
-    return any(arg == option_name or arg.startswith(prefix) for arg in sys.argv[1:])
 
 
 class SystemStatsSampler:
@@ -217,7 +163,7 @@ class SystemStatsSampler:
             "last_error": str(self._last_error),
         }
 
-    def _sample_cpu(self) -> tuple[float, list[float]]:
+    def _sample_cpu(self) -> tuple[float, list[float]]: 
         if self._psutil is not None:
             try:
                 per_core = [float(v) for v in self._psutil.cpu_percent(interval=None, percpu=True)]
@@ -387,24 +333,18 @@ def _resolve_output_role(
     args: argparse.Namespace,
     *,
     alias_prefix: str,
-    defaults: dict[str, Any],
+    legacy_prefix: str,
 ) -> tuple[dict[str, Any], bool]:
-    config: dict[str, Any] = dict(defaults)
+    config: dict[str, Any] = {}
     explicit = False
-    explicit_fields: set[str] = set()
     for field in _OUTPUT_ROLE_FIELDS:
         alias_name = f"{alias_prefix}_{field}"
         alias_value = getattr(args, alias_name)
         if alias_value is not None:
             config[field] = alias_value
             explicit = True
-            explicit_fields.add(field)
-    alias_debug_overlay = getattr(args, f"{alias_prefix}_debug_overlay")
-    if alias_debug_overlay is not None:
-        config["debug_overlay"] = bool(alias_debug_overlay)
-        explicit = True
-        explicit_fields.add("debug_overlay")
-    config["_explicit_fields"] = explicit_fields
+            continue
+        config[field] = getattr(args, f"{legacy_prefix}_{field}")
     return config, explicit
 
 
@@ -423,7 +363,6 @@ def _apply_output_preset(
     preserve_existing: bool,
 ) -> dict[str, Any]:
     updated = dict(config)
-    explicit_fields = set(updated.get("_explicit_fields") or ())
     preset_values = {
         "width": int(preset.width),
         "height": int(preset.height),
@@ -435,8 +374,6 @@ def _apply_output_preset(
     for field, preset_value in preset_values.items():
         if not preserve_existing:
             updated[field] = preset_value
-            continue
-        if field in explicit_fields:
             continue
         current_value = updated.get(field)
         if field in {"width", "height"}:
@@ -496,14 +433,11 @@ def _resolve_probe_source(
     transmit_config: dict[str, Any],
 ) -> str:
     requested = str(getattr(args, "probe_source", DEFAULT_PROBE_SOURCE) or DEFAULT_PROBE_SOURCE).strip().lower()
-    probe_source_explicit = _argv_has_option("--probe-source")
     probe_has_target = _has_output_target(probe_config)
     standalone_probe_enabled = _is_enabled_output(probe_config)
     transmit_enabled = _is_enabled_output(transmit_config)
 
     if requested == "disabled":
-        return "disabled"
-    if not bool(getattr(args, "viewer", True)) and not probe_source_explicit and requested == "standalone":
         return "disabled"
     if requested == "standalone":
         if not standalone_probe_enabled:
@@ -515,32 +449,11 @@ def _resolve_probe_source(
         if not probe_has_target:
             raise ValueError("--probe-source transmit requires a probe target")
         return "transmit"
+    if transmit_enabled and probe_has_target:
+        return "transmit"
     if standalone_probe_enabled:
         return "standalone"
     return "disabled"
-
-
-def _gpu_direct_requested(*output_configs: dict[str, Any]) -> bool:
-    for config in output_configs:
-        if str(config.get("runtime") or "none").strip() == "gpu-direct" and _has_output_target(config):
-            return True
-    return False
-
-
-def _format_gpu_direct_preflight(status: dict[str, Any]) -> str:
-    provider = str(status.get("provider") or "unknown")
-    dependency_ready = bool(status.get("dependency_ready"))
-    message = str(status.get("status") or "").strip() or "unknown"
-    ffmpeg_dev_root = str(status.get("ffmpeg_dev_root") or "").strip()
-    parts = [
-        "gpu-direct preflight:",
-        f"provider={provider}",
-        f"dependency_ready={dependency_ready}",
-        f"status={message}",
-    ]
-    if ffmpeg_dev_root:
-        parts.append(f"ffmpeg_dev_root={ffmpeg_dev_root}")
-    return " ".join(parts)
 
 
 def _build_tee_leg(target: str, muxer: str) -> str:
@@ -557,47 +470,32 @@ def _build_tee_leg(target: str, muxer: str) -> str:
     return f"[{':'.join(options)}]{target}"
 
 
-def _build_transmit_output_with_mirrors(
-    transmit_config: dict[str, Any],
-    *,
-    mirror_targets: list[str],
-) -> dict[str, Any]:
-    mirrored = dict(transmit_config)
-    transmit_target = str(mirrored.get("target") or "").strip()
-    if not transmit_target:
-        raise ValueError("transmit output target is required for mirrored output mode")
-
-    transmit_muxer = str(mirrored.get("muxer") or _infer_output_muxer(transmit_target)).strip()
-    normalized_mirrors = [str(target or "").strip() for target in mirror_targets]
-    normalized_mirrors = [target for target in normalized_mirrors if target and target != transmit_target]
-    if not normalized_mirrors:
-        mirrored["muxer"] = transmit_muxer
-        mirrored["target"] = transmit_target
-        return mirrored
-
-    legs = [_build_tee_leg(transmit_target, transmit_muxer)]
-    seen_targets = {transmit_target}
-    for mirror_target in normalized_mirrors:
-        if mirror_target in seen_targets:
-            continue
-        mirror_muxer = _infer_output_muxer(mirror_target) or transmit_muxer
-        legs.append(_build_tee_leg(mirror_target, mirror_muxer))
-        seen_targets.add(mirror_target)
-
-    mirrored["muxer"] = "tee"
-    mirrored["target"] = "|".join(legs)
-    return mirrored
-
-
 def _build_mirrored_transmit_output(
     transmit_config: dict[str, Any],
     *,
     probe_target: str,
 ) -> dict[str, Any]:
-    return _build_transmit_output_with_mirrors(
-        transmit_config,
-        mirror_targets=[probe_target],
+    mirrored = dict(transmit_config)
+    transmit_target = str(mirrored.get("target") or "").strip()
+    if not transmit_target:
+        raise ValueError("transmit output target is required for mirrored probe mode")
+
+    probe_target = str(probe_target or "").strip()
+    transmit_muxer = str(mirrored.get("muxer") or _infer_output_muxer(transmit_target)).strip()
+    if not probe_target or probe_target == transmit_target:
+        mirrored["muxer"] = transmit_muxer
+        mirrored["target"] = transmit_target
+        return mirrored
+
+    probe_muxer = _infer_output_muxer(probe_target) or transmit_muxer
+    mirrored["muxer"] = "tee"
+    mirrored["target"] = "|".join(
+        [
+            _build_tee_leg(transmit_target, transmit_muxer),
+            _build_tee_leg(probe_target, probe_muxer),
+        ]
     )
+    return mirrored
 
 
 def _decorate_pipeline_metrics(
@@ -627,7 +525,7 @@ def _decorate_pipeline_metrics(
         projected["probe_frames_written"] = int(payload.get("output_frames_written") or 0)
         projected["probe_frames_dropped"] = int(payload.get("output_frames_dropped") or 0)
         projected["probe_effective_codec"] = str(payload.get("output_effective_codec") or "")
-        projected["probe_last_error"] = str(payload.get("output_last_error") or "")
+        projected["probe_last_error"] = str(payload.get("output_last_error") or "") 
     else:
         projected["probe_active"] = False
         projected["probe_width"] = 0
@@ -652,38 +550,47 @@ def _decorate_pipeline_metrics(
 
 
 def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
-    cmd.add_argument(
-        "--left-rtsp",
-        default=default_left_rtsp(),
-        help="Left RTSP URL (default: config/runtime.json or HOGAK_LEFT_RTSP)",
-    )
-    cmd.add_argument(
-        "--right-rtsp",
-        default=default_right_rtsp(),
-        help="Right RTSP URL (default: config/runtime.json or HOGAK_RIGHT_RTSP)",
-    )
-    cmd.add_argument("--input-runtime", choices=["ffmpeg-cpu", "ffmpeg-cuda"], default=DEFAULT_NATIVE_INPUT_RUNTIME)
-    cmd.add_argument("--input-pipe-format", choices=["bgr24", "nv12"], default=DEFAULT_NATIVE_INPUT_PIPE_FORMAT)
+    cmd.add_argument("--left-rtsp", default=default_left_rtsp(), help="Left RTSP URL")
+    cmd.add_argument("--right-rtsp", default=default_right_rtsp(), help="Right RTSP URL")
+    cmd.add_argument("--input-runtime", choices=["ffmpeg-cpu", "ffmpeg-cuda"], default="ffmpeg-cuda")
     cmd.add_argument("--ffmpeg-bin", default="", help="Optional explicit ffmpeg.exe path")
-    cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default=DEFAULT_NATIVE_RTSP_TRANSPORT)
-    cmd.add_argument(
-        "--input-buffer-frames",
-        type=int,
-        default=DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
-        help="Max buffered frames per RTSP reader",
-    )
-    cmd.add_argument("--disable-freeze-detection", action="store_true", help="Disable input freeze/motion probing for performance-focused runs")
-    cmd.add_argument("--rtsp-timeout-sec", type=float, default=DEFAULT_NATIVE_RTSP_TIMEOUT_SEC)
-    cmd.add_argument("--reconnect-cooldown-sec", type=float, default=DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC)
+    cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
+    cmd.add_argument("--input-buffer-frames", type=int, default=8, help="Max buffered frames per RTSP reader")
+    cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+    cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
     cmd.add_argument("--heartbeat-ms", type=int, default=1000)
+    cmd.add_argument("--homography-file", default=DEFAULT_NATIVE_HOMOGRAPHY_PATH, help="Optional fixed 3x3 homography JSON path")
+    cmd.add_argument("--output-runtime", choices=["none", "ffmpeg"], default="none")
+    cmd.add_argument("--output-profile", choices=["inspection", "production-compatible"], default="inspection")
+    cmd.add_argument("--output-target", default=DEFAULT_PROBE_TARGET, help="Legacy alias for local encoded probe target")
+    cmd.add_argument("--output-codec", default="h264_nvenc")
+    cmd.add_argument("--output-bitrate", default="12M")
+    cmd.add_argument("--output-preset", default="p4")
+    cmd.add_argument("--output-muxer", default="")
+    cmd.add_argument("--output-width", type=int, default=0)
+    cmd.add_argument("--output-height", type=int, default=0)
+    cmd.add_argument("--output-fps", type=float, default=0.0)
+    cmd.add_argument("--production-output-runtime", choices=["none", "ffmpeg"], default="ffmpeg")
     cmd.add_argument(
-        "--homography-file",
-        default=DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-        help="Optional fixed 3x3 homography JSON path (default: config/runtime.json)",
+        "--production-output-profile",
+        choices=["inspection", "production-compatible"],
+        default="production-compatible",
     )
+    cmd.add_argument(
+        "--production-output-target",
+        default=DEFAULT_TRANSMIT_TARGET,
+        help="Legacy alias for final transmitted encoded output target",
+    )
+    cmd.add_argument("--production-output-codec", default="h264_nvenc")
+    cmd.add_argument("--production-output-bitrate", default="12M")
+    cmd.add_argument("--production-output-preset", default="p4")
+    cmd.add_argument("--production-output-muxer", default="")
+    cmd.add_argument("--production-output-width", type=int, default=0)
+    cmd.add_argument("--production-output-height", type=int, default=0)
+    cmd.add_argument("--production-output-fps", type=float, default=0.0)
     cmd.add_argument(
         "--probe-output-runtime",
-        choices=["none", "ffmpeg", "gpu-direct"],
+        choices=["none", "ffmpeg"],
         default=None,
         help="Runtime for local post-encode probe output. Viewer reads this stream.",
     )
@@ -695,16 +602,15 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--probe-output-width", type=int, default=None, help="Probe width override")
     cmd.add_argument("--probe-output-height", type=int, default=None, help="Probe height override")
     cmd.add_argument("--probe-output-fps", type=float, default=None, help="Probe fps override")
-    cmd.add_argument("--probe-output-debug-overlay", action="store_true", default=None, help="Burn debug overlay into probe output")
     cmd.add_argument(
         "--probe-source",
         choices=["auto", "transmit", "standalone", "disabled"],
         default=DEFAULT_PROBE_SOURCE,
-        help="auto prefers a standalone local probe encode when enabled; use transmit only for explicit mirrored-transmit debugging",
+        help="auto mirrors transmit into a local debug receive path when transmit is enabled; otherwise uses standalone probe encode",
     )
     cmd.add_argument(
         "--transmit-output-runtime",
-        choices=["none", "ffmpeg", "gpu-direct"],
+        choices=["none", "ffmpeg"],
         default=None,
         help="Runtime for final transmitted encoded output",
     )
@@ -717,30 +623,17 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--transmit-output-height", type=int, default=None, help="Transmit height override")
     cmd.add_argument("--transmit-output-fps", type=float, default=None, help="Transmit fps override")
     cmd.add_argument(
-        "--transmit-output-debug-overlay",
-        action=argparse.BooleanOptionalAction,
-        default=None,
-        help="Burn debug overlay into transmit output",
-    )
-    cmd.add_argument(
         "--output-standard",
         choices=sorted(OUTPUT_PRESETS.keys()),
         default="",
         help="Named output preset. Python applies width/height/fps/codec/bitrate/muxer before launching runtime.",
     )
-    cmd.add_argument(
-        "--output-cadence-fps",
-        type=float,
-        choices=[25.0, 30.0],
-        default=default_native_output_cadence_fps(),
-        help="Encoded output cadence for probe/transmit. Default is 30fps; switch to 25fps for 25fps camera tests.",
-    )
     cmd.add_argument("--no-output-ui", action="store_true", help="Skip preset selection UI and use default output standard")
-    cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest", "service"], default="none")
+    cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest"], default="none")
     cmd.add_argument("--allow-frame-reuse", action="store_true", help="Allow stale one-side pair reuse for smoother output")
-    cmd.add_argument("--pair-reuse-max-age-ms", type=float, default=DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS)
-    cmd.add_argument("--pair-reuse-max-consecutive", type=int, default=DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE)
-    cmd.add_argument("--sync-match-max-delta-ms", type=float, default=DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS)
+    cmd.add_argument("--pair-reuse-max-age-ms", type=float, default=90.0)
+    cmd.add_argument("--pair-reuse-max-consecutive", type=int, default=2)
+    cmd.add_argument("--sync-match-max-delta-ms", type=float, default=35.0)
     cmd.add_argument("--sync-manual-offset-ms", type=float, default=0.0)
     cmd.add_argument("--stitch-output-scale", type=float, default=1.0)
     cmd.add_argument("--stitch-every-n", type=int, default=1)
@@ -748,12 +641,7 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--gpu-device", type=int, default=0)
     cmd.add_argument("--headless-benchmark", action="store_true")
     cmd.add_argument("--duration-sec", type=float, default=0.0, help="0 runs until Ctrl+C")
-    cmd.add_argument(
-        "--status-interval-sec",
-        type=float,
-        default=DEFAULT_NATIVE_STATUS_INTERVAL_SEC,
-        help="Status line interval while state is unchanged",
-    )
+    cmd.add_argument("--status-interval-sec", type=float, default=5.0, help="Status line interval while state is unchanged")
     cmd.add_argument("--monitor-mode", choices=["dashboard", "compact", "json"], default="dashboard")
     cmd.add_argument("--recent-events", type=int, default=8, help="How many recent non-metric events to keep in dashboard mode")
     cmd.add_argument("--verbose-events", action="store_true", help="Print every runtime event as raw JSON")
@@ -762,9 +650,20 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.set_defaults(viewer=True)
     cmd.add_argument(
         "--viewer-backend",
-        choices=["auto", "ffplay", "opencv"],
-        default=default_native_viewer_backend(),
+        choices=["auto", "ffplay", "vlc-low-latency", "opencv"],
+        default="auto",
         help="Viewer backend selection (auto prefers ffplay and falls back to OpenCV)",
+    )
+    cmd.add_argument(
+        "--open-vlc-low-latency",
+        action="store_true",
+        default=str(os.environ.get("HOGAK_OPEN_VLC_LOW_LATENCY", "0")).strip().lower() in {"1", "true", "yes", "on"},
+        help="Open an additional VLC low-latency window on the transmit output while keeping probe viewer behavior unchanged",
+    )
+    cmd.add_argument(
+        "--vlc-target",
+        default="",
+        help="Override VLC low-latency target (defaults to transmit output target)",
     )
     cmd.add_argument("--viewer-target", default="", help="Override viewer target (defaults to local probe stream)")
     cmd.add_argument("--viewer-title", default="Hogak Final Stream")
@@ -774,9 +673,6 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     parts: list[str] = []
     status = str(payload.get("status") or "-")
     parts.append(f"status={status}")
-    pair_mode = str(payload.get("sync_pair_mode") or "").strip()
-    if pair_mode:
-        parts.append(f"pair_mode={pair_mode}")
     parts.append(f"calibrated={bool(payload.get('calibrated'))}")
     parts.append(f"probe_source={str(payload.get('probe_source') or 'standalone')}")
     parts.append(f"probe_active={bool(payload.get('probe_active'))}")
@@ -794,9 +690,6 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     stitch_fps = payload.get("stitch_fps")
     if isinstance(stitch_fps, (int, float)):
         parts.append(f"stitch_fps={float(stitch_fps):.2f}")
-    stitch_actual_fps = payload.get("stitch_actual_fps")
-    if isinstance(stitch_actual_fps, (int, float)):
-        parts.append(f"stitch_actual_fps={float(stitch_actual_fps):.2f}")
     probe_written_fps = payload.get("probe_written_fps")
     if isinstance(probe_written_fps, (int, float)):
         parts.append(f"probe_fps={float(probe_written_fps):.2f}")
@@ -811,75 +704,10 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     right_age_ms = payload.get("right_age_ms")
     if isinstance(left_age_ms, (int, float)) and isinstance(right_age_ms, (int, float)):
         parts.append(f"input_age_ms=({float(left_age_ms):.0f},{float(right_age_ms):.0f})")
-    left_gap_ms = payload.get("left_avg_frame_interval_ms")
-    right_gap_ms = payload.get("right_avg_frame_interval_ms")
-    if isinstance(left_gap_ms, (int, float)) and isinstance(right_gap_ms, (int, float)):
-        parts.append(f"input_gap_ms=({float(left_gap_ms):.1f},{float(right_gap_ms):.1f})")
-    left_gap_max_ms = payload.get("left_max_frame_interval_ms")
-    right_gap_max_ms = payload.get("right_max_frame_interval_ms")
-    if isinstance(left_gap_max_ms, (int, float)) and isinstance(right_gap_max_ms, (int, float)):
-        if float(left_gap_max_ms) > 0.0 or float(right_gap_max_ms) > 0.0:
-            parts.append(f"gap_max_ms=({float(left_gap_max_ms):.1f},{float(right_gap_max_ms):.1f})")
-    left_buffer_span_ms = payload.get("left_buffer_span_ms")
-    right_buffer_span_ms = payload.get("right_buffer_span_ms")
-    if isinstance(left_buffer_span_ms, (int, float)) and isinstance(right_buffer_span_ms, (int, float)):
-        parts.append(f"queue_span_ms=({float(left_buffer_span_ms):.1f},{float(right_buffer_span_ms):.1f})")
-    left_read_ms = payload.get("left_avg_read_ms")
-    right_read_ms = payload.get("right_avg_read_ms")
-    if isinstance(left_read_ms, (int, float)) and isinstance(right_read_ms, (int, float)):
-        parts.append(f"read_ms=({float(left_read_ms):.2f},{float(right_read_ms):.2f})")
     left_buffered = int(payload.get("left_buffered_frames") or 0)
     right_buffered = int(payload.get("right_buffered_frames") or 0)
     if left_buffered > 0 or right_buffered > 0:
         parts.append(f"input_buffer=({left_buffered},{right_buffered})")
-    wait_both = int(payload.get("wait_both_streams_count") or 0)
-    wait_sync = int(payload.get("wait_sync_pair_count") or 0)
-    wait_next = int(payload.get("wait_next_frame_count") or 0)
-    wait_fresh = int(payload.get("wait_paired_fresh_count") or 0)
-    wait_total = wait_both + wait_sync + wait_next + wait_fresh
-    if wait_total > 0:
-        parts.append(f"waits=({wait_both},{wait_sync},{wait_next},{wait_fresh})")
-    wait_fresh_left = int(payload.get("wait_paired_fresh_left_count") or 0)
-    wait_fresh_right = int(payload.get("wait_paired_fresh_right_count") or 0)
-    wait_fresh_both = int(payload.get("wait_paired_fresh_both_count") or 0)
-    if wait_fresh_left > 0 or wait_fresh_right > 0 or wait_fresh_both > 0:
-        parts.append(f"fresh_waits=({wait_fresh_left},{wait_fresh_right},{wait_fresh_both})")
-    left_late_intervals = int(payload.get("left_late_frame_intervals") or 0)
-    right_late_intervals = int(payload.get("right_late_frame_intervals") or 0)
-    if left_late_intervals > 0 or right_late_intervals > 0:
-        parts.append(f"late_gap=({left_late_intervals},{right_late_intervals})")
-    left_fresh_wait_age_ms = payload.get("wait_paired_fresh_left_age_ms_avg")
-    right_fresh_wait_age_ms = payload.get("wait_paired_fresh_right_age_ms_avg")
-    if isinstance(left_fresh_wait_age_ms, (int, float)) and isinstance(right_fresh_wait_age_ms, (int, float)):
-        if float(left_fresh_wait_age_ms) > 0.0 or float(right_fresh_wait_age_ms) > 0.0:
-            parts.append(f"fresh_wait_age_ms=({float(left_fresh_wait_age_ms):.1f},{float(right_fresh_wait_age_ms):.1f})")
-    selected_left_lag_frames = int(payload.get("selected_left_lag_frames") or 0)
-    selected_right_lag_frames = int(payload.get("selected_right_lag_frames") or 0)
-    selected_left_lag_ms = payload.get("selected_left_lag_ms")
-    selected_right_lag_ms = payload.get("selected_right_lag_ms")
-    if (
-        selected_left_lag_frames > 0
-        or selected_right_lag_frames > 0
-        or (isinstance(selected_left_lag_ms, (int, float)) and float(selected_left_lag_ms) > 0.0)
-        or (isinstance(selected_right_lag_ms, (int, float)) and float(selected_right_lag_ms) > 0.0)
-    ):
-        parts.append(
-            "sel_lag="
-            f"({selected_left_lag_frames}/{float(selected_left_lag_ms or 0.0):.1f}ms,"
-            f"{selected_right_lag_frames}/{float(selected_right_lag_ms or 0.0):.1f}ms)"
-        )
-    left_launch_failures = int(payload.get("left_launch_failures") or 0)
-    right_launch_failures = int(payload.get("right_launch_failures") or 0)
-    if left_launch_failures > 0 or right_launch_failures > 0:
-        parts.append(f"launch_fail=({left_launch_failures},{right_launch_failures})")
-    left_read_failures = int(payload.get("left_read_failures") or 0)
-    right_read_failures = int(payload.get("right_read_failures") or 0)
-    if left_read_failures > 0 or right_read_failures > 0:
-        parts.append(f"read_fail=({left_read_failures},{right_read_failures})")
-    left_reader_restarts = int(payload.get("left_reader_restarts") or 0)
-    right_reader_restarts = int(payload.get("right_reader_restarts") or 0)
-    if left_reader_restarts > 0 or right_reader_restarts > 0:
-        parts.append(f"reader_restart=({left_reader_restarts},{right_reader_restarts})")
     left_motion = payload.get("left_motion_mean")
     right_motion = payload.get("right_motion_mean")
     if isinstance(left_motion, (int, float)) and isinstance(right_motion, (int, float)):
@@ -919,7 +747,6 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
 def _status_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
     return (
         payload.get("status"),
-        payload.get("sync_pair_mode"),
         payload.get("calibrated"),
         payload.get("probe_source"),
         payload.get("probe_active"),
@@ -934,12 +761,6 @@ def _status_signature(payload: dict[str, Any]) -> tuple[Any, ...]:
         payload.get("transmit_last_error"),
         payload.get("left_last_error"),
         payload.get("right_last_error"),
-        payload.get("left_launch_failures"),
-        payload.get("right_launch_failures"),
-        payload.get("left_read_failures"),
-        payload.get("right_read_failures"),
-        payload.get("left_reader_restarts"),
-        payload.get("right_reader_restarts"),
         payload.get("left_content_frozen"),
         payload.get("right_content_frozen"),
         payload.get("gpu_errors"),
@@ -1004,7 +825,6 @@ def _render_dashboard(
         "=" * min(columns, 120),
         (
             f"status={status}  calibrated={_format_flag(bool(payload.get('calibrated')))}  "
-            f"pair_mode={payload.get('sync_pair_mode') or '-'}  "
             f"probe_source={payload.get('probe_source') or '-'}  "
             f"viewer={_format_flag(viewer_enabled)}  updated_at={time.strftime('%H:%M:%S', time.localtime(last_update_sec))}"
         ),
@@ -1025,7 +845,6 @@ def _render_dashboard(
         ),
         (
             f"stitch internal_fps={float(payload.get('stitch_fps') or 0.0):6.2f}  "
-            f"actual_fps={float(payload.get('stitch_actual_fps') or 0.0):6.2f}  "
             f"worker_fps={float(payload.get('worker_fps') or 0.0):6.2f}  "
             f"probe_fps={float(payload.get('probe_written_fps') or 0.0):6.2f}  "
             f"transmit_fps={float(payload.get('transmit_written_fps') or 0.0):6.2f}  "
@@ -1055,16 +874,6 @@ def _render_dashboard(
             f"errors gpu_errors={int(payload.get('gpu_errors') or 0)}  "
             f"left_stale={int(payload.get('left_stale_drops') or 0)}  "
             f"right_stale={int(payload.get('right_stale_drops') or 0)}  "
-            f"launch_fail=({int(payload.get('left_launch_failures') or 0)},"
-            f"{int(payload.get('right_launch_failures') or 0)})  "
-            f"read_fail=({int(payload.get('left_read_failures') or 0)},"
-            f"{int(payload.get('right_read_failures') or 0)})  "
-            f"restart=({int(payload.get('left_reader_restarts') or 0)},"
-            f"{int(payload.get('right_reader_restarts') or 0)})  "
-            f"waits=({int(payload.get('wait_both_streams_count') or 0)},"
-            f"{int(payload.get('wait_sync_pair_count') or 0)},"
-            f"{int(payload.get('wait_next_frame_count') or 0)},"
-            f"{int(payload.get('wait_paired_fresh_count') or 0)})  "
             f"freeze_restarts=({int(payload.get('left_freeze_restarts') or 0)},"
             f"{int(payload.get('right_freeze_restarts') or 0)})"
         ),
@@ -1140,27 +949,22 @@ def _format_event_line(event_type: str, payload: dict[str, Any]) -> str:
 
 def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     run_calibration_first = False
+    default_vlc_low_latency = bool(args.open_vlc_low_latency)
     if not str(args.output_standard or "").strip() and not bool(args.no_output_ui):
-        (
-            args.output_standard,
-            args.output_cadence_fps,
-            run_calibration_first,
-        ) = _prompt_runtime_start(default_output_standard(), default_native_output_cadence_fps())
+        args.output_standard, run_calibration_first, use_vlc_low_latency = _prompt_runtime_start(
+            default_output_standard(),
+            default_vlc_low_latency=default_vlc_low_latency,
+        )
+        args.open_vlc_low_latency = bool(use_vlc_low_latency)
     if not str(args.output_standard or "").strip():
         args.output_standard = default_output_standard()
-    args.output_cadence_fps = 25.0 if float(args.output_cadence_fps) <= 25.0 else 30.0
-    require_configured_rtsp_urls(
-        str(args.left_rtsp),
-        str(args.right_rtsp),
-        context="native runtime",
-    )
 
     if run_calibration_first:
         repo_root = Path(__file__).resolve().parent.parent
         env = os.environ.copy()
-        env["HOGAK_OUTPUT_STANDARD"] = str(args.output_standard)
-        env["HOGAK_OUTPUT_CADENCE_FPS"] = f"{float(args.output_cadence_fps):.0f}"
+        env["OUTPUT_STANDARD"] = str(args.output_standard)
         env["HOGAK_VIEWER_BACKEND"] = str(args.viewer_backend or "auto")
+        env["HOGAK_OPEN_VLC_LOW_LATENCY"] = "1" if bool(args.open_vlc_low_latency) else "0"
         command = [
             sys.executable,
             "-m",
@@ -1174,20 +978,13 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     probe_output, probe_explicit = _resolve_output_role(
         args,
         alias_prefix="probe_output",
-        defaults=_PROBE_OUTPUT_DEFAULTS,
+        legacy_prefix="output",
     )
     transmit_output, transmit_explicit = _resolve_output_role(
         args,
         alias_prefix="transmit_output",
-        defaults=_TRANSMIT_OUTPUT_DEFAULTS,
+        legacy_prefix="production_output",
     )
-    sync_pair_mode_explicit = _argv_has_option("--sync-pair-mode")
-    allow_frame_reuse_explicit = _argv_has_option("--allow-frame-reuse")
-    sync_match_max_delta_explicit = _argv_has_option("--sync-match-max-delta-ms")
-    probe_fps_explicit = _argv_has_option("--probe-output-fps")
-    transmit_fps_explicit = _argv_has_option("--transmit-output-fps")
-    transmit_width_explicit = _argv_has_option("--transmit-output-width")
-    transmit_height_explicit = _argv_has_option("--transmit-output-height")
     if str(args.output_standard or "").strip():
         preset = get_output_preset(str(args.output_standard))
         transmit_output = _apply_output_preset(
@@ -1196,26 +993,14 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
             preserve_existing=transmit_explicit,
         )
         args.stitch_output_scale = float(preset.output_scale)
-        if not sync_pair_mode_explicit:
-            args.sync_pair_mode = preset.sync_pair_mode
-        if not allow_frame_reuse_explicit:
-            args.allow_frame_reuse = bool(preset.allow_frame_reuse)
-        if not sync_match_max_delta_explicit:
-            args.sync_match_max_delta_ms = float(preset.sync_match_max_delta_ms)
-    if not transmit_width_explicit:
-        transmit_output["width"] = int(DEFAULT_NATIVE_TRANSMIT_WIDTH)
-    if not transmit_height_explicit:
-        transmit_output["height"] = int(DEFAULT_NATIVE_TRANSMIT_HEIGHT)
+        args.sync_pair_mode = preset.sync_pair_mode
+        args.allow_frame_reuse = bool(preset.allow_frame_reuse)
+        args.sync_match_max_delta_ms = float(preset.sync_match_max_delta_ms)
     probe_output = _inherit_probe_profile_from_transmit(
         probe_output,
         probe_explicit=probe_explicit,
         transmit_config=transmit_output,
     )
-    selected_output_cadence_fps = 25.0 if float(args.output_cadence_fps) <= 25.0 else 30.0
-    if not transmit_fps_explicit:
-        transmit_output["fps"] = selected_output_cadence_fps
-    if not probe_fps_explicit:
-        probe_output["fps"] = selected_output_cadence_fps
     probe_source = _resolve_probe_source(
         args,
         probe_config=probe_output,
@@ -1224,25 +1009,14 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     probe_target_for_viewer = str(probe_output.get("target") or DEFAULT_PROBE_TARGET)
     transmit_target_for_display = str(transmit_output.get("target") or "")
     launch_probe_output = dict(probe_output)
-    transmit_mirror_targets: list[str] = []
+    launch_transmit_output = dict(transmit_output)
     if probe_source == "transmit":
-        transmit_mirror_targets.append(probe_target_for_viewer)
+        launch_transmit_output = _build_mirrored_transmit_output(
+            transmit_output,
+            probe_target=probe_target_for_viewer,
+        )
         launch_probe_output["runtime"] = "none"
         launch_probe_output["target"] = ""
-    launch_transmit_output = _build_transmit_output_with_mirrors(
-        transmit_output,
-        mirror_targets=transmit_mirror_targets,
-    )
-
-    if _gpu_direct_requested(launch_probe_output, launch_transmit_output):
-        gpu_direct_status = query_gpu_direct_status()
-        print(_format_gpu_direct_preflight(gpu_direct_status))
-        if not bool(gpu_direct_status.get("dependency_ready")):
-            print(
-                "gpu-direct dependencies are not ready. "
-                "Install FFmpeg dev headers/libs first or fall back to ffmpeg runtime."
-            )
-            return 2
 
     spec = RuntimeLaunchSpec(
         emit_hello=True,
@@ -1251,17 +1025,15 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         left_rtsp=args.left_rtsp,
         right_rtsp=args.right_rtsp,
         input_runtime=args.input_runtime,
-        input_pipe_format=args.input_pipe_format,
         ffmpeg_bin=str(args.ffmpeg_bin or ""),
         homography_file=str(args.homography_file or ""),
         transport=args.rtsp_transport,
         input_buffer_frames=max(1, int(args.input_buffer_frames)),
-        disable_freeze_detection=bool(args.disable_freeze_detection),
         video_codec="h264",
         timeout_sec=max(0.1, float(args.rtsp_timeout_sec)),
         reconnect_cooldown_sec=max(0.1, float(args.reconnect_cooldown_sec)),
         output_runtime=str(launch_probe_output["runtime"] or "none"),
-        output_profile="inspection",
+        output_profile=str(args.output_profile or "inspection"),
         output_target=str(launch_probe_output["target"] or ""),
         output_codec=str(launch_probe_output["codec"] or ""),
         output_bitrate=str(launch_probe_output["bitrate"] or ""),
@@ -1270,9 +1042,8 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         output_width=max(0, int(launch_probe_output["width"] or 0)),
         output_height=max(0, int(launch_probe_output["height"] or 0)),
         output_fps=max(0.0, float(launch_probe_output["fps"] or 0.0)),
-        output_debug_overlay=bool(launch_probe_output.get("debug_overlay")),
         production_output_runtime=str(launch_transmit_output["runtime"] or "none"),
-        production_output_profile="production-compatible",
+        production_output_profile=str(args.production_output_profile or "production-compatible"),
         production_output_target=str(launch_transmit_output["target"] or ""),
         production_output_codec=str(launch_transmit_output["codec"] or ""),
         production_output_bitrate=str(launch_transmit_output["bitrate"] or ""),
@@ -1281,7 +1052,6 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         production_output_width=max(0, int(launch_transmit_output["width"] or 0)),
         production_output_height=max(0, int(launch_transmit_output["height"] or 0)),
         production_output_fps=max(0.0, float(launch_transmit_output["fps"] or 0.0)),
-        production_output_debug_overlay=bool(launch_transmit_output.get("debug_overlay")),
         sync_pair_mode=str(args.sync_pair_mode),
         allow_frame_reuse=bool(args.allow_frame_reuse),
         pair_reuse_max_age_ms=max(1.0, float(args.pair_reuse_max_age_ms)),
@@ -1300,6 +1070,9 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     viewer_proc: subprocess.Popen[bytes] | None = None
     viewer_launch_failures = 0
     next_viewer_launch_sec = 0.0
+    vlc_proc: subprocess.Popen[bytes] | None = None
+    vlc_launch_failures = 0
+    next_vlc_launch_sec = 0.0
     stats_sampler = SystemStatsSampler(interval_sec=1.0)
     stats_sampler.start()
     runtime_stderr = ""
@@ -1311,6 +1084,8 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     hello_payload: dict[str, Any] = {}
     probe_enabled = probe_source != "disabled" and bool(str(probe_target_for_viewer).strip())
     viewer_target = str(args.viewer_target or probe_target_for_viewer or DEFAULT_VIEWER_TARGET)
+    vlc_enabled = bool(args.open_vlc_low_latency)
+    vlc_target = str(args.vlc_target or transmit_target_for_display or DEFAULT_TRANSMIT_TARGET)
     try:
         hello = client.wait_for_hello(timeout_sec=5.0)
         hello_payload = dict(hello.payload)
@@ -1320,6 +1095,8 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         recent_events.appendleft(f"[{time.strftime('%H:%M:%S')}] probe source: {probe_source}")
         if args.viewer and probe_enabled:
             recent_events.appendleft(f"[{time.strftime('%H:%M:%S')}] viewer pending: waiting for local probe output")
+        if vlc_enabled and bool(vlc_target.strip()):
+            recent_events.appendleft(f"[{time.strftime('%H:%M:%S')}] vlc pending: waiting for transmit output")
 
         deadline = 0.0 if float(args.duration_sec) <= 0.0 else (time.time() + float(args.duration_sec))
         while True:
@@ -1387,6 +1164,46 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
                         recent_events.appendleft(viewer_message)
                         if args.monitor_mode == "compact" and not args.verbose_events:
                             print(viewer_message)
+                if vlc_proc is not None and vlc_proc.poll() is not None:
+                    vlc_proc = None
+                    vlc_enabled = False
+                    recent_events.appendleft(f"[{time.strftime('%H:%M:%S')}] vlc closed")
+                elif (
+                    vlc_enabled
+                    and bool(vlc_target.strip())
+                    and vlc_proc is None
+                    and time.time() >= next_vlc_launch_sec
+                    and bool(last_metrics_payload.get("transmit_active"))
+                    and int(last_metrics_payload.get("transmit_frames_written") or 0) >= 8
+                ):
+                    try:
+                        vlc_proc = launch_final_stream_viewer(
+                            FinalStreamViewerSpec(
+                                target=vlc_target,
+                                ffmpeg_bin=str(args.ffmpeg_bin or ""),
+                                backend="vlc-low-latency",
+                                window_title="Hogak Transmit VLC",
+                                width=int(last_metrics_payload.get("transmit_width") or 0),
+                                height=int(last_metrics_payload.get("transmit_height") or 0),
+                                fps=float(last_metrics_payload.get("transmit_written_fps") or 0.0),
+                            )
+                        )
+                        actual_backend = str(getattr(vlc_proc, "_hogak_viewer_backend", "vlc-low-latency"))
+                        vlc_launch_failures = 0
+                        vlc_message = (
+                            f"[{time.strftime('%H:%M:%S')}] vlc launched "
+                            f"backend={actual_backend} pid={vlc_proc.pid}"
+                        )
+                        recent_events.appendleft(vlc_message)
+                        if args.monitor_mode == "compact" and not args.verbose_events:
+                            print(vlc_message)
+                    except Exception as exc:
+                        vlc_launch_failures += 1
+                        next_vlc_launch_sec = time.time() + min(5.0, 1.0 + (vlc_launch_failures * 0.75))
+                        vlc_message = f"[{time.strftime('%H:%M:%S')}] vlc error: {exc}"
+                        recent_events.appendleft(vlc_message)
+                        if args.monitor_mode == "compact" and not args.verbose_events:
+                            print(vlc_message)
                 if args.verbose_events:
                     print(json.dumps(event.raw, ensure_ascii=False))
                 elif args.monitor_mode == "json":
@@ -1451,6 +1268,12 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
                 viewer_proc.wait(timeout=3)
             except Exception:
                 viewer_proc.kill()
+        if vlc_proc is not None and vlc_proc.poll() is None:
+            vlc_proc.send_signal(signal.SIGTERM if hasattr(signal, "SIGTERM") else signal.SIGINT)
+            try:
+                vlc_proc.wait(timeout=3)
+            except Exception:
+                vlc_proc.kill()
 
     returncode = int(client.process.returncode or 0)
     if args.monitor_mode == "dashboard" and last_metrics_payload:
