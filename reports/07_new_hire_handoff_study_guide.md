@@ -2638,7 +2638,7 @@ buffer를 유지하는지 이유를 적어본다.
 ### 읽을 것
 
 1. [stitch_engine.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/stitch_engine.cpp)
-2. [03_native_runtime_current_status.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_native_runtime_current_status.md)
+2. [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
 
 ### 실습 과제
 

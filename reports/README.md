@@ -1,33 +1,48 @@
 # Reports
 
-이 디렉터리는 사용법보다 판단 배경과 현재 상태를 설명하는 문서를 모아둔 곳이다.
+이 디렉터리는 실행 방법보다는 아키텍처, 현재 상태, 배포 기준, 온보딩 자료를 모아둔 곳이다.
 
-루트 [README.md](/c:/Users/Pixellot/Hogak_Stitching/README.md)가 실행 중심 요약이라면,
-`reports/`는 왜 이렇게 구성됐는지와 지금 어디까지 왔는지를 정리한 보조 문서 세트다.
+루트 [README.md](/c:/Users/Pixellot/Hogak_Stitching/README.md)는 실행 중심 입구 문서이고, `reports/`는 이유와 배경을 설명하는 참고 문서 모음이다.
 
-권장 읽기 순서:
+## Start Here
+
+프로젝트를 빠르게 파악하려면 이 순서가 가장 좋다.
 
 1. [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
-2. [02_calibration_and_matching_strategy.md](/c:/Users/Pixellot/Hogak_Stitching/reports/02_calibration_and_matching_strategy.md)
-3. [03_native_runtime_current_status.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_native_runtime_current_status.md)
-4. [04_next_steps_and_release_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/04_next_steps_and_release_plan.md)
-5. [05_60fps_service_pipeline_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/05_60fps_service_pipeline_plan.md)
-6. [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
-7. [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)
-8. [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
+2. [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+3. [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
 
-빠른 역할 요약:
+## Document Map
 
-- `01`: 프로젝트 목적과 전체 구조
-- `02`: calibration 방식과 matching 전략
-- `03`: 현재 운영 baseline과 남은 리스크
-- `04`: 다음 우선순위와 검증 계획
-- `05`: 장기 60fps 파이프라인 계획
-- `06`: 배포 구조와 지원 환경 기준
-- `07`: 완전 초급 기준의 상세 인수인계/학습 문서와 실습 과제
-- `08`: Mermaid.js 기반 구조도와 runtime 흐름도
+- [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
+  - 프로젝트 목적, 구성 요소, 운영 기준
+- [02_calibration_and_matching_strategy.md](/c:/Users/Pixellot/Hogak_Stitching/reports/02_calibration_and_matching_strategy.md)
+  - calibration 철학과 classic matcher 기준
+- [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+  - 현재 baseline, 남은 리스크, 바로 다음 우선순위
+- [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
+  - 배포 구조, 지원 환경, 운영 기준
+- [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)
+  - 완전 초급 기준의 인수인계/학습 문서와 실습 과제
+- [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
+  - Mermaid.js 기반 구조도와 데이터 흐름도
 
-현재 live 카메라가 `30fps`급이라, `03`과 `04`는 단기 목표를 `strict fresh 30fps baseline` 기준으로 설명한다.
-`05`는 그보다 긴 호흡의 `future 60fps` 구조 계획을 다룬다.
-`07`은 운영 보고서라기보다 후임 온보딩과 자가 학습을 위한 참고서에 가깝다.
-`08`은 코드 리뷰나 인수인계 때 전체 구조를 한 번에 설명할 때 쓰기 좋다.
+## Historical Notes
+
+- [05_60fps_service_pipeline_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/05_60fps_service_pipeline_plan.md)
+  - 장기 `future 60fps` 재설계 문서
+  - 현재 운영 기준 문서라기보다 기록과 장기 방향 참고서에 가깝다
+
+## When To Open Which File
+
+- 지금 구조가 어떻게 생겼는지 알고 싶다
+  - [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
+  - [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
+- 지금 당장 어디가 남은 일인지 알고 싶다
+  - [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+- calibration 쪽만 보고 싶다
+  - [02_calibration_and_matching_strategy.md](/c:/Users/Pixellot/Hogak_Stitching/reports/02_calibration_and_matching_strategy.md)
+- 배포와 운영 기준을 보고 싶다
+  - [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
+- 신입 온보딩 자료가 필요하다
+  - [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)

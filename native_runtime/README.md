@@ -155,5 +155,5 @@ native runtime이 기대하는 주요 입력:
 
 - [README.md](/c:/Users/Pixellot/Hogak_Stitching/README.md)
 - [config/README.md](/c:/Users/Pixellot/Hogak_Stitching/config/README.md)
-- [03_native_runtime_current_status.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_native_runtime_current_status.md)
-- [04_next_steps_and_release_plan.md](/c:/Users/Pixellot/Hogak_Stitching/reports/04_next_steps_and_release_plan.md)
+- [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+- [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
