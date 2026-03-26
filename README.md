@@ -23,6 +23,12 @@ python -m stitching.cli native-calibrate
 python -m stitching.cli native-runtime
 ```
 
+strict fresh baseline 검증은 아래로 수행한다.
+
+```cmd
+python -m stitching.cli native-validate --duration-sec 600
+```
+
 ## Quick Start
 
 빌드:
@@ -52,6 +58,15 @@ python -m stitching.cli native-runtime --no-output-ui --no-viewer
 python -m stitching.cli --runtime-profile camera25 native-runtime
 ```
 
+strict fresh 30 smoke/validation:
+
+```cmd
+python -m stitching.cli native-validate --duration-sec 10
+python -m stitching.cli native-validate --duration-sec 600
+```
+
+검증 결과는 `output/debug/native_validate_*.json`으로 저장된다.
+
 ## Config
 
 기본 설정은 [runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json)에서 읽는다.
@@ -78,7 +93,7 @@ python -m stitching.cli --runtime-profile camera25 native-runtime
 현재 기본 흐름은 아래와 같다.
 
 ```text
-RTSP -> ffmpeg reader -> pair/sync -> stitch -> encode -> output
+RTSP -> libav ingest/decode -> pair/sync -> stitch -> encode -> output
 ```
 
 출력 역할은 둘로 나눈다.
@@ -87,6 +102,7 @@ RTSP -> ffmpeg reader -> pair/sync -> stitch -> encode -> output
 - `transmit`: 실제 외부 송출 경로
 
 현재 baseline 설명과 운영 상태는 [reports/03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)를 본다.
+strict fresh `30fps` acceptance 기준과 source timing 지표는 [reports/09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)를 본다.
 
 ## Documentation Map
 
@@ -95,5 +111,6 @@ RTSP -> ffmpeg reader -> pair/sync -> stitch -> encode -> output
 - 문서 인덱스: [reports/README.md](/c:/Users/Pixellot/Hogak_Stitching/reports/README.md)
 - 아키텍처 개요: [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
 - 현재 상태와 다음 단계: [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+- baseline acceptance / source timing: [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
 - 배포/지원 환경: [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
 - 신입 온보딩 문서: [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)

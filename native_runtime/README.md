@@ -17,6 +17,7 @@ RTSP ingest -> pair/sync -> stitch -> encode -> output
 현재 런타임이 맡는 일:
 
 - RTSP 입력 수신
+- arrival/source dual timestamp 수집
 - left/right frame pair 선택과 sync 판단
 - homography 기반 stitch
 - GPU warp / GPU feather blend
@@ -38,7 +39,7 @@ RTSP ingest -> pair/sync -> stitch -> encode -> output
 - [stitch_engine.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/stitch_engine.cpp)
   - pair/sync, stitch, metrics 핵심
 - [ffmpeg_rtsp_reader.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/input/ffmpeg_rtsp_reader.cpp)
-  - RTSP 입력과 rawvideo pipe reader
+  - libav 기반 RTSP ingest/decode reader와 arrival/source timestamp 수집
 - [ffmpeg_output_writer.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/ffmpeg_output_writer.cpp)
   - ffmpeg 기반 encoded output writer
 - [gpu_direct_output_writer.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/gpu_direct_output_writer.cpp)
@@ -78,6 +79,12 @@ viewer 없이:
 
 ```cmd
 python -m stitching.cli native-runtime --no-output-ui --no-viewer
+```
+
+strict fresh baseline 검증:
+
+```cmd
+python -m stitching.cli native-validate --duration-sec 600
 ```
 
 25fps profile:
@@ -135,15 +142,21 @@ native runtime이 기대하는 주요 입력:
 - `probe_fps`
 - `transmit_fps`
 - `left_age_ms`, `right_age_ms`
+- `left_source_age_ms`, `right_source_age_ms`
 - `pair_skew_ms`
+- `pair_source_skew_ms_mean`
+- `source_time_mode`
 - `read_fail`, `restart`, `gpu_errors`
 
 간단 해석:
 
 - `stitch_actual_fps`: 실제 fresh stitched frame 속도
 - `transmit_fps`: 실제 송출 cadence
-- `age_ms`: 입력 지연
-- `pair_skew_ms`: 좌우 시간 차이
+- `age_ms`: arrival 기준 입력 지연
+- `source_age_ms`: reader가 보존한 source wallclock 기준 age
+- `pair_skew_ms`: arrival 기준 좌우 시간 차이
+- `pair_source_skew_ms_mean`: source wallclock이 있을 때의 좌우 시간 차이
+- `source_time_mode`: `wallclock` 또는 `fallback-arrival`
 
 ## Notes
 
@@ -156,4 +169,5 @@ native runtime이 기대하는 주요 입력:
 - [README.md](/c:/Users/Pixellot/Hogak_Stitching/README.md)
 - [config/README.md](/c:/Users/Pixellot/Hogak_Stitching/config/README.md)
 - [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+- [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
 - [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)

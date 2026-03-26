@@ -134,6 +134,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     from stitching.native_runtime_cli import add_native_runtime_args
 
     add_native_runtime_args(native_cmd)
+
+    native_validate_cmd = subparsers.add_parser(
+        "native-validate",
+        help="Run strict fresh 30 validation and write a JSON report",
+    )
+    from stitching.native_runtime_validation import add_native_validation_args
+
+    add_native_validation_args(native_validate_cmd)
     return parser.parse_args(remaining)
 
 
@@ -150,6 +158,11 @@ def main() -> int:
             from stitching.native_runtime_cli import run_native_runtime_monitor
 
             return int(run_native_runtime_monitor(args))
+
+        if args.command == "native-validate":
+            from stitching.native_runtime_validation import run_native_validation
+
+            return int(run_native_validation(args))
     except RuntimeSiteConfigError as exc:
         print(f"runtime config error: {exc}", file=sys.stderr)
         return 2

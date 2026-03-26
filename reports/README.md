@@ -11,6 +11,7 @@
 1. [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
 2. [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
 3. [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
+4. [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
 
 ## Document Map
 
@@ -26,6 +27,8 @@
   - 완전 초급 기준의 인수인계/학습 문서와 실습 과제
 - [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
   - Mermaid.js 기반 구조도와 데이터 흐름도
+- [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
+  - strict fresh 30 baseline, arrival/source timing 모델, `native-validate` 절차, smoke/10분/30분 acceptance 기준
 
 ## Historical Notes
 
@@ -40,6 +43,8 @@
   - [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
 - 지금 당장 어디가 남은 일인지 알고 싶다
   - [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
+- 이번 단계에서 무엇을 pass로 볼지 알고 싶다
+  - [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
 - calibration 쪽만 보고 싶다
   - [02_calibration_and_matching_strategy.md](/c:/Users/Pixellot/Hogak_Stitching/reports/02_calibration_and_matching_strategy.md)
 - 배포와 운영 기준을 보고 싶다
