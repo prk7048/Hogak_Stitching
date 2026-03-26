@@ -198,6 +198,8 @@ class EngineMetrics:
     right_buffer_seq_span: int = 0
     left_age_ms: float = 0.0
     right_age_ms: float = 0.0
+    left_source_age_ms: float = 0.0
+    right_source_age_ms: float = 0.0
     selected_left_lag_ms: float = 0.0
     selected_right_lag_ms: float = 0.0
     selected_left_lag_frames: int = 0
@@ -208,6 +210,10 @@ class EngineMetrics:
     output_written_fps: float = 0.0
     production_output_written_fps: float = 0.0
     pair_skew_ms_mean: float = 0.0
+    pair_source_skew_ms_mean: float = 0.0
+    source_time_valid_left: bool = False
+    source_time_valid_right: bool = False
+    source_time_mode: str = "fallback-arrival"
     matches: int = 0
     inliers: int = 0
     stitched_count: int = 0

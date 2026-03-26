@@ -70,8 +70,8 @@ flowchart LR
     end
 
     subgraph Input[Input Layer]
-        LFfmpeg["left ffmpeg subprocess"]
-        RFfmpeg["right ffmpeg subprocess"]
+        LDemux["left libav demux and decode"]
+        RDemux["right libav demux and decode"]
         LReader["Left Reader Thread"]
         RReader["Right Reader Thread"]
         LBuf["left ring buffer"]
@@ -100,8 +100,8 @@ flowchart LR
         Homo["data runtime_homography.json"]
     end
 
-    LCam --> LFfmpeg --> LReader --> LBuf
-    RCam --> RFfmpeg --> RReader --> RBuf
+    LCam --> LDemux --> LReader --> LBuf
+    RCam --> RDemux --> RReader --> RBuf
 
     LBuf --> Tick
     RBuf --> Tick
@@ -121,8 +121,8 @@ flowchart LR
 
 이 그림의 의미:
 
-- 카메라 영상은 RTSP로 들어오고, 입력층에서 먼저 ffmpeg subprocess가 디코드한다.
-- 각 reader thread가 raw frame을 읽어 ring buffer에 적재한다.
+- 카메라 영상은 RTSP로 들어오고, 입력층에서 libav가 demux/decode를 수행한다.
+- 각 reader thread가 raw frame과 arrival/source timestamp를 ring buffer에 적재한다.
 - 메인 thread의 `engine.tick()`가 버퍼를 읽고 pair를 고르고 stitch를 수행한다.
 - stitch 결과는 `probe`와 `transmit` writer thread로 넘어간다.
 
@@ -155,10 +155,10 @@ flowchart TB
 
 ```mermaid
 flowchart LR
-    A["RTSP stream - H.264 or H.265"] --> B["ffmpeg decode"]
-    B --> C["rawvideo input - usually nv12"]
-    C --> D["reader buffer - frame seq timestamp"]
-    D --> E["pair and sync selection"]
+    A["RTSP stream - H.264 or H.265"] --> B["libav demux and decode"]
+    B --> C["decoded frame - usually nv12"]
+    C --> D["reader buffer - frame seq plus arrival/source timestamps"]
+    D --> E["pair and sync selection - source time if safe, else arrival fallback"]
     E --> F["GPU upload and prepare"]
     F --> G["warpPerspective"]
     G --> H["feather blend"]
@@ -171,15 +171,16 @@ flowchart LR
 이 경로에서 중요한 점:
 
 - RTSP는 전송 프로토콜이고, 실제 압축 비디오는 보통 H.264/H.265다.
-- 입력 raw 포맷은 기본적으로 `nv12`를 많이 쓴다.
+- 입력 decode 포맷은 기본적으로 `nv12`를 많이 쓴다.
 - pair/sync는 단순히 최신 프레임을 붙이는 것이 아니라, 현재 cadence와 freshness를 고려해 좌/우 한 쌍을 고른다.
+- source wallclock이 안전하게 비교 가능하면 source 기준으로, 아니면 arrival 기준으로 pair를 고른다.
 - output은 `gpu-direct` 또는 `ffmpeg` writer가 담당한다.
 
 ## 5. CPU RAM / GPU VRAM View
 
 ```mermaid
 flowchart LR
-    A["Camera RTSP"] --> B["ffmpeg decode"]
+    A["Camera RTSP"] --> B["libav decode"]
     B --> C["CPU RAM - reader buffer"]
     C --> D["GPU upload"]
     D --> E["GPU VRAM - warp and blend"]

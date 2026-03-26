@@ -629,7 +629,7 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
         help="Named output preset. Python applies width/height/fps/codec/bitrate/muxer before launching runtime.",
     )
     cmd.add_argument("--no-output-ui", action="store_true", help="Skip preset selection UI and use default output standard")
-    cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest"], default="none")
+    cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest", "service"], default="none")
     cmd.add_argument("--allow-frame-reuse", action="store_true", help="Allow stale one-side pair reuse for smoother output")
     cmd.add_argument("--pair-reuse-max-age-ms", type=float, default=90.0)
     cmd.add_argument("--pair-reuse-max-consecutive", type=int, default=2)
@@ -700,10 +700,29 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     pair_skew_ms_mean = payload.get("pair_skew_ms_mean")
     if isinstance(pair_skew_ms_mean, (int, float)):
         parts.append(f"pair_skew_ms={float(pair_skew_ms_mean):.2f}")
+    pair_source_skew_ms_mean = payload.get("pair_source_skew_ms_mean")
+    source_time_mode = str(payload.get("source_time_mode") or "").strip()
+    if source_time_mode:
+        parts.append(f"source_mode={source_time_mode}")
+    if (
+        isinstance(pair_source_skew_ms_mean, (int, float))
+        and source_time_mode
+        and source_time_mode != "fallback-arrival"
+    ):
+        parts.append(f"source_skew_ms={float(pair_source_skew_ms_mean):.2f}")
     left_age_ms = payload.get("left_age_ms")
     right_age_ms = payload.get("right_age_ms")
     if isinstance(left_age_ms, (int, float)) and isinstance(right_age_ms, (int, float)):
         parts.append(f"input_age_ms=({float(left_age_ms):.0f},{float(right_age_ms):.0f})")
+    left_source_age_ms = payload.get("left_source_age_ms")
+    right_source_age_ms = payload.get("right_source_age_ms")
+    if (
+        source_time_mode == "wallclock"
+        and isinstance(left_source_age_ms, (int, float))
+        and isinstance(right_source_age_ms, (int, float))
+    ):
+        if float(left_source_age_ms) > 0.0 or float(right_source_age_ms) > 0.0:
+            parts.append(f"source_age_ms=({float(left_source_age_ms):.0f},{float(right_source_age_ms):.0f})")
     left_buffered = int(payload.get("left_buffered_frames") or 0)
     right_buffered = int(payload.get("right_buffered_frames") or 0)
     if left_buffered > 0 or right_buffered > 0:
@@ -835,6 +854,14 @@ def _render_dashboard(
             f"left_age_ms={float(payload.get('left_age_ms') or 0.0):7.0f}  "
             f"right_age_ms={float(payload.get('right_age_ms') or 0.0):7.0f}  "
             f"buffer=({int(payload.get('left_buffered_frames') or 0)},{int(payload.get('right_buffered_frames') or 0)})"
+        ),
+        (
+            f"source mode={str(payload.get('source_time_mode') or 'fallback-arrival'):>16}  "
+            f"skew_ms={float(payload.get('pair_source_skew_ms_mean') or 0.0):7.2f}  "
+            f"left_age_ms={float(payload.get('left_source_age_ms') or 0.0):7.0f}  "
+            f"right_age_ms={float(payload.get('right_source_age_ms') or 0.0):7.0f}  "
+            f"valid=({_format_flag(bool(payload.get('source_time_valid_left')))},"
+            f"{_format_flag(bool(payload.get('source_time_valid_right')))})"
         ),
         (
             f"motion left={float(payload.get('left_motion_mean') or 0.0):6.2f}  "

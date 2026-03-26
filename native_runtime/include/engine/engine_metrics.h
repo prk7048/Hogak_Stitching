@@ -29,6 +29,8 @@ struct EngineMetrics {
     int64_t right_buffer_seq_span = 0;
     double left_age_ms = 0.0;
     double right_age_ms = 0.0;
+    double left_source_age_ms = 0.0;
+    double right_source_age_ms = 0.0;
     double selected_left_lag_ms = 0.0;
     double selected_right_lag_ms = 0.0;
     int64_t selected_left_lag_frames = 0;
@@ -42,6 +44,10 @@ struct EngineMetrics {
     double output_written_fps = 0.0;
     double production_output_written_fps = 0.0;
     double pair_skew_ms_mean = 0.0;
+    double pair_source_skew_ms_mean = 0.0;
+    bool source_time_valid_left = false;
+    bool source_time_valid_right = false;
+    std::string source_time_mode = "fallback-arrival";
     int32_t matches = 0;
     int32_t inliers = 0;
     int64_t stitched_count = 0;

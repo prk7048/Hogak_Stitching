@@ -502,13 +502,15 @@ bool prepare_warp_plan(
 }
 
 struct ServicePairCandidate {
-    cv::Mat left_frame;
-    cv::Mat right_frame;
-    std::int64_t left_seq = 0;
-    std::int64_t right_seq = 0;
-    std::int64_t left_ts_ns = 0;
-    std::int64_t right_ts_ns = 0;
-    std::int64_t pair_ts_ns = 0;
+    hogak::input::BufferedFrameInfo left_info;
+    hogak::input::BufferedFrameInfo right_info;
+    hogak::input::FrameTimeDomain time_domain = hogak::input::FrameTimeDomain::kArrival;
+    std::int64_t left_pair_time_ns = 0;
+    std::int64_t right_pair_time_ns = 0;
+    std::int64_t pair_time_ns = 0;
+    std::int64_t scheduler_pair_time_ns = 0;
+    std::int64_t arrival_skew_ns = 0;
+    std::int64_t source_skew_ns = 0;
     std::int64_t skew_ns = std::numeric_limits<std::int64_t>::max();
     std::int64_t sync_overage_ns = 0;
     std::int64_t cadence_error_ns = std::numeric_limits<std::int64_t>::max();
@@ -518,6 +520,51 @@ struct ServicePairCandidate {
     int reuse_streak = 0;
     int advance_score = 0;
 };
+
+std::int64_t wallclock_now_ns() {
+    using clock = std::chrono::system_clock;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+        clock::now().time_since_epoch()).count();
+}
+
+const char* metrics_source_time_mode_name(hogak::input::FrameTimeDomain time_domain) noexcept {
+    switch (time_domain) {
+        case hogak::input::FrameTimeDomain::kSourceWallclock:
+            return "wallclock";
+        case hogak::input::FrameTimeDomain::kSourceComparable:
+            return "stream_pts";
+        case hogak::input::FrameTimeDomain::kArrival:
+        default:
+            return "fallback-arrival";
+    }
+}
+
+hogak::input::FrameTimeDomain resolve_service_time_domain(
+    const hogak::input::ReaderSnapshot& left_snapshot,
+    const hogak::input::ReaderSnapshot& right_snapshot) {
+    const bool can_use_wallclock =
+        left_snapshot.latest_source_time_comparable &&
+        right_snapshot.latest_source_time_comparable &&
+        left_snapshot.latest_comparable_source_timestamp_ns > 0 &&
+        right_snapshot.latest_comparable_source_timestamp_ns > 0;
+    return can_use_wallclock
+        ? hogak::input::FrameTimeDomain::kSourceWallclock
+        : hogak::input::FrameTimeDomain::kArrival;
+}
+
+std::int64_t snapshot_latest_time_ns(
+    const hogak::input::ReaderSnapshot& snapshot,
+    hogak::input::FrameTimeDomain time_domain) {
+    switch (time_domain) {
+        case hogak::input::FrameTimeDomain::kSourceWallclock:
+            return snapshot.latest_comparable_source_timestamp_ns;
+        case hogak::input::FrameTimeDomain::kSourceComparable:
+            return snapshot.latest_source_pts_ns;
+        case hogak::input::FrameTimeDomain::kArrival:
+        default:
+            return snapshot.latest_timestamp_ns;
+    }
+}
 
 double resolve_service_target_fps(
     const EngineConfig& config,
@@ -563,10 +610,10 @@ bool service_pair_candidate_better(
     if (candidate.newest_ns != best.newest_ns) {
         return candidate.newest_ns > best.newest_ns;
     }
-    if (candidate.left_seq != best.left_seq) {
-        return candidate.left_seq > best.left_seq;
+    if (candidate.left_info.seq != best.left_info.seq) {
+        return candidate.left_info.seq > best.left_info.seq;
     }
-    return candidate.right_seq > best.right_seq;
+    return candidate.right_info.seq > best.right_info.seq;
 }
 
 void increment_wait_paired_fresh_breakdown(
@@ -616,12 +663,55 @@ bool StitchEngine::select_pair_locked(
         std::max(1.0, config_.sync_match_max_delta_ms) * 1'000'000.0);
     const auto manual_offset_ns = static_cast<std::int64_t>(config_.sync_manual_offset_ms * 1'000'000.0);
 
+    auto fill_pair = [&](const hogak::input::BufferedFrameInfo& left_info,
+                         const hogak::input::BufferedFrameInfo& right_info) {
+        pair_out->left_frame = left_info.frame;
+        pair_out->right_frame = right_info.frame;
+        pair_out->left_seq = left_info.seq;
+        pair_out->right_seq = right_info.seq;
+        pair_out->left_ts_ns = left_info.arrival_timestamp_ns;
+        pair_out->right_ts_ns = right_info.arrival_timestamp_ns;
+        pair_out->left_arrival_ts_ns = left_info.arrival_timestamp_ns;
+        pair_out->right_arrival_ts_ns = right_info.arrival_timestamp_ns;
+        pair_out->left_source_pts_ns = left_info.source_pts_ns;
+        pair_out->right_source_pts_ns = right_info.source_pts_ns;
+        pair_out->left_source_dts_ns = left_info.source_dts_ns;
+        pair_out->right_source_dts_ns = right_info.source_dts_ns;
+        pair_out->left_source_wallclock_ns = left_info.source_wallclock_ns;
+        pair_out->right_source_wallclock_ns = right_info.source_wallclock_ns;
+        pair_out->left_source_time_valid = left_info.source_time_valid;
+        pair_out->right_source_time_valid = right_info.source_time_valid;
+        pair_out->left_source_time_comparable = left_info.source_time_comparable;
+        pair_out->right_source_time_comparable = right_info.source_time_comparable;
+        pair_out->left_source_time_kind = left_info.source_time_kind;
+        pair_out->right_source_time_kind = right_info.source_time_kind;
+    };
+
+    auto compute_source_skew_ns = [&](const hogak::input::BufferedFrameInfo& left_info,
+                                      const hogak::input::BufferedFrameInfo& right_info) {
+        if (left_info.source_wallclock_ns <= 0 || right_info.source_wallclock_ns <= 0) {
+            return std::int64_t{0};
+        }
+        return std::llabs(left_info.source_wallclock_ns - (right_info.source_wallclock_ns + manual_offset_ns));
+    };
+
     bool left_ok = false;
     bool right_ok = false;
     if (mode == "none") {
-        left_ok = g_left_reader.copy_latest_frame(&pair_out->left_frame, &pair_out->left_seq, &pair_out->left_ts_ns);
-        right_ok = g_right_reader.copy_latest_frame(&pair_out->right_frame, &pair_out->right_seq, &pair_out->right_ts_ns);
+        hogak::input::BufferedFrameInfo left_info;
+        hogak::input::BufferedFrameInfo right_info;
+        left_ok = g_left_reader.copy_latest_frame(&pair_out->left_frame, &pair_out->left_seq, &pair_out->left_ts_ns, &left_info);
+        right_ok = g_right_reader.copy_latest_frame(&pair_out->right_frame, &pair_out->right_seq, &pair_out->right_ts_ns, &right_info);
+        if (left_ok && right_ok) {
+            fill_pair(left_info, right_info);
+            pair_out->pair_time_domain = hogak::input::FrameTimeDomain::kArrival;
+            pair_out->pair_time_ns = std::max(pair_out->left_arrival_ts_ns, pair_out->right_arrival_ts_ns + manual_offset_ns);
+            pair_out->scheduler_pair_time_ns = pair_out->pair_time_ns;
+            pair_out->arrival_skew_ns = std::llabs(pair_out->left_arrival_ts_ns - (pair_out->right_arrival_ts_ns + manual_offset_ns));
+            pair_out->source_skew_ns = compute_source_skew_ns(left_info, right_info);
+        }
     } else if (mode == "service") {
+        const auto service_time_domain = resolve_service_time_domain(left_snapshot, right_snapshot);
         g_left_reader.buffered_frame_infos(&left_buffered_infos_cache_);
         g_right_reader.buffered_frame_infos(&right_buffered_infos_cache_);
         const auto& left_infos = left_buffered_infos_cache_;
@@ -635,12 +725,16 @@ bool StitchEngine::select_pair_locked(
         const auto max_reuse_age_ns = static_cast<std::int64_t>(
             std::max(1.0, config_.pair_reuse_max_age_ms) * 1'000'000.0);
         const int max_consecutive_reuse = std::max(1, config_.pair_reuse_max_consecutive);
-        const auto latest_adjusted_right_ts_ns = right_snapshot.latest_timestamp_ns + manual_offset_ns;
-        const auto latest_pair_ts_ns = std::max(left_snapshot.latest_timestamp_ns, latest_adjusted_right_ts_ns);
-        const auto unclamped_target_pair_ts_ns =
-            (last_service_pair_ts_ns_ > 0) ? (last_service_pair_ts_ns_ + target_period_ns) : latest_pair_ts_ns;
-        const auto min_target_pair_ts_ns = latest_pair_ts_ns - target_period_ns;
-        const auto target_pair_ts_ns = std::max(unclamped_target_pair_ts_ns, min_target_pair_ts_ns);
+        const auto latest_left_pair_time_ns = snapshot_latest_time_ns(left_snapshot, service_time_domain);
+        const auto latest_right_pair_time_ns = snapshot_latest_time_ns(right_snapshot, service_time_domain) + manual_offset_ns;
+        const auto latest_pair_time_ns = std::max(latest_left_pair_time_ns, latest_right_pair_time_ns);
+        const bool same_service_domain = last_pair_time_domain_ == service_time_domain;
+        const auto unclamped_target_pair_time_ns =
+            (same_service_domain && last_service_pair_ts_ns_ > 0)
+                ? (last_service_pair_ts_ns_ + target_period_ns)
+                : latest_pair_time_ns;
+        const auto min_target_pair_time_ns = latest_pair_time_ns - target_period_ns;
+        const auto target_pair_time_ns = std::max(unclamped_target_pair_time_ns, min_target_pair_time_ns);
         ServicePairCandidate best_candidate;
         bool have_candidate = false;
         bool had_reuse_limited_candidate = false;
@@ -650,9 +744,17 @@ bool StitchEngine::select_pair_locked(
         bool had_reuse_limited_both = false;
 
         for (const auto& left_info : left_infos) {
+            if (!left_info.has_time(service_time_domain)) {
+                continue;
+            }
             for (const auto& right_info : right_infos) {
-                const auto adjusted_right_ts_ns = right_info.timestamp_ns + manual_offset_ns;
-                const auto skew_ns = std::llabs(left_info.timestamp_ns - adjusted_right_ts_ns);
+                if (!right_info.has_time(service_time_domain)) {
+                    continue;
+                }
+                const auto left_pair_time_ns = left_info.resolve_time_ns(service_time_domain);
+                const auto right_pair_time_ns = right_info.resolve_time_ns(service_time_domain);
+                const auto adjusted_right_pair_time_ns = right_pair_time_ns + manual_offset_ns;
+                const auto skew_ns = std::llabs(left_pair_time_ns - adjusted_right_pair_time_ns);
                 const bool has_new_left = left_info.seq > last_left_seq_;
                 const bool has_new_right = right_info.seq > last_right_seq_;
                 const bool left_reused = !has_new_left;
@@ -679,20 +781,23 @@ bool StitchEngine::select_pair_locked(
                 }
 
                 ServicePairCandidate candidate;
-                candidate.left_frame = left_info.frame;
-                candidate.right_frame = right_info.frame;
-                candidate.left_seq = left_info.seq;
-                candidate.right_seq = right_info.seq;
-                candidate.left_ts_ns = left_info.timestamp_ns;
-                candidate.right_ts_ns = right_info.timestamp_ns;
+                candidate.left_info = left_info;
+                candidate.right_info = right_info;
+                candidate.time_domain = service_time_domain;
+                candidate.left_pair_time_ns = left_pair_time_ns;
+                candidate.right_pair_time_ns = right_pair_time_ns;
                 candidate.skew_ns = skew_ns;
+                candidate.arrival_skew_ns =
+                    std::llabs(left_info.arrival_timestamp_ns - (right_info.arrival_timestamp_ns + manual_offset_ns));
+                candidate.source_skew_ns = compute_source_skew_ns(left_info, right_info);
                 candidate.sync_overage_ns = std::max<std::int64_t>(0, skew_ns - max_delta_ns);
-                candidate.pair_ts_ns = std::max(left_info.timestamp_ns, adjusted_right_ts_ns);
-                candidate.cadence_error_ns = std::llabs(candidate.pair_ts_ns - target_pair_ts_ns);
-                candidate.freshness_ns = std::min(left_info.timestamp_ns, adjusted_right_ts_ns);
-                candidate.newest_ns = candidate.pair_ts_ns;
-                const auto left_age_ns = std::max<std::int64_t>(0, latest_pair_ts_ns - left_info.timestamp_ns);
-                const auto right_age_ns = std::max<std::int64_t>(0, latest_pair_ts_ns - adjusted_right_ts_ns);
+                candidate.pair_time_ns = std::max(left_pair_time_ns, adjusted_right_pair_time_ns);
+                candidate.scheduler_pair_time_ns = candidate.pair_time_ns;
+                candidate.cadence_error_ns = std::llabs(candidate.pair_time_ns - target_pair_time_ns);
+                candidate.freshness_ns = std::min(left_pair_time_ns, adjusted_right_pair_time_ns);
+                candidate.newest_ns = candidate.pair_time_ns;
+                const auto left_age_ns = std::max<std::int64_t>(0, latest_pair_time_ns - left_pair_time_ns);
+                const auto right_age_ns = std::max<std::int64_t>(0, latest_pair_time_ns - adjusted_right_pair_time_ns);
                 const bool can_reuse_left =
                     left_reused &&
                     config_.allow_frame_reuse &&
@@ -750,15 +855,17 @@ bool StitchEngine::select_pair_locked(
             return false;
         }
 
-        pair_out->left_frame = best_candidate.left_frame;
-        pair_out->right_frame = best_candidate.right_frame;
-        pair_out->left_seq = best_candidate.left_seq;
-        pair_out->right_seq = best_candidate.right_seq;
-        pair_out->left_ts_ns = best_candidate.left_ts_ns;
-        pair_out->right_ts_ns = best_candidate.right_ts_ns;
+        fill_pair(best_candidate.left_info, best_candidate.right_info);
+        pair_out->pair_time_domain = best_candidate.time_domain;
+        pair_out->pair_time_ns = best_candidate.pair_time_ns;
+        pair_out->scheduler_pair_time_ns = best_candidate.scheduler_pair_time_ns;
+        pair_out->arrival_skew_ns = best_candidate.arrival_skew_ns;
+        pair_out->source_skew_ns = best_candidate.source_skew_ns;
         left_ok = !pair_out->left_frame.empty();
         right_ok = !pair_out->right_frame.empty();
     } else {
+        hogak::input::BufferedFrameInfo left_info;
+        hogak::input::BufferedFrameInfo right_info;
         const auto left_target_ns = left_snapshot.latest_timestamp_ns;
         const auto right_target_ns = right_snapshot.latest_timestamp_ns + manual_offset_ns;
         const auto common_target_ns = (mode == "oldest")
@@ -770,23 +877,48 @@ bool StitchEngine::select_pair_locked(
             prefer_past,
             &pair_out->left_frame,
             &pair_out->left_seq,
-            &pair_out->left_ts_ns);
+            &pair_out->left_ts_ns,
+            hogak::input::FrameTimeDomain::kArrival,
+            &left_info);
         right_ok = g_right_reader.copy_closest_frame(
             common_target_ns - manual_offset_ns,
             prefer_past,
             &pair_out->right_frame,
             &pair_out->right_seq,
-            &pair_out->right_ts_ns);
+            &pair_out->right_ts_ns,
+            hogak::input::FrameTimeDomain::kArrival,
+            &right_info);
+        if (left_ok && right_ok) {
+            fill_pair(left_info, right_info);
+            pair_out->pair_time_domain = hogak::input::FrameTimeDomain::kArrival;
+            pair_out->pair_time_ns = std::max(pair_out->left_arrival_ts_ns, pair_out->right_arrival_ts_ns + manual_offset_ns);
+            pair_out->scheduler_pair_time_ns = pair_out->pair_time_ns;
+            pair_out->arrival_skew_ns = std::llabs(pair_out->left_arrival_ts_ns - (pair_out->right_arrival_ts_ns + manual_offset_ns));
+            pair_out->source_skew_ns = compute_source_skew_ns(left_info, right_info);
+        }
     }
 
     if (!left_ok || !right_ok) {
         return false;
     }
 
-    const auto adjusted_right_ts_ns = pair_out->right_ts_ns + manual_offset_ns;
     metrics_.pair_skew_ms_mean =
-        std::abs(static_cast<double>(pair_out->left_ts_ns - adjusted_right_ts_ns)) / 1'000'000.0;
-    if (mode != "none" && std::llabs(pair_out->left_ts_ns - adjusted_right_ts_ns) > max_delta_ns) {
+        static_cast<double>(pair_out->arrival_skew_ns) / 1'000'000.0;
+    metrics_.pair_source_skew_ms_mean =
+        static_cast<double>(pair_out->source_skew_ns) / 1'000'000.0;
+
+    const auto left_sync_time_ns =
+        (pair_out->pair_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock)
+            ? pair_out->left_source_wallclock_ns
+            : pair_out->left_arrival_ts_ns;
+    const auto right_sync_time_ns =
+        (pair_out->pair_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock)
+            ? pair_out->right_source_wallclock_ns
+            : pair_out->right_arrival_ts_ns;
+    if (mode != "none" &&
+        left_sync_time_ns > 0 &&
+        right_sync_time_ns > 0 &&
+        std::llabs(left_sync_time_ns - (right_sync_time_ns + manual_offset_ns)) > max_delta_ns) {
         metrics_.status = "waiting sync pair";
         return false;
     }
@@ -916,6 +1048,7 @@ bool StitchEngine::start(const EngineConfig& config) {
     last_right_seq_ = 0;
     last_service_pair_ts_ns_ = 0;
     last_worker_timestamp_ns_ = 0;
+    last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -979,6 +1112,7 @@ void StitchEngine::stop() {
     last_production_output_frames_written_ = 0;
     last_production_output_timestamp_ns_ = 0;
     last_service_pair_ts_ns_ = 0;
+    last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
     consecutive_left_reuse_ = 0;
     consecutive_right_reuse_ = 0;
 }
@@ -1026,6 +1160,7 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
     last_right_seq_ = 0;
     last_service_pair_ts_ns_ = 0;
     last_worker_timestamp_ns_ = 0;
+    last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -1089,6 +1224,7 @@ void StitchEngine::reset_calibration() {
     last_right_seq_ = 0;
     last_service_pair_ts_ns_ = 0;
     last_worker_timestamp_ns_ = 0;
+    last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -1928,9 +2064,10 @@ bool StitchEngine::stitch_pair_locked(
 void StitchEngine::update_metrics_locked() {
     const auto left = g_left_reader.snapshot();
     const auto right = g_right_reader.snapshot();
-    const auto now_ns =
+    const auto now_arrival_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count();
+    const auto now_source_wallclock_ns = wallclock_now_ns();
 
     metrics_.left_fps = left.fps;
     metrics_.right_fps = right.fps;
@@ -1951,9 +2088,17 @@ void StitchEngine::update_metrics_locked() {
     metrics_.left_buffer_seq_span = left.buffer_seq_span;
     metrics_.right_buffer_seq_span = right.buffer_seq_span;
     metrics_.left_age_ms =
-        left.latest_timestamp_ns > 0 ? static_cast<double>(now_ns - left.latest_timestamp_ns) / 1'000'000.0 : 0.0;
+        left.latest_timestamp_ns > 0 ? static_cast<double>(now_arrival_ns - left.latest_timestamp_ns) / 1'000'000.0 : 0.0;
     metrics_.right_age_ms =
-        right.latest_timestamp_ns > 0 ? static_cast<double>(now_ns - right.latest_timestamp_ns) / 1'000'000.0 : 0.0;
+        right.latest_timestamp_ns > 0 ? static_cast<double>(now_arrival_ns - right.latest_timestamp_ns) / 1'000'000.0 : 0.0;
+    metrics_.left_source_age_ms =
+        left.latest_source_wallclock_ns > 0
+            ? static_cast<double>(std::max<std::int64_t>(0, now_source_wallclock_ns - left.latest_source_wallclock_ns)) / 1'000'000.0
+            : 0.0;
+    metrics_.right_source_age_ms =
+        right.latest_source_wallclock_ns > 0
+            ? static_cast<double>(std::max<std::int64_t>(0, now_source_wallclock_ns - right.latest_source_wallclock_ns)) / 1'000'000.0
+            : 0.0;
     metrics_.selected_left_lag_ms = 0.0;
     metrics_.selected_right_lag_ms = 0.0;
     metrics_.selected_left_lag_frames = 0;
@@ -1972,6 +2117,20 @@ void StitchEngine::update_metrics_locked() {
     metrics_.right_read_failures = right.read_failures;
     metrics_.left_reader_restarts = left_reader_restart_count_;
     metrics_.right_reader_restarts = right_reader_restart_count_;
+    metrics_.source_time_valid_left = left.latest_source_time_valid;
+    metrics_.source_time_valid_right = right.latest_source_time_valid;
+    const auto preselect_time_domain =
+        (config_.sync_pair_mode == "service")
+            ? resolve_service_time_domain(left, right)
+            : hogak::input::FrameTimeDomain::kArrival;
+    metrics_.source_time_mode = metrics_source_time_mode_name(preselect_time_domain);
+    const auto manual_offset_ns = static_cast<std::int64_t>(config_.sync_manual_offset_ms * 1'000'000.0);
+    metrics_.pair_source_skew_ms_mean =
+        (left.latest_comparable_source_timestamp_ns > 0 && right.latest_comparable_source_timestamp_ns > 0)
+            ? std::abs(static_cast<double>(
+                  left.latest_comparable_source_timestamp_ns -
+                  (right.latest_comparable_source_timestamp_ns + manual_offset_ns))) / 1'000'000.0
+            : 0.0;
     metrics_.left_content_frozen = left.content_frozen;
     metrics_.right_content_frozen = right.content_frozen;
     metrics_.left_frozen_duration_sec = left.frozen_duration_sec;
@@ -2037,13 +2196,13 @@ void StitchEngine::update_metrics_locked() {
     }
     if (metrics_.stitched_count > last_stitched_count_) {
         const auto delta_frames = metrics_.stitched_count - last_stitched_count_;
-        const auto delta_ns = now_ns - last_stitch_timestamp_ns_;
+        const auto delta_ns = now_arrival_ns - last_stitch_timestamp_ns_;
         if (last_stitch_timestamp_ns_ > 0 && delta_frames > 0 && delta_ns > 0) {
             metrics_.stitch_actual_fps =
                 static_cast<double>(delta_frames) * 1'000'000'000.0 / static_cast<double>(delta_ns);
         }
         last_stitched_count_ = metrics_.stitched_count;
-        last_stitch_timestamp_ns_ = now_ns;
+        last_stitch_timestamp_ns_ = now_arrival_ns;
     }
     if (metrics_.output_frames_written < last_output_frames_written_) {
         last_output_frames_written_ = metrics_.output_frames_written;
@@ -2051,13 +2210,13 @@ void StitchEngine::update_metrics_locked() {
     }
     if (metrics_.output_frames_written > last_output_frames_written_) {
         const auto delta_frames = metrics_.output_frames_written - last_output_frames_written_;
-        const auto delta_ns = now_ns - last_output_timestamp_ns_;
+        const auto delta_ns = now_arrival_ns - last_output_timestamp_ns_;
         if (last_output_timestamp_ns_ > 0 && delta_frames > 0 && delta_ns > 0) {
             metrics_.output_written_fps =
                 static_cast<double>(delta_frames) * 1'000'000'000.0 / static_cast<double>(delta_ns);
         }
         last_output_frames_written_ = metrics_.output_frames_written;
-        last_output_timestamp_ns_ = now_ns;
+        last_output_timestamp_ns_ = now_arrival_ns;
     } else if (!metrics_.output_active) {
         metrics_.output_written_fps = 0.0;
     }
@@ -2068,13 +2227,13 @@ void StitchEngine::update_metrics_locked() {
     if (metrics_.production_output_frames_written > last_production_output_frames_written_) {
         const auto delta_frames =
             metrics_.production_output_frames_written - last_production_output_frames_written_;
-        const auto delta_ns = now_ns - last_production_output_timestamp_ns_;
+        const auto delta_ns = now_arrival_ns - last_production_output_timestamp_ns_;
         if (last_production_output_timestamp_ns_ > 0 && delta_frames > 0 && delta_ns > 0) {
             metrics_.production_output_written_fps =
                 static_cast<double>(delta_frames) * 1'000'000'000.0 / static_cast<double>(delta_ns);
         }
         last_production_output_frames_written_ = metrics_.production_output_frames_written;
-        last_production_output_timestamp_ns_ = now_ns;
+        last_production_output_timestamp_ns_ = now_arrival_ns;
     } else if (!metrics_.production_output_active) {
         metrics_.production_output_written_fps = 0.0;
     }
@@ -2115,15 +2274,32 @@ void StitchEngine::update_metrics_locked() {
 
     const bool has_new_left = pair.left_seq > last_left_seq_;
     const bool has_new_right = pair.right_seq > last_right_seq_;
+    const auto pair_time_domain = pair.pair_time_domain;
+    const auto latest_left_pair_time_ns = snapshot_latest_time_ns(left, pair_time_domain);
+    const auto latest_right_pair_time_ns = snapshot_latest_time_ns(right, pair_time_domain);
+    const auto selected_left_pair_time_ns =
+        (pair_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock)
+            ? pair.left_source_wallclock_ns
+            : pair.left_arrival_ts_ns;
+    const auto selected_right_pair_time_ns =
+        (pair_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock)
+            ? pair.right_source_wallclock_ns
+            : pair.right_arrival_ts_ns;
+    const auto current_pair_now_ns =
+        (pair_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock)
+            ? now_source_wallclock_ns
+            : now_arrival_ns;
+    metrics_.source_time_mode = metrics_source_time_mode_name(pair_time_domain);
+    metrics_.pair_source_skew_ms_mean = static_cast<double>(pair.source_skew_ns) / 1'000'000.0;
     metrics_.selected_left_lag_frames = std::max<std::int64_t>(0, left.latest_seq - pair.left_seq);
     metrics_.selected_right_lag_frames = std::max<std::int64_t>(0, right.latest_seq - pair.right_seq);
     metrics_.selected_left_lag_ms =
-        (left.latest_timestamp_ns > 0 && pair.left_ts_ns > 0 && left.latest_timestamp_ns >= pair.left_ts_ns)
-            ? static_cast<double>(left.latest_timestamp_ns - pair.left_ts_ns) / 1'000'000.0
+        (latest_left_pair_time_ns > 0 && selected_left_pair_time_ns > 0 && latest_left_pair_time_ns >= selected_left_pair_time_ns)
+            ? static_cast<double>(latest_left_pair_time_ns - selected_left_pair_time_ns) / 1'000'000.0
             : 0.0;
     metrics_.selected_right_lag_ms =
-        (right.latest_timestamp_ns > 0 && pair.right_ts_ns > 0 && right.latest_timestamp_ns >= pair.right_ts_ns)
-            ? static_cast<double>(right.latest_timestamp_ns - pair.right_ts_ns) / 1'000'000.0
+        (latest_right_pair_time_ns > 0 && selected_right_pair_time_ns > 0 && latest_right_pair_time_ns >= selected_right_pair_time_ns)
+            ? static_cast<double>(latest_right_pair_time_ns - selected_right_pair_time_ns) / 1'000'000.0
             : 0.0;
     if (!has_new_left && !has_new_right) {
         set_wait_status("waiting next frame", &metrics_.wait_next_frame_count);
@@ -2139,8 +2315,10 @@ void StitchEngine::update_metrics_locked() {
         const bool right_reused = !has_new_right;
         const double max_reuse_age_ms = std::max(1.0, config_.pair_reuse_max_age_ms);
         const int max_consecutive_reuse = std::max(1, config_.pair_reuse_max_consecutive);
-        const double left_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.left_ts_ns)) / 1'000'000.0;
-        const double right_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair.right_ts_ns)) / 1'000'000.0;
+        const double left_age_ms =
+            static_cast<double>(std::max<std::int64_t>(0, current_pair_now_ns - selected_left_pair_time_ns)) / 1'000'000.0;
+        const double right_age_ms =
+            static_cast<double>(std::max<std::int64_t>(0, current_pair_now_ns - selected_right_pair_time_ns)) / 1'000'000.0;
         const bool can_reuse_left =
             left_reused &&
             left_age_ms <= max_reuse_age_ms &&
@@ -2158,12 +2336,10 @@ void StitchEngine::update_metrics_locked() {
         metrics_.realtime_fallback_pair_count += 1;
     }
 
-    const auto pair_ts_ns = std::max(pair.left_ts_ns, pair.right_ts_ns);
-    const auto scheduler_pair_ts_ns = std::max(
-        pair.left_ts_ns,
-        pair.right_ts_ns + static_cast<std::int64_t>(config_.sync_manual_offset_ms * 1'000'000.0));
-    const double pair_age_ms = static_cast<double>(std::max<std::int64_t>(0, now_ns - pair_ts_ns)) / 1'000'000.0;
-    if (last_worker_timestamp_ns_ > 0) {
+    const auto pair_ts_ns = pair.pair_time_ns;
+    const auto scheduler_pair_ts_ns = pair.scheduler_pair_time_ns;
+    const double pair_age_ms = static_cast<double>(std::max<std::int64_t>(0, current_pair_now_ns - pair_ts_ns)) / 1'000'000.0;
+    if (last_worker_timestamp_ns_ > 0 && last_pair_time_domain_ == pair_time_domain) {
         metrics_.worker_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
         metrics_.worker_fps = 0.0;
@@ -2184,6 +2360,7 @@ void StitchEngine::update_metrics_locked() {
     if (config_.sync_pair_mode == "service") {
         last_service_pair_ts_ns_ = scheduler_pair_ts_ns;
     }
+    last_pair_time_domain_ = pair_time_domain;
     if (config_.stitch_every_n > 1 && (std::max(pair.left_seq, pair.right_seq) % config_.stitch_every_n) != 0) {
         metrics_.reused_count += 1;
         metrics_.status = "skipping per stitch_every_n";

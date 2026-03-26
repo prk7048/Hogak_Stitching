@@ -24,12 +24,17 @@
 현재 문서와 코드가 같이 가리키는 baseline은 다음이다.
 
 - input runtime: `ffmpeg-cuda`
+- input reader model: in-process `libav` demux/decode
 - input pipe format: `nv12`
 - input buffer: `8`
 - pair mode: `service`
 - transmit runtime: `gpu-direct`
 - output codec baseline: `h264_nvenc`
 - transmit size: stitched output size 그대로
+- timing model:
+  - arrival metrics는 계속 운영 기준
+  - source timestamp는 병행 수집
+  - cross-camera comparable source time이 없으면 pairing은 `fallback-arrival`
 - supported presets:
   - `realtime_hq_1080p`
   - `realtime_gpu_1080p`
@@ -44,6 +49,7 @@
 - `gpu-direct` transmit 동작
 - Python UI 경로와 direct Python headless 경로 정렬
 - monitor에서 input/stitch/transmit/system 상태 확인
+- source timing metrics(`left_source_age_ms`, `right_source_age_ms`, `pair_source_skew_ms_mean`, `source_time_mode`) 노출
 - `ffplay` / `opencv` viewer fallback 동작
 
 즉 end-to-end 운영 경로 자체는 이미 살아 있고, 구조를 다시 갈아엎는 단계는 지났다.
@@ -61,9 +67,10 @@
 아직 남아 있는 리스크는 다음이다.
 
 1. right-side input cadence/source jitter
-2. long-run strict fresh `30fps` 미검증
-3. OpenCV CUDA build에서 `NV12 -> BGR` GPU 변환 미지원
-4. source 문제와 code 문제를 완전히 분리 진단하지 않은 상태
+2. source wallclock이 모든 환경에서 cross-camera comparable하지 않을 수 있음
+3. long-run strict fresh `30fps` 미검증
+4. OpenCV CUDA build에서 `NV12 -> BGR` GPU 변환 미지원
+5. source 문제와 code 문제를 완전히 분리 진단하지 않은 상태
 
 핵심은 더 이상 viewer나 output writer가 아니라 `input/pair/source` 쪽 변동성이다.
 
@@ -89,6 +96,7 @@
 - 현재 `30fps`급 카메라 입력 조건에서
 - `gpu-direct` transmit baseline을 유지하고
 - input/source 흔들림이 실제 병목인지 분리 확인하고
+- source timestamp가 있는 환경에서는 arrival보다 더 나은 pair 선택이 가능한지 확인하고
 - 장시간 실행에서도 운영 가능한지 검증하는 상태
 
 ## Priority Order
@@ -110,6 +118,7 @@
 - viewer off / probe disabled baseline
 - 30분 이상 long-run
 - `active_stitch_fps`, `waiting_ratio`, `transmit_to_stitched_ratio`, read/restart 지표 기록
+- `pair_skew_ms_mean`, `pair_source_skew_ms_mean`, `source_time_mode` 함께 기록
 
 ### 3. Limited Code Follow-Up Only If Needed
 
@@ -137,7 +146,7 @@ source 문제가 아니라 code 병목으로 확인된 경우에만:
 
 1. 메인 실행 경로가 문서와 일치한다
 2. `strict fresh 30fps` long-run 결과가 충분히 해석 가능하다
-3. source 문제인지 code 문제인지 분리 판단이 가능하다
+3. arrival/source 지표를 같이 보고 source 문제인지 code 문제인지 분리 판단이 가능하다
 4. 운영 baseline과 장기 60fps 계획이 문서에서 구분된다
 
 ## What Comes After This Stage

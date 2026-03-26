@@ -39,8 +39,27 @@ private:
         cv::Mat right_frame;
         std::int64_t left_seq = 0;
         std::int64_t right_seq = 0;
-        std::int64_t left_ts_ns = 0;
-        std::int64_t right_ts_ns = 0;
+        std::int64_t left_ts_ns = 0;   // Legacy alias for left_arrival_ts_ns.
+        std::int64_t right_ts_ns = 0;  // Legacy alias for right_arrival_ts_ns.
+        std::int64_t left_arrival_ts_ns = 0;
+        std::int64_t right_arrival_ts_ns = 0;
+        std::int64_t left_source_pts_ns = 0;
+        std::int64_t right_source_pts_ns = 0;
+        std::int64_t left_source_dts_ns = 0;
+        std::int64_t right_source_dts_ns = 0;
+        std::int64_t left_source_wallclock_ns = 0;
+        std::int64_t right_source_wallclock_ns = 0;
+        bool left_source_time_valid = false;
+        bool right_source_time_valid = false;
+        bool left_source_time_comparable = false;
+        bool right_source_time_comparable = false;
+        hogak::input::SourceTimeKind left_source_time_kind = hogak::input::SourceTimeKind::kNone;
+        hogak::input::SourceTimeKind right_source_time_kind = hogak::input::SourceTimeKind::kNone;
+        hogak::input::FrameTimeDomain pair_time_domain = hogak::input::FrameTimeDomain::kArrival;
+        std::int64_t pair_time_ns = 0;
+        std::int64_t scheduler_pair_time_ns = 0;
+        std::int64_t arrival_skew_ns = 0;
+        std::int64_t source_skew_ns = 0;
     };
 
     void clear_calibration_state_locked();
@@ -86,6 +105,7 @@ private:
     std::int64_t last_right_seq_ = 0;
     std::int64_t last_service_pair_ts_ns_ = 0;
     std::int64_t last_worker_timestamp_ns_ = 0;
+    hogak::input::FrameTimeDomain last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
     std::int64_t last_stitched_count_ = 0;
     std::int64_t last_stitch_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;

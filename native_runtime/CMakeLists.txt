@@ -10,7 +10,7 @@ if(MSVC)
 endif()
 
 option(NATIVE_RUNTIME_ENABLE_WARNINGS "Enable extra warnings" ON)
-option(HOGAK_ENABLE_GPU_DIRECT_AVCODEC "Enable dependency tracking for a future libavcodec/NVENC gpu-direct writer" ON)
+option(HOGAK_ENABLE_GPU_DIRECT_AVCODEC "Enable libavcodec/NVENC gpu-direct writer path" ON)
 
 set(HOGAK_REPO_LOCAL_OPENCV_DIR
     "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/opencv-python/_skbuild/win-amd64-3.12/cmake-install/x64/vc17/staticlib"
@@ -55,57 +55,60 @@ set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS "disabled")
 set(HOGAK_GPU_DIRECT_FFMPEG_DEV_ROOT "")
 set(HOGAK_GPU_DIRECT_CUDA_RUNTIME_ENABLED OFF)
 
+find_package(CUDAToolkit QUIET)
+if(CUDAToolkit_FOUND)
+    set(HOGAK_GPU_DIRECT_CUDA_RUNTIME_ENABLED ON)
+endif()
+
+set(_hogak_ffmpeg_dev_candidates "")
+if(HOGAK_FFMPEG_DEV_ROOT)
+    list(APPEND _hogak_ffmpeg_dev_candidates "${HOGAK_FFMPEG_DEV_ROOT}")
+endif()
+if(DEFINED ENV{HOGAK_FFMPEG_DEV_ROOT} AND NOT "$ENV{HOGAK_FFMPEG_DEV_ROOT}" STREQUAL "")
+    list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{HOGAK_FFMPEG_DEV_ROOT}")
+endif()
+if(DEFINED ENV{FFMPEG_DEV_ROOT} AND NOT "$ENV{FFMPEG_DEV_ROOT}" STREQUAL "")
+    list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{FFMPEG_DEV_ROOT}")
+endif()
+list(APPEND _hogak_ffmpeg_dev_candidates
+    "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/ffmpeg-dev/current"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/ffmpeg/current"
+)
+
+set(_hogak_ffmpeg_dev_include "")
+set(_hogak_ffmpeg_dev_lib "")
+foreach(_hogak_candidate IN LISTS _hogak_ffmpeg_dev_candidates)
+    if(NOT _hogak_candidate)
+        continue()
+    endif()
+    if(EXISTS "${_hogak_candidate}/include/libavcodec/avcodec.h"
+       AND EXISTS "${_hogak_candidate}/include/libavformat/avformat.h"
+       AND EXISTS "${_hogak_candidate}/include/libavutil/hwcontext.h"
+       AND EXISTS "${_hogak_candidate}/include/libswscale/swscale.h"
+       AND EXISTS "${_hogak_candidate}/lib/avcodec.lib"
+       AND EXISTS "${_hogak_candidate}/lib/avformat.lib"
+       AND EXISTS "${_hogak_candidate}/lib/avutil.lib"
+       AND EXISTS "${_hogak_candidate}/lib/swscale.lib")
+        set(_hogak_ffmpeg_dev_include "${_hogak_candidate}/include")
+        set(_hogak_ffmpeg_dev_lib "${_hogak_candidate}/lib")
+        set(HOGAK_GPU_DIRECT_FFMPEG_DEV_ROOT "${_hogak_candidate}")
+        break()
+    endif()
+endforeach()
+
+if(NOT _hogak_ffmpeg_dev_include OR NOT _hogak_ffmpeg_dev_lib)
+    message(FATAL_ERROR
+        "FFmpeg development headers/libs are required for the native RTSP reader. "
+        "Set HOGAK_FFMPEG_DEV_ROOT to a directory containing include/libavcodec and lib/avcodec.lib.")
+endif()
+
 if(HOGAK_ENABLE_GPU_DIRECT_AVCODEC)
-    find_package(CUDAToolkit QUIET)
-    if(CUDAToolkit_FOUND)
-        set(HOGAK_GPU_DIRECT_CUDA_RUNTIME_ENABLED ON)
-    endif()
-
-    set(_hogak_ffmpeg_dev_candidates "")
-    if(HOGAK_FFMPEG_DEV_ROOT)
-        list(APPEND _hogak_ffmpeg_dev_candidates "${HOGAK_FFMPEG_DEV_ROOT}")
-    endif()
-    if(DEFINED ENV{HOGAK_FFMPEG_DEV_ROOT} AND NOT "$ENV{HOGAK_FFMPEG_DEV_ROOT}" STREQUAL "")
-        list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{HOGAK_FFMPEG_DEV_ROOT}")
-    endif()
-    if(DEFINED ENV{FFMPEG_DEV_ROOT} AND NOT "$ENV{FFMPEG_DEV_ROOT}" STREQUAL "")
-        list(APPEND _hogak_ffmpeg_dev_candidates "$ENV{FFMPEG_DEV_ROOT}")
-    endif()
-    list(APPEND _hogak_ffmpeg_dev_candidates
-        "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/ffmpeg-dev/current"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../.third_party/ffmpeg/current"
-    )
-
-    set(_hogak_ffmpeg_dev_include "")
-    set(_hogak_ffmpeg_dev_lib "")
-    foreach(_hogak_candidate IN LISTS _hogak_ffmpeg_dev_candidates)
-        if(NOT _hogak_candidate)
-            continue()
-        endif()
-        if(EXISTS "${_hogak_candidate}/include/libavcodec/avcodec.h"
-           AND EXISTS "${_hogak_candidate}/include/libavformat/avformat.h"
-           AND EXISTS "${_hogak_candidate}/include/libavutil/hwcontext.h"
-           AND EXISTS "${_hogak_candidate}/lib/avcodec.lib"
-           AND EXISTS "${_hogak_candidate}/lib/avformat.lib"
-           AND EXISTS "${_hogak_candidate}/lib/avutil.lib")
-            set(_hogak_ffmpeg_dev_include "${_hogak_candidate}/include")
-            set(_hogak_ffmpeg_dev_lib "${_hogak_candidate}/lib")
-            set(HOGAK_GPU_DIRECT_FFMPEG_DEV_ROOT "${_hogak_candidate}")
-            set(HOGAK_GPU_DIRECT_AVCODEC_ENABLED ON)
-            break()
-        endif()
-    endforeach()
-
-    if(HOGAK_GPU_DIRECT_AVCODEC_ENABLED)
-        set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS
-            "ready: FFmpeg dev headers/libs found for future libavcodec/NVENC writer work")
-    else()
-        set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS
-            "missing FFmpeg dev headers/libs; set HOGAK_FFMPEG_DEV_ROOT to a directory containing include/libavcodec and lib/avcodec.lib")
-    endif()
+    set(HOGAK_GPU_DIRECT_AVCODEC_ENABLED ON)
+    set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS
+        "ready: FFmpeg dev headers/libs found for libav input reader and gpu-direct writer")
 else()
     set(HOGAK_GPU_DIRECT_DEPENDENCY_STATUS
-        "disabled by HOGAK_ENABLE_GPU_DIRECT_AVCODEC=OFF")
+        "ready: FFmpeg dev headers/libs found for libav input reader; gpu-direct writer disabled by HOGAK_ENABLE_GPU_DIRECT_AVCODEC=OFF")
 endif()
 
 message(STATUS "Hogak OpenCV_DIR=${OpenCV_DIR}")
@@ -154,15 +157,8 @@ target_include_directories(
     ${CMAKE_CURRENT_BINARY_DIR}/generated
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src
+    ${_hogak_ffmpeg_dev_include}
 )
-
-if(HOGAK_GPU_DIRECT_AVCODEC_ENABLED)
-    target_include_directories(
-        stitch_engine_core
-        PRIVATE
-        ${_hogak_ffmpeg_dev_include}
-    )
-endif()
 
 if(MSVC AND NATIVE_RUNTIME_ENABLE_WARNINGS)
     target_compile_options(stitch_engine_core PRIVATE /W4 /permissive-)
@@ -187,18 +183,12 @@ target_link_libraries(
     stitch_engine_core
     PUBLIC
     ${OpenCV_LIBS}
+    PRIVATE
+    "${_hogak_ffmpeg_dev_lib}/avcodec.lib"
+    "${_hogak_ffmpeg_dev_lib}/avformat.lib"
+    "${_hogak_ffmpeg_dev_lib}/avutil.lib"
+    "${_hogak_ffmpeg_dev_lib}/swscale.lib"
 )
-
-if(HOGAK_GPU_DIRECT_AVCODEC_ENABLED)
-    target_link_libraries(
-        stitch_engine_core
-        PRIVATE
-        "${_hogak_ffmpeg_dev_lib}/avcodec.lib"
-        "${_hogak_ffmpeg_dev_lib}/avformat.lib"
-        "${_hogak_ffmpeg_dev_lib}/avutil.lib"
-        "${_hogak_ffmpeg_dev_lib}/swscale.lib"
-    )
-endif()
 
 if(HOGAK_GPU_DIRECT_CUDA_RUNTIME_ENABLED)
     target_link_libraries(

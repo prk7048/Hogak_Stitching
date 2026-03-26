@@ -72,6 +72,8 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"right_buffer_seq_span\":" << metrics.right_buffer_seq_span << ','
         << "\"left_age_ms\":" << metrics.left_age_ms << ','
         << "\"right_age_ms\":" << metrics.right_age_ms << ','
+        << "\"left_source_age_ms\":" << metrics.left_source_age_ms << ','
+        << "\"right_source_age_ms\":" << metrics.right_source_age_ms << ','
         << "\"selected_left_lag_ms\":" << metrics.selected_left_lag_ms << ','
         << "\"selected_right_lag_ms\":" << metrics.selected_right_lag_ms << ','
         << "\"selected_left_lag_frames\":" << metrics.selected_left_lag_frames << ','
@@ -85,6 +87,10 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"output_written_fps\":" << metrics.output_written_fps << ','
         << "\"production_output_written_fps\":" << metrics.production_output_written_fps << ','
         << "\"pair_skew_ms_mean\":" << metrics.pair_skew_ms_mean << ','
+        << "\"pair_source_skew_ms_mean\":" << metrics.pair_source_skew_ms_mean << ','
+        << "\"source_time_valid_left\":" << (metrics.source_time_valid_left ? "true" : "false") << ','
+        << "\"source_time_valid_right\":" << (metrics.source_time_valid_right ? "true" : "false") << ','
+        << "\"source_time_mode\":\"" << json_escape(metrics.source_time_mode) << "\","
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
         << "\"gpu_errors\":" << metrics.gpu_errors << ','
