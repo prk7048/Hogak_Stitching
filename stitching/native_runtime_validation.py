@@ -17,6 +17,15 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
     DEFAULT_NATIVE_INPUT_RUNTIME,
     DEFAULT_NATIVE_RTSP_TRANSPORT,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS,
+    DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS,
+    DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC,
+    DEFAULT_NATIVE_SYNC_TIME_SOURCE,
     DEFAULT_NATIVE_TRANSMIT_PRESET,
     DEFAULT_NATIVE_TRANSMIT_RUNTIME,
     DEFAULT_NATIVE_TRANSMIT_TARGET,
@@ -46,8 +55,19 @@ def add_native_validation_args(cmd: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Override strict-fresh baseline and allow stale one-side reuse during validation",
     )
+    cmd.add_argument(
+        "--sync-time-source",
+        choices=["pts-offset-auto", "pts-offset-manual", "pts-offset-hybrid", "arrival", "wallclock"],
+        default=DEFAULT_NATIVE_SYNC_TIME_SOURCE,
+    )
     cmd.add_argument("--sync-match-max-delta-ms", type=float, default=None)
-    cmd.add_argument("--sync-manual-offset-ms", type=float, default=0.0)
+    cmd.add_argument("--sync-manual-offset-ms", type=float, default=DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS)
+    cmd.add_argument("--sync-auto-offset-window-sec", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC)
+    cmd.add_argument("--sync-auto-offset-max-search-ms", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS)
+    cmd.add_argument("--sync-recalibration-interval-sec", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC)
+    cmd.add_argument("--sync-recalibration-trigger-skew-ms", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS)
+    cmd.add_argument("--sync-recalibration-trigger-wait-ratio", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO)
+    cmd.add_argument("--sync-auto-offset-confidence-min", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN)
     cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="on")
     cmd.add_argument("--gpu-device", type=int, default=0)
     cmd.add_argument("--report-out", default="", help="Optional explicit JSON report path")
@@ -285,6 +305,10 @@ def _compact_runtime_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "production_output_written_fps",
         "pair_skew_ms_mean",
         "pair_source_skew_ms_mean",
+        "sync_effective_offset_ms",
+        "sync_offset_source",
+        "sync_offset_confidence",
+        "sync_recalibration_count",
         "left_age_ms",
         "right_age_ms",
         "left_source_age_ms",
@@ -355,11 +379,7 @@ def _classify_validation(
 
     if dominant_source_mode == "fallback-arrival":
         reasons.append(f"source_mode={dominant_source_mode}")
-        if source_probe_wallclock_comparable:
-            bottleneck_guess = "code-limited"
-            reasons.append("source_probe_wallclock_available_but_runtime_fallback")
-        else:
-            bottleneck_guess = "source-limited"
+        bottleneck_guess = "code-limited"
     elif (
         wait_sync_ratio >= 0.35
         or (
@@ -421,8 +441,15 @@ def run_native_validation(args: argparse.Namespace) -> int:
         allow_frame_reuse=bool(args.allow_frame_reuse),
         pair_reuse_max_age_ms=140.0,
         pair_reuse_max_consecutive=4,
+        sync_time_source=str(args.sync_time_source),
         sync_match_max_delta_ms=float(args.sync_match_max_delta_ms or preset.sync_match_max_delta_ms),
         sync_manual_offset_ms=float(args.sync_manual_offset_ms),
+        sync_auto_offset_window_sec=float(args.sync_auto_offset_window_sec),
+        sync_auto_offset_max_search_ms=float(args.sync_auto_offset_max_search_ms),
+        sync_recalibration_interval_sec=float(args.sync_recalibration_interval_sec),
+        sync_recalibration_trigger_skew_ms=float(args.sync_recalibration_trigger_skew_ms),
+        sync_recalibration_trigger_wait_ratio=float(args.sync_recalibration_trigger_wait_ratio),
+        sync_auto_offset_confidence_min=float(args.sync_auto_offset_confidence_min),
         stitch_output_scale=float(preset.output_scale),
         stitch_every_n=1,
         gpu_mode=str(args.gpu_mode),
@@ -529,8 +556,15 @@ def run_native_validation(args: argparse.Namespace) -> int:
             "strict_fresh": not bool(args.allow_frame_reuse),
             "allow_frame_reuse": bool(args.allow_frame_reuse),
             "sync_pair_mode": "service",
+            "sync_time_source": str(args.sync_time_source),
             "sync_match_max_delta_ms": float(args.sync_match_max_delta_ms or preset.sync_match_max_delta_ms),
             "sync_manual_offset_ms": float(args.sync_manual_offset_ms),
+            "sync_auto_offset_window_sec": float(args.sync_auto_offset_window_sec),
+            "sync_auto_offset_max_search_ms": float(args.sync_auto_offset_max_search_ms),
+            "sync_recalibration_interval_sec": float(args.sync_recalibration_interval_sec),
+            "sync_recalibration_trigger_skew_ms": float(args.sync_recalibration_trigger_skew_ms),
+            "sync_recalibration_trigger_wait_ratio": float(args.sync_recalibration_trigger_wait_ratio),
+            "sync_auto_offset_confidence_min": float(args.sync_auto_offset_confidence_min),
             "transmit_runtime": DEFAULT_NATIVE_TRANSMIT_RUNTIME,
             "transmit_target": DEFAULT_NATIVE_TRANSMIT_TARGET,
             "transmit_codec": str(preset.codec),

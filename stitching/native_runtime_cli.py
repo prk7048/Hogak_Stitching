@@ -17,6 +17,18 @@ from stitching.final_stream_viewer import FinalStreamViewerSpec, launch_final_st
 from stitching.output_presets import OUTPUT_PRESETS, get_output_preset
 from stitching.project_defaults import (
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+    DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
+    DEFAULT_NATIVE_INPUT_RUNTIME,
+    DEFAULT_NATIVE_RTSP_TRANSPORT,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS,
+    DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS,
+    DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC,
+    DEFAULT_NATIVE_SYNC_TIME_SOURCE,
     default_left_rtsp,
     default_output_standard,
     default_right_rtsp,
@@ -552,10 +564,10 @@ def _decorate_pipeline_metrics(
 def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--left-rtsp", default=default_left_rtsp(), help="Left RTSP URL")
     cmd.add_argument("--right-rtsp", default=default_right_rtsp(), help="Right RTSP URL")
-    cmd.add_argument("--input-runtime", choices=["ffmpeg-cpu", "ffmpeg-cuda"], default="ffmpeg-cuda")
+    cmd.add_argument("--input-runtime", choices=["ffmpeg-cpu", "ffmpeg-cuda"], default=DEFAULT_NATIVE_INPUT_RUNTIME)
     cmd.add_argument("--ffmpeg-bin", default="", help="Optional explicit ffmpeg.exe path")
-    cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
-    cmd.add_argument("--input-buffer-frames", type=int, default=8, help="Max buffered frames per RTSP reader")
+    cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default=DEFAULT_NATIVE_RTSP_TRANSPORT)
+    cmd.add_argument("--input-buffer-frames", type=int, default=DEFAULT_NATIVE_INPUT_BUFFER_FRAMES, help="Max buffered frames per RTSP reader")
     cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
     cmd.add_argument("--reconnect-cooldown-sec", type=float, default=1.0)
     cmd.add_argument("--heartbeat-ms", type=int, default=1000)
@@ -633,8 +645,20 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
     cmd.add_argument("--allow-frame-reuse", action="store_true", help="Allow stale one-side pair reuse for smoother output")
     cmd.add_argument("--pair-reuse-max-age-ms", type=float, default=90.0)
     cmd.add_argument("--pair-reuse-max-consecutive", type=int, default=2)
-    cmd.add_argument("--sync-match-max-delta-ms", type=float, default=35.0)
-    cmd.add_argument("--sync-manual-offset-ms", type=float, default=0.0)
+    cmd.add_argument(
+        "--sync-time-source",
+        choices=["pts-offset-auto", "pts-offset-manual", "pts-offset-hybrid", "arrival", "wallclock"],
+        default=DEFAULT_NATIVE_SYNC_TIME_SOURCE,
+        help="Pairing time domain. Default prefers source PTS with auto-estimated offset.",
+    )
+    cmd.add_argument("--sync-match-max-delta-ms", type=float, default=DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS)
+    cmd.add_argument("--sync-manual-offset-ms", type=float, default=DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS)
+    cmd.add_argument("--sync-auto-offset-window-sec", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC)
+    cmd.add_argument("--sync-auto-offset-max-search-ms", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS)
+    cmd.add_argument("--sync-recalibration-interval-sec", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC)
+    cmd.add_argument("--sync-recalibration-trigger-skew-ms", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS)
+    cmd.add_argument("--sync-recalibration-trigger-wait-ratio", type=float, default=DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO)
+    cmd.add_argument("--sync-auto-offset-confidence-min", type=float, default=DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN)
     cmd.add_argument("--stitch-output-scale", type=float, default=1.0)
     cmd.add_argument("--stitch-every-n", type=int, default=1)
     cmd.add_argument("--gpu-mode", choices=["off", "auto", "on"], default="on")
@@ -717,12 +741,21 @@ def _compact_metrics(payload: dict[str, Any]) -> str:
     left_source_age_ms = payload.get("left_source_age_ms")
     right_source_age_ms = payload.get("right_source_age_ms")
     if (
-        source_time_mode == "wallclock"
+        source_time_mode != "fallback-arrival"
         and isinstance(left_source_age_ms, (int, float))
         and isinstance(right_source_age_ms, (int, float))
     ):
         if float(left_source_age_ms) > 0.0 or float(right_source_age_ms) > 0.0:
             parts.append(f"source_age_ms=({float(left_source_age_ms):.0f},{float(right_source_age_ms):.0f})")
+    sync_effective_offset_ms = payload.get("sync_effective_offset_ms")
+    sync_offset_source = str(payload.get("sync_offset_source") or "").strip()
+    sync_offset_confidence = payload.get("sync_offset_confidence")
+    if isinstance(sync_effective_offset_ms, (int, float)):
+        parts.append(f"sync_offset_ms={float(sync_effective_offset_ms):.2f}")
+    if sync_offset_source:
+        parts.append(f"sync_offset_source={sync_offset_source}")
+    if isinstance(sync_offset_confidence, (int, float)):
+        parts.append(f"sync_conf={float(sync_offset_confidence):.2f}")
     left_buffered = int(payload.get("left_buffered_frames") or 0)
     right_buffered = int(payload.get("right_buffered_frames") or 0)
     if left_buffered > 0 or right_buffered > 0:
@@ -862,6 +895,12 @@ def _render_dashboard(
             f"right_age_ms={float(payload.get('right_source_age_ms') or 0.0):7.0f}  "
             f"valid=({_format_flag(bool(payload.get('source_time_valid_left')))},"
             f"{_format_flag(bool(payload.get('source_time_valid_right')))})"
+        ),
+        (
+            f"sync   offset_ms={float(payload.get('sync_effective_offset_ms') or 0.0):8.2f}  "
+            f"source={str(payload.get('sync_offset_source') or 'arrival-fallback'):>16}  "
+            f"conf={float(payload.get('sync_offset_confidence') or 0.0):5.2f}  "
+            f"recal={int(payload.get('sync_recalibration_count') or 0):4d}"
         ),
         (
             f"motion left={float(payload.get('left_motion_mean') or 0.0):6.2f}  "
@@ -1083,8 +1122,15 @@ def run_native_runtime_monitor(args: argparse.Namespace) -> int:
         allow_frame_reuse=bool(args.allow_frame_reuse),
         pair_reuse_max_age_ms=max(1.0, float(args.pair_reuse_max_age_ms)),
         pair_reuse_max_consecutive=max(1, int(args.pair_reuse_max_consecutive)),
+        sync_time_source=str(args.sync_time_source),
         sync_match_max_delta_ms=max(1.0, float(args.sync_match_max_delta_ms)),
         sync_manual_offset_ms=float(args.sync_manual_offset_ms),
+        sync_auto_offset_window_sec=max(1.0, float(args.sync_auto_offset_window_sec)),
+        sync_auto_offset_max_search_ms=max(0.0, float(args.sync_auto_offset_max_search_ms)),
+        sync_recalibration_interval_sec=max(1.0, float(args.sync_recalibration_interval_sec)),
+        sync_recalibration_trigger_skew_ms=max(0.0, float(args.sync_recalibration_trigger_skew_ms)),
+        sync_recalibration_trigger_wait_ratio=max(0.0, min(1.0, float(args.sync_recalibration_trigger_wait_ratio))),
+        sync_auto_offset_confidence_min=max(0.0, min(1.0, float(args.sync_auto_offset_confidence_min))),
         stitch_output_scale=max(0.1, float(args.stitch_output_scale)),
         stitch_every_n=max(1, int(args.stitch_every_n)),
         gpu_mode=str(args.gpu_mode),

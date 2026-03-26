@@ -18,7 +18,15 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC,
     DEFAULT_NATIVE_RTSP_TRANSPORT,
     DEFAULT_NATIVE_RTSP_TIMEOUT_SEC,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS,
     DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS,
+    DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS,
+    DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO,
+    DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC,
+    DEFAULT_NATIVE_SYNC_TIME_SOURCE,
     DEFAULT_NATIVE_TRANSMIT_BITRATE,
     DEFAULT_NATIVE_TRANSMIT_DEBUG_OVERLAY,
     DEFAULT_NATIVE_TRANSMIT_HEIGHT,
@@ -74,7 +82,14 @@ class RuntimeLaunchSpec:
     pair_reuse_max_age_ms: float = DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS
     pair_reuse_max_consecutive: int = DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE
     sync_match_max_delta_ms: float = DEFAULT_NATIVE_SYNC_MATCH_MAX_DELTA_MS
-    sync_manual_offset_ms: float = 0.0
+    sync_time_source: str = DEFAULT_NATIVE_SYNC_TIME_SOURCE
+    sync_manual_offset_ms: float = DEFAULT_NATIVE_SYNC_MANUAL_OFFSET_MS
+    sync_auto_offset_window_sec: float = DEFAULT_NATIVE_SYNC_AUTO_OFFSET_WINDOW_SEC
+    sync_auto_offset_max_search_ms: float = DEFAULT_NATIVE_SYNC_AUTO_OFFSET_MAX_SEARCH_MS
+    sync_recalibration_interval_sec: float = DEFAULT_NATIVE_SYNC_RECALIBRATION_INTERVAL_SEC
+    sync_recalibration_trigger_skew_ms: float = DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_SKEW_MS
+    sync_recalibration_trigger_wait_ratio: float = DEFAULT_NATIVE_SYNC_RECALIBRATION_TRIGGER_WAIT_RATIO
+    sync_auto_offset_confidence_min: float = DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN
     stitch_output_scale: float = 1.0
     stitch_every_n: int = 1
     gpu_mode: str = "on"
@@ -360,7 +375,14 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
     command.extend(["--pair-reuse-max-age-ms", f"{float(spec.pair_reuse_max_age_ms):.3f}"])
     command.extend(["--pair-reuse-max-consecutive", str(max(1, int(spec.pair_reuse_max_consecutive)))])
     command.extend(["--sync-match-max-delta-ms", f"{float(spec.sync_match_max_delta_ms):.3f}"])
+    command.extend(["--sync-time-source", str(spec.sync_time_source or DEFAULT_NATIVE_SYNC_TIME_SOURCE)])
     command.extend(["--sync-manual-offset-ms", f"{float(spec.sync_manual_offset_ms):.3f}"])
+    command.extend(["--sync-auto-offset-window-sec", f"{float(spec.sync_auto_offset_window_sec):.3f}"])
+    command.extend(["--sync-auto-offset-max-search-ms", f"{float(spec.sync_auto_offset_max_search_ms):.3f}"])
+    command.extend(["--sync-recalibration-interval-sec", f"{float(spec.sync_recalibration_interval_sec):.3f}"])
+    command.extend(["--sync-recalibration-trigger-skew-ms", f"{float(spec.sync_recalibration_trigger_skew_ms):.3f}"])
+    command.extend(["--sync-recalibration-trigger-wait-ratio", f"{float(spec.sync_recalibration_trigger_wait_ratio):.3f}"])
+    command.extend(["--sync-auto-offset-confidence-min", f"{float(spec.sync_auto_offset_confidence_min):.3f}"])
     command.extend(["--stitch-output-scale", f"{float(spec.stitch_output_scale):.3f}"])
     command.extend(["--stitch-every-n", str(max(1, int(spec.stitch_every_n)))])
     if spec.gpu_mode:

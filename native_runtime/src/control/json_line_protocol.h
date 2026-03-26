@@ -91,6 +91,10 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"source_time_valid_left\":" << (metrics.source_time_valid_left ? "true" : "false") << ','
         << "\"source_time_valid_right\":" << (metrics.source_time_valid_right ? "true" : "false") << ','
         << "\"source_time_mode\":\"" << json_escape(metrics.source_time_mode) << "\","
+        << "\"sync_effective_offset_ms\":" << metrics.sync_effective_offset_ms << ','
+        << "\"sync_offset_source\":\"" << json_escape(metrics.sync_offset_source) << "\","
+        << "\"sync_offset_confidence\":" << metrics.sync_offset_confidence << ','
+        << "\"sync_recalibration_count\":" << metrics.sync_recalibration_count << ','
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
         << "\"gpu_errors\":" << metrics.gpu_errors << ','

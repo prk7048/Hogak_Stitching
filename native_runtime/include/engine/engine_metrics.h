@@ -48,6 +48,10 @@ struct EngineMetrics {
     bool source_time_valid_left = false;
     bool source_time_valid_right = false;
     std::string source_time_mode = "fallback-arrival";
+    double sync_effective_offset_ms = 0.0;
+    std::string sync_offset_source = "arrival-fallback";
+    double sync_offset_confidence = 0.0;
+    int64_t sync_recalibration_count = 0;
     int32_t matches = 0;
     int32_t inliers = 0;
     int64_t stitched_count = 0;

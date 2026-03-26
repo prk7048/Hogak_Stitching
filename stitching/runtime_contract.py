@@ -9,6 +9,13 @@ InputRuntime = Literal["ffmpeg-cpu", "ffmpeg-cuda", "opencv"]
 OutputRuntime = Literal["none", "ffmpeg", "gpu-direct"]
 Transport = Literal["tcp", "udp"]
 SyncPairMode = Literal["none", "latest", "oldest", "service"]
+SyncTimeSource = Literal[
+    "pts-offset-auto",
+    "pts-offset-manual",
+    "pts-offset-hybrid",
+    "arrival",
+    "wallclock",
+]
 GpuMode = Literal["off", "auto", "on"]
 CommandType = Literal[
     "start",
@@ -65,7 +72,14 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "pair_reuse_max_age_ms",
     "pair_reuse_max_consecutive",
     "sync_match_max_delta_ms",
+    "sync_time_source",
     "sync_manual_offset_ms",
+    "sync_auto_offset_window_sec",
+    "sync_auto_offset_max_search_ms",
+    "sync_recalibration_interval_sec",
+    "sync_recalibration_trigger_skew_ms",
+    "sync_recalibration_trigger_wait_ratio",
+    "sync_auto_offset_confidence_min",
     "process_scale",
     "stitch_output_scale",
     "stitch_every_n",
@@ -122,7 +136,14 @@ class EngineConfig:
     pair_reuse_max_age_ms: float = 90.0
     pair_reuse_max_consecutive: int = 2
     sync_match_max_delta_ms: float = 35.0
+    sync_time_source: SyncTimeSource = "pts-offset-auto"
     sync_manual_offset_ms: float = 0.0
+    sync_auto_offset_window_sec: float = 6.0
+    sync_auto_offset_max_search_ms: float = 30000.0
+    sync_recalibration_interval_sec: float = 30.0
+    sync_recalibration_trigger_skew_ms: float = 20.0
+    sync_recalibration_trigger_wait_ratio: float = 0.25
+    sync_auto_offset_confidence_min: float = 0.60
     process_scale: float = 1.0
     stitch_output_scale: float = 1.0
     stitch_every_n: int = 1
@@ -214,6 +235,10 @@ class EngineMetrics:
     source_time_valid_left: bool = False
     source_time_valid_right: bool = False
     source_time_mode: str = "fallback-arrival"
+    sync_effective_offset_ms: float = 0.0
+    sync_offset_source: str = "arrival-fallback"
+    sync_offset_confidence: float = 0.0
+    sync_recalibration_count: int = 0
     matches: int = 0
     inliers: int = 0
     stitched_count: int = 0

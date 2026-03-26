@@ -60,6 +60,9 @@ private:
         std::int64_t scheduler_pair_time_ns = 0;
         std::int64_t arrival_skew_ns = 0;
         std::int64_t source_skew_ns = 0;
+        std::int64_t effective_offset_ns = 0;
+        std::string offset_source = "arrival-fallback";
+        double offset_confidence = 0.0;
     };
 
     void clear_calibration_state_locked();
@@ -106,6 +109,11 @@ private:
     std::int64_t last_service_pair_ts_ns_ = 0;
     std::int64_t last_worker_timestamp_ns_ = 0;
     hogak::input::FrameTimeDomain last_pair_time_domain_ = hogak::input::FrameTimeDomain::kArrival;
+    std::int64_t last_sync_recalibration_ns_ = 0;
+    double effective_sync_offset_ms_ = 0.0;
+    double sync_offset_confidence_ = 0.0;
+    std::int64_t sync_recalibration_count_ = 0;
+    std::string sync_offset_source_ = "arrival-fallback";
     std::int64_t last_stitched_count_ = 0;
     std::int64_t last_stitch_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;

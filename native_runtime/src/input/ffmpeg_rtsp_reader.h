@@ -23,6 +23,7 @@ enum class FrameTimeDomain {
     kArrival = 0,
     kSourceWallclock,
     kSourceComparable,
+    kSourcePtsOffset,
 };
 
 inline const char* source_time_kind_name(SourceTimeKind kind) noexcept {
@@ -43,6 +44,8 @@ inline const char* frame_time_domain_name(FrameTimeDomain domain) noexcept {
             return "wallclock";
         case FrameTimeDomain::kSourceComparable:
             return "stream_pts";
+        case FrameTimeDomain::kSourcePtsOffset:
+            return "stream_pts_offset";
         case FrameTimeDomain::kArrival:
         default:
             return "fallback-arrival";
@@ -103,6 +106,8 @@ struct BufferedFrameInfo {
     bool source_time_valid = false;
     bool source_time_comparable = false;
     SourceTimeKind source_time_kind = SourceTimeKind::kNone;
+    double motion_score = 0.0;
+    double luma_mean = 0.0;
 
     [[nodiscard]] bool has_time(FrameTimeDomain domain) const noexcept {
         switch (domain) {
@@ -113,6 +118,8 @@ struct BufferedFrameInfo {
                     return true;
                 }
                 return source_time_comparable && source_time_valid && source_pts_ns > 0;
+            case FrameTimeDomain::kSourcePtsOffset:
+                return source_time_valid && source_pts_ns > 0;
             case FrameTimeDomain::kArrival:
             default:
                 return arrival_timestamp_ns > 0;
@@ -128,6 +135,8 @@ struct BufferedFrameInfo {
                     return source_wallclock_ns;
                 }
                 return (source_time_comparable && source_time_valid) ? source_pts_ns : 0;
+            case FrameTimeDomain::kSourcePtsOffset:
+                return (source_time_valid && source_pts_ns > 0) ? source_pts_ns : 0;
             case FrameTimeDomain::kArrival:
             default:
                 return arrival_timestamp_ns;
@@ -186,6 +195,8 @@ private:
         bool source_time_valid = false;
         bool source_time_comparable = false;
         SourceTimeKind source_time_kind = SourceTimeKind::kNone;
+        double motion_score = 0.0;
+        double luma_mean = 0.0;
     };
 
     void run();

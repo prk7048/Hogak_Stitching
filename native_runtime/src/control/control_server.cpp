@@ -265,8 +265,29 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         if (extract_json_number(line, "sync_match_max_delta_ms", &number_value)) {
             config.sync_match_max_delta_ms = number_value;
         }
+        if (extract_json_string(line, "sync_time_source", &text_value)) {
+            config.sync_time_source = text_value;
+        }
         if (extract_json_number(line, "sync_manual_offset_ms", &number_value)) {
             config.sync_manual_offset_ms = number_value;
+        }
+        if (extract_json_number(line, "sync_auto_offset_window_sec", &number_value)) {
+            config.sync_auto_offset_window_sec = number_value;
+        }
+        if (extract_json_number(line, "sync_auto_offset_max_search_ms", &number_value)) {
+            config.sync_auto_offset_max_search_ms = number_value;
+        }
+        if (extract_json_number(line, "sync_recalibration_interval_sec", &number_value)) {
+            config.sync_recalibration_interval_sec = number_value;
+        }
+        if (extract_json_number(line, "sync_recalibration_trigger_skew_ms", &number_value)) {
+            config.sync_recalibration_trigger_skew_ms = number_value;
+        }
+        if (extract_json_number(line, "sync_recalibration_trigger_wait_ratio", &number_value)) {
+            config.sync_recalibration_trigger_wait_ratio = number_value;
+        }
+        if (extract_json_number(line, "sync_auto_offset_confidence_min", &number_value)) {
+            config.sync_auto_offset_confidence_min = number_value;
         }
         if (extract_json_number(line, "process_scale", &number_value)) {
             config.process_scale = number_value;

@@ -44,7 +44,14 @@ struct EngineConfig {
     std::string sync_pair_mode = "none";
     bool allow_frame_reuse = false;
     double sync_match_max_delta_ms = 35.0;
+    std::string sync_time_source = "pts-offset-auto";
     double sync_manual_offset_ms = 0.0;
+    double sync_auto_offset_window_sec = 6.0;
+    double sync_auto_offset_max_search_ms = 30000.0;
+    double sync_recalibration_interval_sec = 30.0;
+    double sync_recalibration_trigger_skew_ms = 20.0;
+    double sync_recalibration_trigger_wait_ratio = 0.25;
+    double sync_auto_offset_confidence_min = 0.60;
     double pair_reuse_max_age_ms = 90.0;
     int32_t pair_reuse_max_consecutive = 2;
     double process_scale = 1.0;

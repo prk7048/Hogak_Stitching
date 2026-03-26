@@ -95,7 +95,14 @@ void print_help() {
         << "  --pair-reuse-max-age-ms N  Max stale age allowed for one-side reuse\n"
         << "  --pair-reuse-max-consecutive N  Max consecutive one-side reuses\n"
         << "  --sync-match-max-delta-ms N  Pairing skew threshold\n"
+        << "  --sync-time-source M pts-offset-auto/pts-offset-manual/pts-offset-hybrid/arrival/wallclock\n"
         << "  --sync-manual-offset-ms N    Manual right-stream offset\n"
+        << "  --sync-auto-offset-window-sec N  Auto offset estimation window\n"
+        << "  --sync-auto-offset-max-search-ms N  Auto offset startup search range\n"
+        << "  --sync-recalibration-interval-sec N  Periodic auto offset refresh interval\n"
+        << "  --sync-recalibration-trigger-skew-ms N  Recalibration trigger skew threshold\n"
+        << "  --sync-recalibration-trigger-wait-ratio N  Recalibration trigger wait ratio\n"
+        << "  --sync-auto-offset-confidence-min N  Minimum accepted auto offset confidence\n"
         << "  --stitch-output-scale N      Runtime stitch/output scale\n"
         << "  --stitch-every-n N           Stitch every N selected pairs\n"
         << "  --gpu-mode M      off/auto/on\n"
@@ -197,7 +204,14 @@ int main(int argc, char** argv) {
     config.pair_reuse_max_age_ms = read_double_arg(argc, argv, "--pair-reuse-max-age-ms", 90.0);
     config.pair_reuse_max_consecutive = read_int_arg(argc, argv, "--pair-reuse-max-consecutive", 2);
     config.sync_match_max_delta_ms = read_double_arg(argc, argv, "--sync-match-max-delta-ms", 35.0);
+    config.sync_time_source = read_string_arg(argc, argv, "--sync-time-source", "pts-offset-auto");
     config.sync_manual_offset_ms = read_double_arg(argc, argv, "--sync-manual-offset-ms", 0.0);
+    config.sync_auto_offset_window_sec = read_double_arg(argc, argv, "--sync-auto-offset-window-sec", 6.0);
+    config.sync_auto_offset_max_search_ms = read_double_arg(argc, argv, "--sync-auto-offset-max-search-ms", 30000.0);
+    config.sync_recalibration_interval_sec = read_double_arg(argc, argv, "--sync-recalibration-interval-sec", 30.0);
+    config.sync_recalibration_trigger_skew_ms = read_double_arg(argc, argv, "--sync-recalibration-trigger-skew-ms", 20.0);
+    config.sync_recalibration_trigger_wait_ratio = read_double_arg(argc, argv, "--sync-recalibration-trigger-wait-ratio", 0.25);
+    config.sync_auto_offset_confidence_min = read_double_arg(argc, argv, "--sync-auto-offset-confidence-min", 0.60);
     config.stitch_output_scale = read_double_arg(argc, argv, "--stitch-output-scale", 1.0);
     config.stitch_every_n = read_int_arg(argc, argv, "--stitch-every-n", 1);
     config.gpu_mode = read_string_arg(argc, argv, "--gpu-mode", "on");

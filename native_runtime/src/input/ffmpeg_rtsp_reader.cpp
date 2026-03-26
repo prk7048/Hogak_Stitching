@@ -104,6 +104,13 @@ double frame_motion_score(const cv::Mat& previous_probe_gray, const cv::Mat& cur
     return cv::mean(diff)[0];
 }
 
+double probe_luma_mean(const cv::Mat& probe_gray) {
+    if (probe_gray.empty()) {
+        return 0.0;
+    }
+    return cv::mean(probe_gray)[0];
+}
+
 bool is_effectively_identical_probe(const cv::Mat& previous_probe_gray, const cv::Mat& current_probe_gray) {
     if (previous_probe_gray.empty() || current_probe_gray.empty()) {
         return false;
@@ -652,6 +659,8 @@ void FfmpegRtspReader::buffered_frame_infos(std::vector<BufferedFrameInfo>* info
         info.source_time_valid = frame->source_time_valid;
         info.source_time_comparable = frame->source_time_comparable;
         info.source_time_kind = frame->source_time_kind;
+        info.motion_score = frame->motion_score;
+        info.luma_mean = frame->luma_mean;
         infos_out->push_back(std::move(info));
     }
 }
@@ -753,6 +762,8 @@ bool FfmpegRtspReader::copy_closest_frame(
         info.source_time_valid = buffered_ptr->source_time_valid;
         info.source_time_comparable = buffered_ptr->source_time_comparable;
         info.source_time_kind = buffered_ptr->source_time_kind;
+        info.motion_score = buffered_ptr->motion_score;
+        info.luma_mean = buffered_ptr->luma_mean;
         if (!info.has_time(time_domain)) {
             continue;
         }
@@ -792,6 +803,7 @@ void FfmpegRtspReader::run() {
     std::int64_t freeze_probe_index = 0;
     std::int64_t last_receive_ts_ns = 0;
     double last_motion_mean = 0.0;
+    double last_luma_mean = 0.0;
     double last_frame_interval_ms = 0.0;
     double max_frame_interval_ms = 0.0;
     double frame_intervals_sum_ms = 0.0;
@@ -967,6 +979,7 @@ void FfmpegRtspReader::run() {
                             config_.height);
                         const bool identical_frame = is_effectively_identical_probe(previous_probe_gray, current_probe_gray);
                         last_motion_mean = frame_motion_score(previous_probe_gray, current_probe_gray);
+                        last_luma_mean = probe_luma_mean(current_probe_gray);
                         previous_probe_gray = current_probe_gray;
                         if (!previous_probe_gray.empty()) {
                             if (identical_frame && last_motion_mean <= kFreezeMotionThreshold) {
@@ -986,6 +999,7 @@ void FfmpegRtspReader::run() {
                     freeze_started_ns = 0;
                     freeze_probe_index = 0;
                     last_motion_mean = 0.0;
+                    last_luma_mean = 0.0;
                     previous_probe_gray.release();
                 }
 
@@ -1020,6 +1034,8 @@ void FfmpegRtspReader::run() {
                 buffered.source_time_valid = source_time_valid;
                 buffered.source_time_comparable = source_time_comparable;
                 buffered.source_time_kind = source_time_kind;
+                buffered.motion_score = last_motion_mean;
+                buffered.luma_mean = last_luma_mean;
                 if (can_reuse_frame_storage(recycled_frame, config_.width, config_.height, config_.input_pipe_format)) {
                     read_frame = std::move(recycled_frame);
                 } else {
@@ -1178,6 +1194,8 @@ bool FfmpegRtspReader::copy_buffered_frame(
         info_out->source_time_valid = buffered.source_time_valid;
         info_out->source_time_comparable = buffered.source_time_comparable;
         info_out->source_time_kind = buffered.source_time_kind;
+        info_out->motion_score = buffered.motion_score;
+        info_out->luma_mean = buffered.luma_mean;
     }
     return true;
 }
