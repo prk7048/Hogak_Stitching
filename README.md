@@ -68,7 +68,8 @@ python -m stitching.cli native-validate --duration-sec 600
 검증 결과는 `output/debug/native_validate_*.json`으로 저장된다.
 
 기본 sync 기준은 `pts-offset-auto`다. 즉 runtime은 카메라 wallclock을 기본으로 믿지 않고,
-`stream_pts + auto-estimated offset`을 먼저 시도한다.
+`stream_pts + offset`을 기본 시간축으로 쓴다. 기본 가설은 `0ms`이고, motion correlation이
+강한 증거를 줄 때만 작은 step으로 offset을 보정한다.
 
 명시적으로 고정하고 싶으면 manual mode를 쓴다.
 
@@ -120,6 +121,21 @@ RTSP -> libav ingest/decode -> pair/sync -> stitch -> encode -> output
 
 현재 baseline 설명과 운영 상태는 [reports/03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)를 본다.
 strict fresh `30fps` acceptance 기준과 source timing 지표는 [reports/09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)를 본다.
+현재 1차 목표는 `pair_source_skew_ms_mean < 33ms`, 가능하면 `15~20ms` 수준까지 낮추는 것이다.
+
+## Distortion Correction
+
+기본 distortion 모드는 `runtime-lines`다.
+
+- interactive `native-runtime` 시작 UI에서는 기본으로 left/right 카메라 직선을 수동 선택한다
+- 시작 UI의 `Reuse saved distortion calibration` 체크박스를 켜면 저장된 `data/runtime_distortion_left.json`, `data/runtime_distortion_right.json`을 그대로 재사용한다
+- headless runtime과 `native-calibrate`는 saved distortion file이 있으면 그 값을 사용하고, 없으면 distortion 없이 진행한다
+
+중요한 안전 규칙:
+
+- distortion은 **undistorted 기준으로 다시 만든 homography** 와 같이 써야 한다
+- 기존 raw-frame homography와 새 distortion correction을 섞으면 품질이 더 나빠질 수 있다
+- 그래서 runtime은 homography 파일의 `distortion_reference`가 `undistorted`일 때만 실제 remap을 켠다
 
 ## Documentation Map
 

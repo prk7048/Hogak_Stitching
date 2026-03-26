@@ -51,3 +51,40 @@ python -m stitching.cli native-runtime
 - 현장 offset이 고정돼 있으면 `pts-offset-manual`
 - auto 실패 시 manual까지 같이 준비하려면 `pts-offset-hybrid`
 - `wallclock`은 기본 운영이 아니라 진단/비교용
+
+현재 auto sync 해석:
+
+- source PTS가 있으면 기본 pair 시간축은 `stream_pts_offset`
+- 기본 가설은 `0ms`
+- auto estimator는 강한 증거가 있을 때만 비영 offset으로 이동
+- 재보정은 작은 step으로 천천히 반영
+
+현재 기본 튜닝값:
+
+- `sync_auto_offset_window_sec=4.0`
+- `sync_auto_offset_max_search_ms=500.0`
+- `sync_recalibration_interval_sec=60.0`
+- `sync_recalibration_trigger_skew_ms=45.0`
+- `sync_recalibration_trigger_wait_ratio=0.50`
+- `sync_auto_offset_confidence_min=0.85`
+
+주요 distortion 키:
+
+- `distortion_mode`
+  - 기본값 `runtime-lines`
+  - 선택 가능: `off`, `runtime-lines`
+- `use_saved_distortion`
+  - interactive runtime 시작 UI에서 저장된 좌/우 distortion file을 재사용할지 여부
+  - headless runtime / `native-calibrate`에서는 saved distortion fallback 사용 여부
+- `distortion_auto_save`
+  - 현재 interactive manual workflow는 confirm 시 항상 저장한다
+  - 이 필드는 shared config / CLI 호환성용으로 유지된다
+- `left_distortion_file`
+- `right_distortion_file`
+
+운영 규칙:
+
+- saved distortion file은 homography file과 분리 저장한다
+- interactive runtime은 기본적으로 manual line selection을 먼저 수행하고, 사용자가 체크할 때만 saved distortion을 재사용한다
+- distortion correction은 `undistorted` 기준으로 다시 만든 homography와 같이 써야 한다
+- 기존 raw homography 파일이면 runtime은 distortion file이 있어도 실제 remap을 끈다

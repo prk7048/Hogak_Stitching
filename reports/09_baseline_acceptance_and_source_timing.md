@@ -10,6 +10,15 @@
 2. input timestamp를 `arrival`과 `source`로 분리
 3. 기본 pairing을 `stream_pts + auto offset`으로 옮기고, 실패 시 `fallback-arrival`로 유지
 
+현재 runtime에는 camera-slot별 distortion correction 경로도 있다.
+
+- 기본 모드: `runtime-lines`
+- interactive runtime 시작 UI에서는 좌/우 manual line selection이 기본이다
+- `Reuse saved distortion calibration`을 체크하면 saved distortion fallback을 쓴다
+- headless runtime / `native-calibrate`는 saved distortion이 있을 때만 distortion을 쓴다
+- distortion은 `undistorted` 기준 homography와 같이 써야 한다
+- 그래서 homography file의 `distortion_reference`가 `undistorted`일 때만 실제 remap을 켠다
+
 ## Baseline Definition
 
 현재 운영 기준 baseline은 다음이다.
@@ -60,8 +69,16 @@ reader는 프레임마다 두 종류의 시간을 보존한다.
   - auto/recalibration offset 신뢰도
 - `sync_recalibration_count`
   - runtime 중 offset 재보정 횟수
+- `sync_estimate_pairs`
+  - 최근 auto estimate에서 실제로 매칭된 pair 수
+- `sync_estimate_avg_gap_ms`
+  - 최근 auto estimate 후보의 평균 source gap
+- `sync_estimate_score`
+  - 최근 auto estimate가 offset을 고를 때 쓴 selection score
 
-이번 단계의 기본 운영 모드는 `pts-offset-auto`다. auto가 실패하면 `arrival`로 떨어지고,
+이번 단계의 기본 운영 모드는 `pts-offset-auto`다. auto는 `0ms prior + strong-evidence correction`
+방식으로 동작한다. 즉 source PTS가 유효하면 기본 시간축은 `stream_pts_offset`이고, 강한 증거가
+있을 때만 offset을 조금씩 움직인다. source PTS 자체가 불안정하거나 없는 경우에만 `arrival`로 떨어진다.
 운영자가 원하면 `pts-offset-manual` 또는 `pts-offset-hybrid`로 고정할 수 있다.
 
 ## Acceptance Checks
@@ -146,6 +163,7 @@ pass 기준:
 - `transmit_fps`와 `stitch_actual_fps` 해석이 가능함
 - 기본 운영 경로에서 `source_time_mode=stream_pts_offset`이 유지되거나, 아니면 명확히 `fallback-arrival`로 유지됨
 - `sync_effective_offset_ms`, `sync_offset_source`, `sync_offset_confidence`로 현재 offset 전략을 읽을 수 있음
+- `pair_source_skew_ms_mean < 33ms`를 기본 합격선으로 보고, 가능하면 `15~20ms` 수준까지 낮춘다
 
 investigate 기준:
 - `waiting sync pair` 비율이 높음
@@ -187,6 +205,8 @@ fail 기준:
 - `source_time_mode=fallback-arrival`이면 현재 pair selection은 arrival 기준이다.
 - `left_source_age_ms`, `right_source_age_ms`는 `wallclock` 진단 모드일 때만 적극적으로 본다.
 - `sync_offset_source=auto` 또는 `recalibration`이면 motion correlation이 offset을 잡고 있다는 뜻이다.
+- `sync_offset_source=auto`인데 `sync_effective_offset_ms=0`이면, auto가 아직 강한 증거를 못 잡아서
+  `0ms prior`를 유지 중일 가능성이 크다.
 - `sync_offset_source=manual`이면 operator가 넣은 offset으로 고정한 상태다.
 - `source_probe.cross_camera_wallclock_comparable=true`여도 기본 운영 경로는 wallclock을 자동 사용하지 않는다.
 

@@ -12,6 +12,12 @@ C++ native runtime:
 RTSP ingest -> pair/sync -> stitch -> encode -> output
 ```
 
+현재 stitch 앞단에는 camera-slot별 distortion correction이 들어간다.
+
+```text
+RTSP ingest -> pair/sync -> undistort/remap -> homography warp -> feather blend -> encode -> output
+```
+
 ## Scope
 
 현재 런타임이 맡는 일:
@@ -144,8 +150,22 @@ native runtime이 기대하는 주요 입력:
 - `sync_recalibration_trigger_skew_ms`
 - `sync_recalibration_trigger_wait_ratio`
 - `sync_auto_offset_confidence_min`
+- `distortion_mode`
+- `use_saved_distortion`
+- `distortion_auto_save`
+- `left_distortion_file`
+- `right_distortion_file`
 
 기본값은 `sync_time_source=pts-offset-auto`다.
+기본 distortion 모드는 `runtime-lines`다.
+
+현재 auto sync는 `0ms prior + strong-evidence correction` 방식이다.
+
+- source PTS가 유효하면 기본 pair 시간축은 `stream_pts_offset`
+- offset 기본 가설은 `0ms`
+- motion correlation이 충분히 강할 때만 offset을 조정
+- 재보정은 작은 step으로만 반영
+- `wallclock`은 자동 운영 기준이 아니라 explicit 진단 모드
 
 ## What To Watch
 
@@ -178,6 +198,22 @@ native runtime이 기대하는 주요 입력:
 - `sync_offset_source`: `auto`, `manual`, `recalibration`, `arrival-fallback`, `wallclock`
 - `sync_offset_confidence`: auto/recalibration offset 신뢰도
 - `sync_recalibration_count`: runtime 중 offset 재보정 횟수
+- `sync_estimate_pairs`: 최근 auto estimate가 실제로 매칭한 pair 수
+- `sync_estimate_avg_gap_ms`: auto estimate가 선택한 후보들의 평균 gap
+- `sync_estimate_score`: auto estimate selection score
+- `distortion_enabled_left/right`: runtime에서 실제 distortion remap이 켜졌는지
+- `distortion_source_left/right`: `manual-lines`, `saved`, `off`
+- `distortion_confidence_left/right`: 선택된 distortion profile confidence
+- `distortion_model`: 현재는 `opencv_pinhole`
+
+distortion 관련 중요한 안전 규칙:
+
+- interactive `native-runtime` 시작 UI는 기본으로 좌/우 manual line selection을 수행한다
+- `Reuse saved distortion calibration`을 체크하면 saved distortion을 그대로 재사용한다
+- headless runtime과 `native-calibrate`는 saved distortion file이 있을 때만 distortion을 사용한다
+- distortion correction은 **undistorted 기준으로 만든 homography** 와 같이 써야 한다
+- homography file의 `distortion_reference`가 `undistorted`가 아니면 runtime은 distortion을 실제 적용하지 않는다
+- 즉 saved distortion file이 있어도 old raw homography와 자동으로 섞어 쓰지 않는다
 
 운영 권장:
 
@@ -185,6 +221,15 @@ native runtime이 기대하는 주요 입력:
 - 현장에 고정 offset이 있으면 `pts-offset-manual`
 - auto 실패 시 manual까지 같이 준비하려면 `pts-offset-hybrid`
 - `wallclock`은 기본 운영이 아니라 비교/진단용
+
+현재 기본 튜닝값:
+
+- `sync_auto_offset_window_sec=4.0`
+- `sync_auto_offset_max_search_ms=500.0`
+- `sync_recalibration_interval_sec=60.0`
+- `sync_recalibration_trigger_skew_ms=45.0`
+- `sync_recalibration_trigger_wait_ratio=0.50`
+- `sync_auto_offset_confidence_min=0.85`
 
 ## Notes
 
