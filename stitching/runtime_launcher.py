@@ -9,13 +9,21 @@ import shutil
 import subprocess
 
 from stitching.project_defaults import (
+    DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
+    DEFAULT_NATIVE_DISTORTION_MODE,
     DEFAULT_NATIVE_INPUT_BUFFER_FRAMES,
     DEFAULT_NATIVE_INPUT_PIPE_FORMAT,
     DEFAULT_NATIVE_INPUT_RUNTIME,
+    DEFAULT_NATIVE_LEFT_DISTORTION_FILE,
+    DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
+    DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
+    DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
+    DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
     DEFAULT_NATIVE_PROBE_RUNTIME,
     DEFAULT_NATIVE_PAIR_REUSE_MAX_AGE_MS,
     DEFAULT_NATIVE_PAIR_REUSE_MAX_CONSECUTIVE,
     DEFAULT_NATIVE_RECONNECT_COOLDOWN_SEC,
+    DEFAULT_NATIVE_RIGHT_DISTORTION_FILE,
     DEFAULT_NATIVE_RTSP_TRANSPORT,
     DEFAULT_NATIVE_RTSP_TIMEOUT_SEC,
     DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN,
@@ -32,6 +40,7 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_TRANSMIT_HEIGHT,
     DEFAULT_NATIVE_TRANSMIT_PRESET,
     DEFAULT_NATIVE_TRANSMIT_RUNTIME,
+    DEFAULT_NATIVE_USE_SAVED_DISTORTION,
     DEFAULT_NATIVE_TRANSMIT_WIDTH,
 )
 
@@ -47,6 +56,17 @@ class RuntimeLaunchSpec:
     input_pipe_format: str = DEFAULT_NATIVE_INPUT_PIPE_FORMAT
     ffmpeg_bin: str = ""
     homography_file: str = ""
+    distortion_mode: str = DEFAULT_NATIVE_DISTORTION_MODE
+    use_saved_distortion: bool = DEFAULT_NATIVE_USE_SAVED_DISTORTION
+    distortion_auto_save: bool = DEFAULT_NATIVE_DISTORTION_AUTO_SAVE
+    left_distortion_file: str = DEFAULT_NATIVE_LEFT_DISTORTION_FILE
+    right_distortion_file: str = DEFAULT_NATIVE_RIGHT_DISTORTION_FILE
+    left_distortion_source_hint: str = "off"
+    right_distortion_source_hint: str = "off"
+    distortion_lens_model_hint: str = DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT
+    distortion_horizontal_fov_deg: float = DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG
+    distortion_vertical_fov_deg: float = DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG
+    distortion_camera_model: str = DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL
     frame_width: int = 1920
     frame_height: int = 1080
     transport: str = DEFAULT_NATIVE_RTSP_TRANSPORT
@@ -297,6 +317,25 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
         command.extend(["--ffmpeg-bin", str(resolve_ffmpeg_binary())])
     if spec.homography_file:
         command.extend(["--homography-file", spec.homography_file])
+    command.extend(["--distortion-mode", str(spec.distortion_mode or DEFAULT_NATIVE_DISTORTION_MODE)])
+    command.append("--use-saved-distortion" if spec.use_saved_distortion else "--no-use-saved-distortion")
+    command.append("--distortion-auto-save" if spec.distortion_auto_save else "--no-distortion-auto-save")
+    if spec.left_distortion_file:
+        command.extend(["--left-distortion-file", spec.left_distortion_file])
+    if spec.right_distortion_file:
+        command.extend(["--right-distortion-file", spec.right_distortion_file])
+    if spec.left_distortion_source_hint:
+        command.extend(["--left-distortion-source-hint", spec.left_distortion_source_hint])
+    if spec.right_distortion_source_hint:
+        command.extend(["--right-distortion-source-hint", spec.right_distortion_source_hint])
+    if spec.distortion_lens_model_hint:
+        command.extend(["--distortion-lens-model-hint", spec.distortion_lens_model_hint])
+    if float(spec.distortion_horizontal_fov_deg or 0.0) > 0.0:
+        command.extend(["--distortion-horizontal-fov-deg", f"{float(spec.distortion_horizontal_fov_deg):.3f}"])
+    if float(spec.distortion_vertical_fov_deg or 0.0) > 0.0:
+        command.extend(["--distortion-vertical-fov-deg", f"{float(spec.distortion_vertical_fov_deg):.3f}"])
+    if spec.distortion_camera_model:
+        command.extend(["--distortion-camera-model", spec.distortion_camera_model])
     command.extend(["--width", str(max(1, int(spec.frame_width)))])
     command.extend(["--height", str(max(1, int(spec.frame_height)))])
     if spec.transport:

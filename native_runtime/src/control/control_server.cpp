@@ -289,6 +289,33 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         if (extract_json_number(line, "sync_auto_offset_confidence_min", &number_value)) {
             config.sync_auto_offset_confidence_min = number_value;
         }
+        if (extract_json_string(line, "distortion_mode", &text_value)) {
+            config.distortion_mode = text_value;
+        }
+        if (extract_json_bool(line, "use_saved_distortion", &bool_value)) {
+            config.use_saved_distortion = bool_value;
+        }
+        if (extract_json_bool(line, "distortion_auto_save", &bool_value)) {
+            config.distortion_auto_save = bool_value;
+        }
+        if (extract_json_string(line, "left_distortion_file", &text_value)) {
+            config.left_distortion_file = text_value;
+        }
+        if (extract_json_string(line, "right_distortion_file", &text_value)) {
+            config.right_distortion_file = text_value;
+        }
+        if (extract_json_string(line, "distortion_lens_model_hint", &text_value)) {
+            config.distortion_lens_model_hint = text_value;
+        }
+        if (extract_json_number(line, "distortion_horizontal_fov_deg", &number_value)) {
+            config.distortion_horizontal_fov_deg = number_value;
+        }
+        if (extract_json_number(line, "distortion_vertical_fov_deg", &number_value)) {
+            config.distortion_vertical_fov_deg = number_value;
+        }
+        if (extract_json_string(line, "distortion_camera_model", &text_value)) {
+            config.distortion_camera_model = text_value;
+        }
         if (extract_json_number(line, "process_scale", &number_value)) {
             config.process_scale = number_value;
         }

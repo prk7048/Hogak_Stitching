@@ -38,7 +38,16 @@ def _add_native_calibration_args(
 ) -> None:
     from stitching.project_defaults import (
         DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+        DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
+        DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
+        DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
+        DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
+        DEFAULT_NATIVE_DISTORTION_MODE,
+        DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
         DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+        DEFAULT_NATIVE_LEFT_DISTORTION_FILE,
+        DEFAULT_NATIVE_RIGHT_DISTORTION_FILE,
+        DEFAULT_NATIVE_USE_SAVED_DISTORTION,
         default_left_rtsp,
         default_right_rtsp,
     )
@@ -65,6 +74,68 @@ def _add_native_calibration_args(
         "--debug-dir",
         default=DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
         help="Calibration debug image directory (default: config/runtime.json)",
+    )
+    cmd.add_argument(
+        "--distortion-mode",
+        choices=["off", "runtime-lines"],
+        default=DEFAULT_NATIVE_DISTORTION_MODE,
+        help="Camera distortion handling before calibration matching",
+    )
+    cmd.add_argument(
+        "--use-saved-distortion",
+        dest="use_saved_distortion",
+        action="store_true",
+        default=DEFAULT_NATIVE_USE_SAVED_DISTORTION,
+        help="Reuse saved left/right distortion files during calibration when they are available",
+    )
+    cmd.add_argument(
+        "--no-use-saved-distortion",
+        dest="use_saved_distortion",
+        action="store_false",
+        help="Ignore saved left/right distortion files during calibration",
+    )
+    cmd.add_argument(
+        "--distortion-auto-save",
+        dest="distortion_auto_save",
+        action="store_true",
+        default=DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
+        help="Compatibility flag. Interactive runtime line selection always saves on confirm",
+    )
+    cmd.add_argument(
+        "--no-distortion-auto-save",
+        dest="distortion_auto_save",
+        action="store_false",
+        help="Compatibility flag retained for config/CLI compatibility",
+    )
+    cmd.add_argument("--left-distortion-file", default=DEFAULT_NATIVE_LEFT_DISTORTION_FILE)
+    cmd.add_argument("--right-distortion-file", default=DEFAULT_NATIVE_RIGHT_DISTORTION_FILE)
+    cmd.add_argument(
+        "--distortion-lens-model-hint",
+        choices=["auto", "pinhole", "fisheye"],
+        default=DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
+        help="Optional prior for distortion fitting. auto evaluates pinhole and fisheye candidates.",
+    )
+    cmd.add_argument(
+        "--distortion-horizontal-fov-deg",
+        type=float,
+        default=DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
+        help="Optional horizontal FOV prior in degrees for guided distortion fit.",
+    )
+    cmd.add_argument(
+        "--distortion-vertical-fov-deg",
+        type=float,
+        default=DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
+        help="Optional vertical FOV prior in degrees for guided distortion fit.",
+    )
+    cmd.add_argument(
+        "--distortion-camera-model",
+        default=DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
+        help="Optional camera model label recorded with the saved distortion artifact.",
+    )
+    cmd.add_argument(
+        "--skip-review",
+        action="store_true",
+        help="Skip the final calibration review window. Used by runtime-managed automatic recalibration.",
     )
     cmd.add_argument(
         "--warmup-frames",

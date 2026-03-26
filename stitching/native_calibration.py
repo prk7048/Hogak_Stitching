@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import time
@@ -37,10 +38,23 @@ from stitching.core import (
     _estimate_homography,
     _prepare_warp_plan,
 )
+from stitching.distortion_calibration import (
+    apply_distortion_profile,
+    resolve_distortion_profile,
+)
 from stitching.errors import ErrorCode
 from stitching.project_defaults import (
     DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+    DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
+    DEFAULT_NATIVE_DISTORTION_MODE,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+    DEFAULT_NATIVE_LEFT_DISTORTION_FILE,
+    DEFAULT_NATIVE_RIGHT_DISTORTION_FILE,
+    DEFAULT_NATIVE_USE_SAVED_DISTORTION,
+    DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
+    DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
+    DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
+    DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
 )
 from stitching.runtime_site_config import require_configured_rtsp_urls
 
@@ -59,6 +73,16 @@ class NativeCalibrationConfig(StitchConfig):
     assisted_reproj_threshold: float = 12.0
     assisted_max_auto_matches: int = 600
     match_backend: str = "classic"
+    distortion_mode: str = DEFAULT_NATIVE_DISTORTION_MODE
+    use_saved_distortion: bool = DEFAULT_NATIVE_USE_SAVED_DISTORTION
+    distortion_auto_save: bool = DEFAULT_NATIVE_DISTORTION_AUTO_SAVE
+    left_distortion_file: Path = Path(DEFAULT_NATIVE_LEFT_DISTORTION_FILE)
+    right_distortion_file: Path = Path(DEFAULT_NATIVE_RIGHT_DISTORTION_FILE)
+    distortion_lens_model_hint: str = DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT
+    distortion_horizontal_fov_deg: float | None = DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG
+    distortion_vertical_fov_deg: float | None = DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG
+    distortion_camera_model: str = DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL
+    review_required: bool = True
 
 
 @dataclass(slots=True)
@@ -506,15 +530,74 @@ def _capture_pair(config: NativeCalibrationConfig) -> tuple[np.ndarray, np.ndarr
         right_cap.release()
 
 
-def _save_homography_file(path: Path, homography: np.ndarray, metadata: dict) -> None:
+def _save_homography_file(
+    path: Path,
+    homography: np.ndarray,
+    metadata: dict,
+    *,
+    distortion_reference: str,
+) -> None:
     payload = {
         "version": 1,
         "saved_at_epoch_sec": int(time.time()),
+        "distortion_reference": str(distortion_reference),
         "homography": homography.tolist(),
         "metadata": metadata,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _resolve_calibration_distortion(
+    left: np.ndarray,
+    right: np.ndarray,
+    config: NativeCalibrationConfig,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    left_resolved = resolve_distortion_profile(
+        left,
+        camera_slot="left",
+        saved_path=config.left_distortion_file,
+        use_saved_distortion=bool(config.use_saved_distortion),
+        distortion_auto_save=bool(config.distortion_auto_save),
+        distortion_mode=str(config.distortion_mode),
+        lens_model_hint=str(config.distortion_lens_model_hint),
+        horizontal_fov_deg=config.distortion_horizontal_fov_deg,
+        vertical_fov_deg=config.distortion_vertical_fov_deg,
+        camera_model=str(config.distortion_camera_model),
+    )
+    right_resolved = resolve_distortion_profile(
+        right,
+        camera_slot="right",
+        saved_path=config.right_distortion_file,
+        use_saved_distortion=bool(config.use_saved_distortion),
+        distortion_auto_save=bool(config.distortion_auto_save),
+        distortion_mode=str(config.distortion_mode),
+        lens_model_hint=str(config.distortion_lens_model_hint),
+        horizontal_fov_deg=config.distortion_horizontal_fov_deg,
+        vertical_fov_deg=config.distortion_vertical_fov_deg,
+        camera_model=str(config.distortion_camera_model),
+    )
+    left_corrected = apply_distortion_profile(left, left_resolved.profile) if left_resolved.enabled else left
+    right_corrected = apply_distortion_profile(right, right_resolved.profile) if right_resolved.enabled else right
+    metadata = {
+        "left_distortion_source": str(left_resolved.source),
+        "right_distortion_source": str(right_resolved.source),
+        "left_distortion_confidence": float(left_resolved.confidence),
+        "right_distortion_confidence": float(right_resolved.confidence),
+        "left_distortion_fit_score": float(left_resolved.fit_score),
+        "right_distortion_fit_score": float(right_resolved.fit_score),
+        "left_distortion_line_count": int(left_resolved.line_count),
+        "right_distortion_line_count": int(right_resolved.line_count),
+        "left_distortion_frame_count": int(left_resolved.frame_count_used),
+        "right_distortion_frame_count": int(right_resolved.frame_count_used),
+        "left_distortion_file": str(left_resolved.active_path or config.left_distortion_file),
+        "right_distortion_file": str(right_resolved.active_path or config.right_distortion_file),
+        "distortion_reference": "undistorted" if left_resolved.enabled or right_resolved.enabled else "raw",
+        "distortion_model": "mixed"
+        if left_resolved.lens_model and right_resolved.lens_model and left_resolved.lens_model != right_resolved.lens_model
+        else str(left_resolved.lens_model or right_resolved.lens_model or "opencv_pinhole"),
+    }
+    return left_corrected, right_corrected, metadata
 
 
 def _estimate_seed_guidance_transform(
@@ -1024,7 +1107,8 @@ def _write_debug_outputs(
 
 
 def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
-    left, right = _capture_pair(config)
+    left_raw, right_raw = _capture_pair(config)
+    left, right, distortion_metadata = _resolve_calibration_distortion(left_raw, right_raw, config)
     requested_mode = str(config.calibration_mode).lower().strip()
     left_points: list[tuple[float, float]] = []
     right_points: list[tuple[float, float]] = []
@@ -1136,12 +1220,13 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         f"manual_points={min(len(left_points), len(right_points))}  backend={best_candidate.backend_name}",
         "CONFIRM saves this homography and launches runtime. CANCEL stops here.",
     ]
-    if not _CalibrationReviewUi(
-        inlier_preview=inlier_preview,
-        stitched_preview=stitched,
-        summary_lines=review_lines,
-    ).run():
-        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration review cancelled by user")
+    if bool(config.review_required):
+        if not _CalibrationReviewUi(
+            inlier_preview=inlier_preview,
+            stitched_preview=stitched,
+            summary_lines=review_lines,
+        ).run():
+            raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration review cancelled by user")
     _write_debug_outputs(config, left, right, stitched, inlier_preview)
     metadata = {
         "source": "native_runtime_calibration",
@@ -1174,6 +1259,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "right_resolution": [int(right.shape[1]), int(right.shape[0])],
         "output_resolution": [int(plan.width), int(plan.height)],
         "debug_dir": str(config.debug_dir),
+        **distortion_metadata,
         "candidates": [
             {
                 "name": item.calibration_mode,
@@ -1197,7 +1283,12 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
             for item in candidates
         ],
     }
-    _save_homography_file(config.output_path, homography, metadata)
+    _save_homography_file(
+        config.output_path,
+        homography,
+        metadata,
+        distortion_reference=str(distortion_metadata.get("distortion_reference") or "raw"),
+    )
     return {
         "homography_file": str(config.output_path),
         "debug_dir": str(config.debug_dir),
@@ -1216,7 +1307,68 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "mean_reprojection_error": float(best_candidate.mean_reprojection_error),
         "output_resolution": [int(plan.width), int(plan.height)],
         "match_backend": best_candidate.backend_name,
+        "distortion_reference": str(distortion_metadata.get("distortion_reference") or "raw"),
+        "left_distortion_source": str(distortion_metadata.get("left_distortion_source") or "off"),
+        "right_distortion_source": str(distortion_metadata.get("right_distortion_source") or "off"),
     }
+
+
+def backup_homography_file(path: Path) -> Path | None:
+    file_path = Path(path)
+    if not file_path.exists():
+        return None
+    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+    backup_path = file_path.with_name(f"{file_path.stem}.bak_{timestamp}{file_path.suffix}")
+    shutil.copy2(file_path, backup_path)
+    return backup_path
+
+
+def ensure_runtime_distortion_homography(
+    *,
+    left_rtsp: str,
+    right_rtsp: str,
+    output_path: Path,
+    debug_dir: Path,
+    rtsp_transport: str,
+    rtsp_timeout_sec: float,
+    warmup_frames: int,
+    process_scale: float,
+    distortion_mode: str,
+    use_saved_distortion: bool,
+    distortion_auto_save: bool,
+    left_distortion_file: Path,
+    right_distortion_file: Path,
+    distortion_lens_model_hint: str,
+    distortion_horizontal_fov_deg: float | None,
+    distortion_vertical_fov_deg: float | None,
+    distortion_camera_model: str,
+    backup_existing: bool = True,
+) -> tuple[dict[str, Any], Path | None]:
+    backup_path = backup_homography_file(output_path) if backup_existing else None
+    config = NativeCalibrationConfig(
+        left_rtsp=str(left_rtsp),
+        right_rtsp=str(right_rtsp),
+        output_path=Path(output_path),
+        debug_dir=Path(debug_dir),
+        rtsp_transport=str(rtsp_transport),
+        rtsp_timeout_sec=max(1.0, float(rtsp_timeout_sec)),
+        warmup_frames=max(1, int(warmup_frames)),
+        process_scale=max(0.1, float(process_scale)),
+        calibration_mode="auto",
+        match_backend="classic",
+        distortion_mode=str(distortion_mode),
+        use_saved_distortion=bool(use_saved_distortion),
+        distortion_auto_save=bool(distortion_auto_save),
+        left_distortion_file=Path(left_distortion_file),
+        right_distortion_file=Path(right_distortion_file),
+        distortion_lens_model_hint=str(distortion_lens_model_hint or "auto"),
+        distortion_horizontal_fov_deg=distortion_horizontal_fov_deg,
+        distortion_vertical_fov_deg=distortion_vertical_fov_deg,
+        distortion_camera_model=str(distortion_camera_model or ""),
+        review_required=False,
+    )
+    result = calibrate_native_homography(config)
+    return result, backup_path
 
 
 def run_native_calibration(args: argparse.Namespace) -> int:
@@ -1241,6 +1393,24 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         assisted_reproj_threshold=max(1.0, float(args.assisted_reproj_threshold)),
         assisted_max_auto_matches=max(0, int(args.assisted_max_auto_matches)),
         match_backend=str(args.match_backend),
+        distortion_mode=str(args.distortion_mode),
+        use_saved_distortion=bool(args.use_saved_distortion),
+        distortion_auto_save=bool(args.distortion_auto_save),
+        left_distortion_file=Path(str(args.left_distortion_file)),
+        right_distortion_file=Path(str(args.right_distortion_file)),
+        distortion_lens_model_hint=str(getattr(args, "distortion_lens_model_hint", "auto")),
+        distortion_horizontal_fov_deg=(
+            float(args.distortion_horizontal_fov_deg)
+            if getattr(args, "distortion_horizontal_fov_deg", None) is not None
+            else None
+        ),
+        distortion_vertical_fov_deg=(
+            float(args.distortion_vertical_fov_deg)
+            if getattr(args, "distortion_vertical_fov_deg", None) is not None
+            else None
+        ),
+        distortion_camera_model=str(getattr(args, "distortion_camera_model", "") or ""),
+        review_required=not bool(getattr(args, "skip_review", False)),
         min_matches=max(8, int(args.min_matches)),
         min_inliers=max(6, int(args.min_inliers)),
         ratio_test=float(args.ratio_test),
@@ -1264,6 +1434,8 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         f"seed_model={result['seed_guidance_model']} "
         f"model={result['transform_model']} "
         f"backend={result['match_backend']} "
+        f"distortion_ref={result['distortion_reference']} "
+        f"distortion=({result['left_distortion_source']},{result['right_distortion_source']}) "
         f"score={result['candidate_score']:.3f} "
         f"repr_err={result['mean_reprojection_error']:.2f}"
     )
@@ -1275,7 +1447,27 @@ def run_native_calibration(args: argparse.Namespace) -> int:
             "stitching.cli",
             "native-runtime",
             "--no-output-ui",
+            "--distortion-mode",
+            str(args.distortion_mode),
+            "--left-distortion-file",
+            str(args.left_distortion_file),
+            "--right-distortion-file",
+            str(args.right_distortion_file),
         ]
+        runtime_command.append("--use-saved-distortion" if bool(args.use_saved_distortion) else "--no-use-saved-distortion")
+        runtime_command.append("--distortion-auto-save" if bool(args.distortion_auto_save) else "--no-distortion-auto-save")
+        runtime_command.extend(
+            [
+                "--distortion-lens-model-hint",
+                str(getattr(args, "distortion_lens_model_hint", "auto") or "auto"),
+                "--distortion-camera-model",
+                str(getattr(args, "distortion_camera_model", "") or ""),
+            ]
+        )
+        if float(getattr(args, "distortion_horizontal_fov_deg", 0.0) or 0.0) > 0.0:
+            runtime_command.extend(["--distortion-horizontal-fov-deg", str(float(args.distortion_horizontal_fov_deg))])
+        if float(getattr(args, "distortion_vertical_fov_deg", 0.0) or 0.0) > 0.0:
+            runtime_command.extend(["--distortion-vertical-fov-deg", str(float(args.distortion_vertical_fov_deg))])
         print(f"launching_runtime={' '.join(runtime_command)}")
         completed = subprocess.run(
             runtime_command,

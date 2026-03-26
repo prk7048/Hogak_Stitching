@@ -16,6 +16,7 @@ SyncTimeSource = Literal[
     "arrival",
     "wallclock",
 ]
+DistortionMode = Literal["off", "runtime-lines"]
 GpuMode = Literal["off", "auto", "on"]
 CommandType = Literal[
     "start",
@@ -80,6 +81,15 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "sync_recalibration_trigger_skew_ms",
     "sync_recalibration_trigger_wait_ratio",
     "sync_auto_offset_confidence_min",
+    "distortion_mode",
+    "use_saved_distortion",
+    "distortion_auto_save",
+    "left_distortion_file",
+    "right_distortion_file",
+    "distortion_lens_model_hint",
+    "distortion_horizontal_fov_deg",
+    "distortion_vertical_fov_deg",
+    "distortion_camera_model",
     "process_scale",
     "stitch_output_scale",
     "stitch_every_n",
@@ -138,12 +148,21 @@ class EngineConfig:
     sync_match_max_delta_ms: float = 35.0
     sync_time_source: SyncTimeSource = "pts-offset-auto"
     sync_manual_offset_ms: float = 0.0
-    sync_auto_offset_window_sec: float = 6.0
-    sync_auto_offset_max_search_ms: float = 30000.0
-    sync_recalibration_interval_sec: float = 30.0
-    sync_recalibration_trigger_skew_ms: float = 20.0
-    sync_recalibration_trigger_wait_ratio: float = 0.25
-    sync_auto_offset_confidence_min: float = 0.60
+    sync_auto_offset_window_sec: float = 4.0
+    sync_auto_offset_max_search_ms: float = 500.0
+    sync_recalibration_interval_sec: float = 60.0
+    sync_recalibration_trigger_skew_ms: float = 45.0
+    sync_recalibration_trigger_wait_ratio: float = 0.50
+    sync_auto_offset_confidence_min: float = 0.85
+    distortion_mode: DistortionMode = "runtime-lines"
+    use_saved_distortion: bool = True
+    distortion_auto_save: bool = True
+    left_distortion_file: str = "data/runtime_distortion_left.json"
+    right_distortion_file: str = "data/runtime_distortion_right.json"
+    distortion_lens_model_hint: str = "auto"
+    distortion_horizontal_fov_deg: float = 0.0
+    distortion_vertical_fov_deg: float = 0.0
+    distortion_camera_model: str = ""
     process_scale: float = 1.0
     stitch_output_scale: float = 1.0
     stitch_every_n: int = 1
@@ -239,6 +258,24 @@ class EngineMetrics:
     sync_offset_source: str = "arrival-fallback"
     sync_offset_confidence: float = 0.0
     sync_recalibration_count: int = 0
+    sync_estimate_pairs: int = 0
+    sync_estimate_avg_gap_ms: float = 0.0
+    sync_estimate_score: float = 0.0
+    distortion_enabled_left: bool = False
+    distortion_enabled_right: bool = False
+    distortion_source_left: str = "off"
+    distortion_source_right: str = "off"
+    distortion_confidence_left: float = 0.0
+    distortion_confidence_right: float = 0.0
+    distortion_model: str = "opencv_pinhole"
+    distortion_fit_score_left: float = 0.0
+    distortion_fit_score_right: float = 0.0
+    distortion_line_count_left: int = 0
+    distortion_line_count_right: int = 0
+    distortion_frame_count_left: int = 0
+    distortion_frame_count_right: int = 0
+    distortion_lens_model_left: str = "opencv_pinhole"
+    distortion_lens_model_right: str = "opencv_pinhole"
     matches: int = 0
     inliers: int = 0
     stitched_count: int = 0

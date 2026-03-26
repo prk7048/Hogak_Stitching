@@ -34,6 +34,23 @@ public:
     void tick();
 
 private:
+    struct DistortionState {
+        bool enabled = false;
+        std::string source = "off";
+        std::string model = "opencv_pinhole";
+        double confidence = 0.0;
+        double fit_score = 0.0;
+        std::int64_t line_count = 0;
+        std::int64_t frame_count_used = 0;
+        cv::Size image_size{};
+        cv::Mat camera_matrix{};
+        cv::Mat dist_coeffs{};
+        cv::Mat map_x_cpu{};
+        cv::Mat map_y_cpu{};
+        cv::cuda::GpuMat map_x_gpu{};
+        cv::cuda::GpuMat map_y_gpu{};
+    };
+
     struct SelectedPair {
         cv::Mat left_frame;
         cv::Mat right_frame;
@@ -114,6 +131,9 @@ private:
     double sync_offset_confidence_ = 0.0;
     std::int64_t sync_recalibration_count_ = 0;
     std::string sync_offset_source_ = "arrival-fallback";
+    std::int64_t sync_estimate_pairs_ = 0;
+    double sync_estimate_avg_gap_ms_ = 0.0;
+    double sync_estimate_score_ = 0.0;
     std::int64_t last_stitched_count_ = 0;
     std::int64_t last_stitch_timestamp_ns_ = 0;
     std::int64_t last_output_frames_written_ = 0;
@@ -131,6 +151,7 @@ private:
     bool calibrated_ = false;
     bool gpu_available_ = false;
     bool gpu_nv12_input_supported_ = true;
+    std::string homography_distortion_reference_ = "raw";
     cv::Mat homography_{};
     cv::Mat homography_adjusted_{};
     cv::Mat left_mask_template_{};
@@ -163,12 +184,14 @@ private:
     cv::cuda::GpuMat gpu_left_nv12_uv_{};
     cv::cuda::GpuMat gpu_left_decoded_{};
     cv::cuda::GpuMat gpu_left_input_{};
+    cv::cuda::GpuMat gpu_left_corrected_{};
     cv::cuda::GpuMat gpu_left_canvas_{};
     cv::cuda::GpuMat gpu_stitched_{};
     cv::cuda::GpuMat gpu_right_nv12_y_{};
     cv::cuda::GpuMat gpu_right_nv12_uv_{};
     cv::cuda::GpuMat gpu_right_decoded_{};
     cv::cuda::GpuMat gpu_right_input_{};
+    cv::cuda::GpuMat gpu_right_corrected_{};
     cv::cuda::GpuMat gpu_right_warped_{};
     cv::cuda::GpuMat gpu_overlap_mask_{};
     cv::cuda::GpuMat gpu_overlap_mask_roi_{};
@@ -186,6 +209,8 @@ private:
     cv::cuda::GpuMat gpu_overlap_u8_{};
     cv::cuda::GpuMat gpu_output_scaled_{};
     cv::cuda::GpuMat gpu_output_canvas_{};
+    DistortionState left_distortion_{};
+    DistortionState right_distortion_{};
     std::vector<hogak::input::BufferedFrameInfo> left_buffered_infos_cache_{};
     std::vector<hogak::input::BufferedFrameInfo> right_buffered_infos_cache_{};
     std::unique_ptr<hogak::output::OutputWriter> output_writer_{};

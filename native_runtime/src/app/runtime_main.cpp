@@ -103,6 +103,10 @@ void print_help() {
         << "  --sync-recalibration-trigger-skew-ms N  Recalibration trigger skew threshold\n"
         << "  --sync-recalibration-trigger-wait-ratio N  Recalibration trigger wait ratio\n"
         << "  --sync-auto-offset-confidence-min N  Minimum accepted auto offset confidence\n"
+        << "  --distortion-lens-model-hint M auto/pinhole/fisheye\n"
+        << "  --distortion-horizontal-fov-deg N  Optional horizontal lens FOV prior\n"
+        << "  --distortion-vertical-fov-deg N  Optional vertical lens FOV prior\n"
+        << "  --distortion-camera-model S  Optional camera model label\n"
         << "  --stitch-output-scale N      Runtime stitch/output scale\n"
         << "  --stitch-every-n N           Stitch every N selected pairs\n"
         << "  --gpu-mode M      off/auto/on\n"
@@ -199,6 +203,21 @@ int main(int argc, char** argv) {
     config.production_output.height = read_int_arg(argc, argv, "--transmit-output-height", 0);
     config.production_output.fps = read_double_arg(argc, argv, "--transmit-output-fps", 30.0);
     config.production_output.debug_overlay = has_flag(argc, argv, "--transmit-output-debug-overlay");
+    config.distortion_mode = read_string_arg(argc, argv, "--distortion-mode", "runtime-lines");
+    config.use_saved_distortion = has_flag(argc, argv, "--use-saved-distortion")
+        ? true
+        : (has_flag(argc, argv, "--no-use-saved-distortion") ? false : true);
+    config.distortion_auto_save = has_flag(argc, argv, "--distortion-auto-save")
+        ? true
+        : (has_flag(argc, argv, "--no-distortion-auto-save") ? false : true);
+    config.left_distortion_file = read_string_arg(argc, argv, "--left-distortion-file", "data/runtime_distortion_left.json");
+    config.right_distortion_file = read_string_arg(argc, argv, "--right-distortion-file", "data/runtime_distortion_right.json");
+    config.left_distortion_source_hint = read_string_arg(argc, argv, "--left-distortion-source-hint", "off");
+    config.right_distortion_source_hint = read_string_arg(argc, argv, "--right-distortion-source-hint", "off");
+    config.distortion_lens_model_hint = read_string_arg(argc, argv, "--distortion-lens-model-hint", "auto");
+    config.distortion_horizontal_fov_deg = read_double_arg(argc, argv, "--distortion-horizontal-fov-deg", 0.0);
+    config.distortion_vertical_fov_deg = read_double_arg(argc, argv, "--distortion-vertical-fov-deg", 0.0);
+    config.distortion_camera_model = read_string_arg(argc, argv, "--distortion-camera-model", "");
     config.sync_pair_mode = read_string_arg(argc, argv, "--sync-pair-mode", "none");
     config.allow_frame_reuse = has_flag(argc, argv, "--allow-frame-reuse");
     config.pair_reuse_max_age_ms = read_double_arg(argc, argv, "--pair-reuse-max-age-ms", 90.0);
@@ -206,12 +225,12 @@ int main(int argc, char** argv) {
     config.sync_match_max_delta_ms = read_double_arg(argc, argv, "--sync-match-max-delta-ms", 35.0);
     config.sync_time_source = read_string_arg(argc, argv, "--sync-time-source", "pts-offset-auto");
     config.sync_manual_offset_ms = read_double_arg(argc, argv, "--sync-manual-offset-ms", 0.0);
-    config.sync_auto_offset_window_sec = read_double_arg(argc, argv, "--sync-auto-offset-window-sec", 6.0);
-    config.sync_auto_offset_max_search_ms = read_double_arg(argc, argv, "--sync-auto-offset-max-search-ms", 30000.0);
-    config.sync_recalibration_interval_sec = read_double_arg(argc, argv, "--sync-recalibration-interval-sec", 30.0);
-    config.sync_recalibration_trigger_skew_ms = read_double_arg(argc, argv, "--sync-recalibration-trigger-skew-ms", 20.0);
-    config.sync_recalibration_trigger_wait_ratio = read_double_arg(argc, argv, "--sync-recalibration-trigger-wait-ratio", 0.25);
-    config.sync_auto_offset_confidence_min = read_double_arg(argc, argv, "--sync-auto-offset-confidence-min", 0.60);
+    config.sync_auto_offset_window_sec = read_double_arg(argc, argv, "--sync-auto-offset-window-sec", 4.0);
+    config.sync_auto_offset_max_search_ms = read_double_arg(argc, argv, "--sync-auto-offset-max-search-ms", 500.0);
+    config.sync_recalibration_interval_sec = read_double_arg(argc, argv, "--sync-recalibration-interval-sec", 60.0);
+    config.sync_recalibration_trigger_skew_ms = read_double_arg(argc, argv, "--sync-recalibration-trigger-skew-ms", 45.0);
+    config.sync_recalibration_trigger_wait_ratio = read_double_arg(argc, argv, "--sync-recalibration-trigger-wait-ratio", 0.50);
+    config.sync_auto_offset_confidence_min = read_double_arg(argc, argv, "--sync-auto-offset-confidence-min", 0.85);
     config.stitch_output_scale = read_double_arg(argc, argv, "--stitch-output-scale", 1.0);
     config.stitch_every_n = read_int_arg(argc, argv, "--stitch-every-n", 1);
     config.gpu_mode = read_string_arg(argc, argv, "--gpu-mode", "on");

@@ -374,9 +374,99 @@ bool extract_json_array_for_key(const std::string& text, const std::string& key,
     return false;
 }
 
-bool load_homography_from_file(const std::string& path, cv::Mat* homography_out) {
+bool extract_json_string_for_key(const std::string& text, const std::string& key, std::string* value_out) {
+    if (value_out == nullptr) {
+        return false;
+    }
+    const auto key_pos = text.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto colon_pos = text.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+    const auto quote_pos = text.find('"', colon_pos + 1);
+    if (quote_pos == std::string::npos) {
+        return false;
+    }
+    const auto end_quote_pos = text.find('"', quote_pos + 1);
+    if (end_quote_pos == std::string::npos || end_quote_pos <= quote_pos) {
+        return false;
+    }
+    *value_out = text.substr(quote_pos + 1, end_quote_pos - quote_pos - 1);
+    return true;
+}
+
+bool extract_json_number_for_key(const std::string& text, const std::string& key, double* value_out) {
+    if (value_out == nullptr) {
+        return false;
+    }
+    const auto key_pos = text.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto colon_pos = text.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+    std::size_t value_begin = colon_pos + 1;
+    while (value_begin < text.size() && std::isspace(static_cast<unsigned char>(text[value_begin]))) {
+        value_begin += 1;
+    }
+    std::size_t value_end = value_begin;
+    while (value_end < text.size()) {
+        const char ch = text[value_end];
+        if (!(std::isdigit(static_cast<unsigned char>(ch)) || ch == '-' || ch == '+' || ch == '.' || ch == 'e' || ch == 'E')) {
+            break;
+        }
+        value_end += 1;
+    }
+    if (value_end <= value_begin) {
+        return false;
+    }
+    try {
+        *value_out = std::stod(text.substr(value_begin, value_end - value_begin));
+        return true;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
+bool parse_numeric_vector(const std::string& text, std::vector<double>* out) {
+    if (out == nullptr) {
+        return false;
+    }
+    out->clear();
+    std::istringstream values(sanitize_numeric_text(text));
+    double value = 0.0;
+    while (values >> value) {
+        out->push_back(value);
+    }
+    return !out->empty();
+}
+
+struct DistortionProfileData {
+    std::string source = "saved";
+    std::string model = "opencv_pinhole";
+    double confidence = 0.0;
+    double fit_score = 0.0;
+    std::int64_t line_count = 0;
+    std::int64_t frame_count_used = 0;
+    cv::Size image_size{};
+    cv::Mat camera_matrix{};
+    cv::Mat dist_coeffs{};
+};
+
+bool load_homography_from_file(
+    const std::string& path,
+    cv::Mat* homography_out,
+    std::string* distortion_reference_out) {
     if (homography_out == nullptr) {
         return false;
+    }
+    if (distortion_reference_out != nullptr) {
+        *distortion_reference_out = "raw";
     }
 
     std::ifstream file(path);
@@ -384,6 +474,13 @@ bool load_homography_from_file(const std::string& path, cv::Mat* homography_out)
         return false;
     }
     std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (distortion_reference_out != nullptr) {
+        std::string distortion_reference;
+        if (extract_json_string_for_key(text, "\"distortion_reference\"", &distortion_reference) &&
+            !distortion_reference.empty()) {
+            *distortion_reference_out = distortion_reference;
+        }
+    }
 
     std::string homography_array_text;
     if (extract_json_array_for_key(text, "\"homography\"", &homography_array_text) &&
@@ -396,6 +493,16 @@ bool load_homography_from_file(const std::string& path, cv::Mat* homography_out)
         if (fs.isOpened()) {
             cv::Mat mat;
             if (fs.root().isMap()) {
+                if (distortion_reference_out != nullptr) {
+                    std::string distortion_reference;
+                    cv::FileNode distortion_reference_node = fs["distortion_reference"];
+                    if (!distortion_reference_node.empty()) {
+                        distortion_reference_node >> distortion_reference;
+                        if (!distortion_reference.empty()) {
+                            *distortion_reference_out = distortion_reference;
+                        }
+                    }
+                }
                 fs["homography"] >> mat;
             }
             if (mat.empty()) {
@@ -411,6 +518,146 @@ bool load_homography_from_file(const std::string& path, cv::Mat* homography_out)
     }
 
     return parse_homography_numbers(text, homography_out);
+}
+
+bool load_distortion_profile_from_file(const std::string& path, DistortionProfileData* profile_out) {
+    if (profile_out == nullptr) {
+        return false;
+    }
+    *profile_out = DistortionProfileData{};
+
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return false;
+    }
+    std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+    try {
+        cv::FileStorage fs(path, cv::FileStorage::READ | cv::FileStorage::FORMAT_AUTO);
+        if (fs.isOpened() && fs.root().isMap()) {
+            DistortionProfileData parsed;
+            cv::Mat camera_matrix;
+            cv::Mat dist_coeffs;
+            std::vector<int> image_size;
+            cv::FileNode model_node = fs["model"];
+            cv::FileNode source_node = fs["source"];
+            cv::FileNode confidence_node = fs["confidence"];
+            cv::FileNode fit_score_node = fs["fit_score"];
+            cv::FileNode line_count_node = fs["line_count"];
+            cv::FileNode frame_count_used_node = fs["frame_count_used"];
+            cv::FileNode image_size_node = fs["image_size"];
+            fs["camera_matrix"] >> camera_matrix;
+            fs["dist_coeffs"] >> dist_coeffs;
+            if (!model_node.empty()) {
+                model_node >> parsed.model;
+            }
+            if (!source_node.empty()) {
+                source_node >> parsed.source;
+            }
+            if (!confidence_node.empty()) {
+                confidence_node >> parsed.confidence;
+            }
+            if (!fit_score_node.empty()) {
+                fit_score_node >> parsed.fit_score;
+            }
+            if (!line_count_node.empty()) {
+                line_count_node >> parsed.line_count;
+            }
+            if (!frame_count_used_node.empty()) {
+                frame_count_used_node >> parsed.frame_count_used;
+            }
+            if (!image_size_node.empty()) {
+                image_size_node >> image_size;
+            }
+            if (!camera_matrix.empty() &&
+                !dist_coeffs.empty() &&
+                camera_matrix.rows == 3 &&
+                camera_matrix.cols == 3 &&
+                image_size.size() >= 2 &&
+                image_size[0] > 0 &&
+                image_size[1] > 0) {
+                camera_matrix.convertTo(parsed.camera_matrix, CV_64F);
+                dist_coeffs = dist_coeffs.reshape(1, 1);
+                dist_coeffs.convertTo(parsed.dist_coeffs, CV_64F);
+                parsed.image_size = cv::Size(image_size[0], image_size[1]);
+                if (parsed.model.empty()) {
+                    parsed.model = "opencv_pinhole";
+                }
+                if (parsed.source.empty()) {
+                    parsed.source = "saved";
+                }
+                *profile_out = parsed;
+                return true;
+            }
+        }
+    } catch (const cv::Exception&) {
+        // Fall through to permissive JSON parsing below.
+    }
+
+    DistortionProfileData parsed;
+    std::string image_size_text;
+    std::string camera_matrix_text;
+    std::string dist_coeffs_text;
+    std::vector<double> image_size_values;
+    std::vector<double> camera_matrix_values;
+    std::vector<double> dist_coeff_values;
+    extract_json_string_for_key(text, "\"model\"", &parsed.model);
+    extract_json_string_for_key(text, "\"source\"", &parsed.source);
+    extract_json_number_for_key(text, "\"confidence\"", &parsed.confidence);
+    extract_json_number_for_key(text, "\"fit_score\"", &parsed.fit_score);
+    {
+        double numeric_value = 0.0;
+        if (extract_json_number_for_key(text, "\"line_count\"", &numeric_value)) {
+            parsed.line_count = static_cast<std::int64_t>(std::llround(numeric_value));
+        }
+        if (extract_json_number_for_key(text, "\"frame_count_used\"", &numeric_value)) {
+            parsed.frame_count_used = static_cast<std::int64_t>(std::llround(numeric_value));
+        }
+    }
+    if (!extract_json_array_for_key(text, "\"image_size\"", &image_size_text) ||
+        !extract_json_array_for_key(text, "\"camera_matrix\"", &camera_matrix_text) ||
+        !extract_json_array_for_key(text, "\"dist_coeffs\"", &dist_coeffs_text) ||
+        !parse_numeric_vector(image_size_text, &image_size_values) ||
+        !parse_numeric_vector(camera_matrix_text, &camera_matrix_values) ||
+        !parse_numeric_vector(dist_coeffs_text, &dist_coeff_values)) {
+        return false;
+    }
+    if (image_size_values.size() < 2 || camera_matrix_values.size() < 9 || dist_coeff_values.empty()) {
+        return false;
+    }
+    parsed.image_size = cv::Size(
+        static_cast<int>(std::llround(image_size_values[0])),
+        static_cast<int>(std::llround(image_size_values[1])));
+    if (parsed.image_size.width <= 0 || parsed.image_size.height <= 0) {
+        return false;
+    }
+    parsed.camera_matrix = cv::Mat(3, 3, CV_64F, camera_matrix_values.data()).clone();
+    parsed.dist_coeffs = cv::Mat(1, static_cast<int>(dist_coeff_values.size()), CV_64F, dist_coeff_values.data()).clone();
+    if (parsed.model.empty()) {
+        parsed.model = "opencv_pinhole";
+    }
+    if (parsed.source.empty()) {
+        parsed.source = "saved";
+    }
+    *profile_out = parsed;
+    return true;
+}
+
+cv::Mat scale_camera_matrix_to_runtime(
+    const cv::Mat& camera_matrix,
+    const cv::Size& stored_size,
+    const cv::Size& runtime_size) {
+    if (camera_matrix.empty() || stored_size.width <= 0 || stored_size.height <= 0) {
+        return camera_matrix.clone();
+    }
+    cv::Mat scaled = camera_matrix.clone();
+    const double scale_x = static_cast<double>(runtime_size.width) / static_cast<double>(stored_size.width);
+    const double scale_y = static_cast<double>(runtime_size.height) / static_cast<double>(stored_size.height);
+    scaled.at<double>(0, 0) *= scale_x;
+    scaled.at<double>(0, 2) *= scale_x;
+    scaled.at<double>(1, 1) *= scale_y;
+    scaled.at<double>(1, 2) *= scale_y;
+    return scaled;
 }
 
 std::string format_overlay_clock_now() {
@@ -537,6 +784,7 @@ struct OffsetEstimateResult {
     double confidence = 0.0;
     OffsetScore best_score{};
     double second_best_score = -1'000'000.0;
+    double selection_score = -1'000'000.0;
 };
 
 std::int64_t wallclock_now_ns() {
@@ -594,6 +842,16 @@ bool frame_has_source_pts(const hogak::input::BufferedFrameInfo& info) {
     return info.source_time_valid && info.source_pts_ns > 0;
 }
 
+double snapshot_frame_period_ms(
+    const hogak::input::ReaderSnapshot& left_snapshot,
+    const hogak::input::ReaderSnapshot& right_snapshot) {
+    const double fps = std::max({left_snapshot.fps, right_snapshot.fps, 30.0});
+    if (!std::isfinite(fps) || fps <= 0.0) {
+        return 1000.0 / 30.0;
+    }
+    return 1000.0 / fps;
+}
+
 double pearson_correlation(const std::vector<double>& left, const std::vector<double>& right) {
     if (left.size() != right.size() || left.size() < 3) {
         return 0.0;
@@ -629,6 +887,7 @@ OffsetScore score_pts_offset_candidate(
     const hogak::input::ReaderSnapshot& left_snapshot,
     const hogak::input::ReaderSnapshot& right_snapshot,
     double window_sec,
+    double frame_period_ms,
     double offset_ms) {
     OffsetScore score;
     if (!snapshot_has_source_pts(left_snapshot) || !snapshot_has_source_pts(right_snapshot)) {
@@ -638,7 +897,8 @@ OffsetScore score_pts_offset_candidate(
     const auto offset_ns = static_cast<std::int64_t>(std::llround(offset_ms * 1'000'000.0));
     const auto left_cutoff_ns = left_snapshot.latest_source_pts_ns - window_ns;
     const auto right_cutoff_ns = right_snapshot.latest_source_pts_ns - window_ns;
-    const auto max_gap_ns = static_cast<std::int64_t>(120.0 * 1'000'000.0);
+    const double max_gap_ms = std::max(20.0, 1.5 * std::max(1.0, frame_period_ms));
+    const auto max_gap_ns = static_cast<std::int64_t>(std::llround(max_gap_ms * 1'000'000.0));
 
     std::vector<const hogak::input::BufferedFrameInfo*> filtered_left;
     std::vector<const hogak::input::BufferedFrameInfo*> filtered_right;
@@ -700,7 +960,8 @@ OffsetScore score_pts_offset_candidate(
         score.motion_corr +
         (0.20 * score.luma_corr) +
         (0.35 * score.overlap_ratio) -
-        (0.002 * score.avg_gap_ms);
+        (0.002 * score.avg_gap_ms) -
+        (0.0015 * std::abs(offset_ms));
     return score;
 }
 
@@ -718,16 +979,9 @@ OffsetEstimateResult estimate_pts_offset_from_buffers(
         return result;
     }
 
-    const double raw_latest_delta_ms =
-        static_cast<double>(left_snapshot.latest_source_pts_ns - right_snapshot.latest_source_pts_ns) / 1'000'000.0;
-    double search_center_ms = center_offset_ms;
-    if (!std::isfinite(search_center_ms)) {
-        search_center_ms = raw_latest_delta_ms;
-    }
-    if (std::abs(search_center_ms) < 1e-6) {
-        search_center_ms = raw_latest_delta_ms;
-    }
-    const double bounded_search_ms = std::max(100.0, std::abs(max_search_ms));
+    const double frame_period_ms = snapshot_frame_period_ms(left_snapshot, right_snapshot);
+    double search_center_ms = std::isfinite(center_offset_ms) ? center_offset_ms : 0.0;
+    const double bounded_search_ms = std::max(50.0, std::abs(max_search_ms));
     search_center_ms = std::clamp(search_center_ms, -bounded_search_ms, bounded_search_ms);
 
     const auto scan_range = [&](double start_ms,
@@ -735,6 +989,7 @@ OffsetEstimateResult estimate_pts_offset_from_buffers(
                                 double step_ms,
                                 OffsetScore* best_score_out,
                                 double* best_offset_out,
+                                double* best_selection_score_out,
                                 double* second_best_score_out) {
         for (double offset_ms = start_ms; offset_ms <= end_ms + (step_ms * 0.5); offset_ms += step_ms) {
             const auto score = score_pts_offset_candidate(
@@ -743,38 +998,50 @@ OffsetEstimateResult estimate_pts_offset_from_buffers(
                 left_snapshot,
                 right_snapshot,
                 window_sec,
+                frame_period_ms,
                 offset_ms);
             if (!score.valid) {
                 continue;
             }
-            if (!best_score_out->valid || score.combined_score > best_score_out->combined_score) {
-                *second_best_score_out = best_score_out->valid ? best_score_out->combined_score : *second_best_score_out;
+            const double stability_penalty = 0.0020 * std::abs(offset_ms - search_center_ms);
+            const double selection_score = score.combined_score - stability_penalty;
+            const bool is_better =
+                !best_score_out->valid ||
+                (selection_score > (*best_selection_score_out + 1e-9)) ||
+                (std::abs(selection_score - *best_selection_score_out) <= 1e-9 &&
+                 std::abs(offset_ms - search_center_ms) < std::abs(*best_offset_out - search_center_ms));
+            if (is_better) {
+                *second_best_score_out = best_score_out->valid ? *best_selection_score_out : *second_best_score_out;
                 *best_score_out = score;
                 *best_offset_out = offset_ms;
-            } else if (score.combined_score > *second_best_score_out) {
-                *second_best_score_out = score.combined_score;
+                *best_selection_score_out = selection_score;
+            } else if (selection_score > *second_best_score_out) {
+                *second_best_score_out = selection_score;
             }
         }
     };
 
-    const double coarse_radius_ms = local_search_only ? 1000.0 : std::min(bounded_search_ms, 1500.0);
+    const double coarse_radius_ms = local_search_only ? std::min(bounded_search_ms, 125.0) : bounded_search_ms;
     double best_offset_ms = search_center_ms;
     OffsetScore best_score;
+    double best_selection_score = -1'000'000.0;
     double second_best_score = -1'000'000.0;
     scan_range(
         std::max(-bounded_search_ms, search_center_ms - coarse_radius_ms),
         std::min(bounded_search_ms, search_center_ms + coarse_radius_ms),
-        local_search_only ? 50.0 : 100.0,
+        25.0,
         &best_score,
         &best_offset_ms,
+        &best_selection_score,
         &second_best_score);
     if (!best_score.valid && !local_search_only) {
         scan_range(
             -bounded_search_ms,
             bounded_search_ms,
-            250.0,
+            25.0,
             &best_score,
             &best_offset_ms,
+            &best_selection_score,
             &second_best_score);
     }
     if (!best_score.valid) {
@@ -782,36 +1049,42 @@ OffsetEstimateResult estimate_pts_offset_from_buffers(
     }
 
     scan_range(
-        std::max(-bounded_search_ms, best_offset_ms - 200.0),
-        std::min(bounded_search_ms, best_offset_ms + 200.0),
-        20.0,
-        &best_score,
-        &best_offset_ms,
-        &second_best_score);
-    scan_range(
         std::max(-bounded_search_ms, best_offset_ms - 40.0),
         std::min(bounded_search_ms, best_offset_ms + 40.0),
         5.0,
         &best_score,
         &best_offset_ms,
+        &best_selection_score,
+        &second_best_score);
+    scan_range(
+        std::max(-bounded_search_ms, best_offset_ms - 10.0),
+        std::min(bounded_search_ms, best_offset_ms + 10.0),
+        1.0,
+        &best_score,
+        &best_offset_ms,
+        &best_selection_score,
         &second_best_score);
 
     const double motion_component = clamp_unit(std::max(0.0, best_score.motion_corr));
     const double luma_component = clamp_unit(std::max(0.0, best_score.luma_corr));
     const double overlap_component = clamp_unit(best_score.overlap_ratio);
-    const double gap_component = clamp_unit(1.0 - (best_score.avg_gap_ms / 120.0));
-    const double peak_component = clamp_unit((best_score.combined_score - second_best_score + 1.0) / 2.0);
+    const double max_gap_ms = std::max(20.0, 1.5 * std::max(1.0, frame_period_ms));
+    const double gap_component = clamp_unit(1.0 - (best_score.avg_gap_ms / max_gap_ms));
+    const double peak_component = clamp_unit((best_selection_score - second_best_score + 0.5) / 1.0);
+    const double pairs_component = clamp_unit((static_cast<double>(best_score.matched_pairs) - 4.0) / 8.0);
 
     result.valid = true;
     result.offset_ms = best_offset_ms;
     result.best_score = best_score;
     result.second_best_score = second_best_score;
+    result.selection_score = best_selection_score;
     result.confidence = clamp_unit(
-        (0.45 * motion_component) +
-        (0.10 * luma_component) +
+        (0.30 * motion_component) +
+        (0.05 * luma_component) +
         (0.20 * overlap_component) +
-        (0.10 * gap_component) +
-        (0.15 * peak_component));
+        (0.20 * gap_component) +
+        (0.15 * peak_component) +
+        (0.10 * pairs_component));
     return result;
 }
 
@@ -835,6 +1108,9 @@ hogak::input::FrameTimeDomain resolve_service_time_domain(
         return hogak::input::FrameTimeDomain::kArrival;
     }
     if (sync_time_source == "pts-offset-manual") {
+        return hogak::input::FrameTimeDomain::kSourcePtsOffset;
+    }
+    if (sync_time_source == "pts-offset-auto") {
         return hogak::input::FrameTimeDomain::kSourcePtsOffset;
     }
     if (sync_time_source == "pts-offset-hybrid" && std::abs(config.sync_manual_offset_ms) > 1e-6) {
@@ -1062,18 +1338,21 @@ bool StitchEngine::select_pair_locked(
             sync_offset_confidence_ = effective_offset_confidence;
             sync_offset_source_ = effective_offset_source;
         } else if ((sync_time_source == "pts-offset-auto" || sync_time_source == "pts-offset-hybrid") && has_pts_time) {
+            const double confidence_min = std::max(0.0, config_.sync_auto_offset_confidence_min);
             const bool have_auto_estimate =
-                (sync_offset_source_ == "auto" || sync_offset_source_ == "recalibration") &&
-                (sync_offset_confidence_ >= std::max(0.0, config_.sync_auto_offset_confidence_min));
+                (sync_offset_source_ == "auto" || sync_offset_source_ == "recalibration");
             const bool periodic_recalibration_due =
                 last_sync_recalibration_ns_ <= 0 ||
                 (now_arrival_ns - last_sync_recalibration_ns_) >= static_cast<std::int64_t>(
                     std::max(1.0, config_.sync_recalibration_interval_sec) * 1'000'000'000.0);
+            const bool recalibration_cooldown_elapsed =
+                last_sync_recalibration_ns_ <= 0 ||
+                (now_arrival_ns - last_sync_recalibration_ns_) >= 5'000'000'000LL;
             const bool sync_quality_degraded =
                 metrics_.pair_source_skew_ms_mean >= std::max(0.0, config_.sync_recalibration_trigger_skew_ms) ||
                 cumulative_wait_sync_ratio(metrics_) >= std::max(0.0, config_.sync_recalibration_trigger_wait_ratio);
             const bool should_estimate =
-                !have_auto_estimate || periodic_recalibration_due || sync_quality_degraded;
+                !have_auto_estimate || periodic_recalibration_due || (sync_quality_degraded && recalibration_cooldown_elapsed);
             if (should_estimate) {
                 const auto estimate = estimate_pts_offset_from_buffers(
                     left_infos,
@@ -1084,9 +1363,29 @@ bool StitchEngine::select_pair_locked(
                     config_.sync_auto_offset_max_search_ms,
                     have_auto_estimate ? effective_sync_offset_ms_ : 0.0,
                     have_auto_estimate);
-                if (estimate.valid && estimate.confidence >= std::max(0.0, config_.sync_auto_offset_confidence_min)) {
+                sync_estimate_pairs_ = estimate.valid ? estimate.best_score.matched_pairs : 0;
+                sync_estimate_avg_gap_ms_ = estimate.valid ? estimate.best_score.avg_gap_ms : 0.0;
+                sync_estimate_score_ = estimate.valid ? estimate.selection_score : 0.0;
+                const bool estimate_meets_baseline =
+                    estimate.valid &&
+                    estimate.confidence >= confidence_min &&
+                    estimate.best_score.matched_pairs >= 8 &&
+                    estimate.best_score.avg_gap_ms <= 15.0;
+                const bool requires_extra_confirmation =
+                    have_auto_estimate &&
+                    std::abs(estimate.offset_ms - effective_sync_offset_ms_) >= 20.0;
+                const bool strong_estimate =
+                    estimate_meets_baseline &&
+                    (!requires_extra_confirmation || estimate.confidence >= 0.95);
+                if (strong_estimate) {
                     if (have_auto_estimate) {
-                        effective_sync_offset_ms_ = (0.8 * effective_sync_offset_ms_) + (0.2 * estimate.offset_ms);
+                        const double blended_offset_ms =
+                            (0.9 * effective_sync_offset_ms_) + (0.1 * estimate.offset_ms);
+                        const double limited_delta_ms = std::clamp(
+                            blended_offset_ms - effective_sync_offset_ms_,
+                            -10.0,
+                            10.0);
+                        effective_sync_offset_ms_ += limited_delta_ms;
                         sync_offset_source_ = "recalibration";
                         sync_recalibration_count_ += 1;
                     } else {
@@ -1097,11 +1396,16 @@ bool StitchEngine::select_pair_locked(
                     last_sync_recalibration_ns_ = now_arrival_ns;
                 } else if (!have_auto_estimate) {
                     effective_sync_offset_ms_ = 0.0;
-                    sync_offset_confidence_ = 0.0;
-                    sync_offset_source_ = "arrival-fallback";
+                    sync_offset_confidence_ = estimate.valid ? estimate.confidence : 0.0;
+                    sync_offset_source_ = "auto";
+                    last_sync_recalibration_ns_ = now_arrival_ns;
                 }
             }
-            if (sync_offset_confidence_ >= std::max(0.0, config_.sync_auto_offset_confidence_min)) {
+            if (sync_time_source == "pts-offset-auto") {
+                effective_offset_ns = static_cast<std::int64_t>(std::llround(effective_sync_offset_ms_ * 1'000'000.0));
+                effective_offset_confidence = sync_offset_confidence_;
+                effective_offset_source = sync_offset_source_;
+            } else if (sync_offset_confidence_ >= confidence_min) {
                 effective_offset_ns = static_cast<std::int64_t>(std::llround(effective_sync_offset_ms_ * 1'000'000.0));
                 effective_offset_confidence = sync_offset_confidence_;
                 effective_offset_source = sync_offset_source_;
@@ -1119,10 +1423,16 @@ bool StitchEngine::select_pair_locked(
             effective_sync_offset_ms_ = 0.0;
             sync_offset_confidence_ = 1.0;
             sync_offset_source_ = "wallclock";
+            sync_estimate_pairs_ = 0;
+            sync_estimate_avg_gap_ms_ = 0.0;
+            sync_estimate_score_ = 0.0;
         } else {
             effective_sync_offset_ms_ = 0.0;
             sync_offset_confidence_ = 0.0;
             sync_offset_source_ = "arrival-fallback";
+            sync_estimate_pairs_ = 0;
+            sync_estimate_avg_gap_ms_ = 0.0;
+            sync_estimate_score_ = 0.0;
         }
         const auto service_time_domain = resolve_service_time_domain(
             config_,
@@ -1353,6 +1663,7 @@ bool StitchEngine::select_pair_locked(
 
 void StitchEngine::clear_calibration_state_locked() {
     calibrated_ = false;
+    homography_distortion_reference_ = "raw";
     homography_.release();
     homography_adjusted_.release();
     left_mask_template_.release();
@@ -1371,12 +1682,14 @@ void StitchEngine::clear_calibration_state_locked() {
     gpu_left_nv12_uv_.release();
     gpu_left_decoded_.release();
     gpu_left_input_.release();
+    gpu_left_corrected_.release();
     gpu_left_canvas_.release();
     gpu_stitched_.release();
     gpu_right_nv12_y_.release();
     gpu_right_nv12_uv_.release();
     gpu_right_decoded_.release();
     gpu_right_input_.release();
+    gpu_right_corrected_.release();
     gpu_right_warped_.release();
     gpu_overlap_mask_.release();
     gpu_overlap_mask_roi_.release();
@@ -1409,6 +1722,8 @@ void StitchEngine::clear_calibration_state_locked() {
     cached_right_cpu_frame_.release();
     cached_left_canvas_cpu_.release();
     cached_right_warped_cpu_.release();
+    left_distortion_ = DistortionState{};
+    right_distortion_ = DistortionState{};
     metrics_.output_width = 0;
     metrics_.output_height = 0;
     metrics_.production_output_width = 0;
@@ -1480,6 +1795,9 @@ bool StitchEngine::start(const EngineConfig& config) {
     sync_offset_confidence_ = 0.0;
     sync_recalibration_count_ = 0;
     sync_offset_source_ = "arrival-fallback";
+    sync_estimate_pairs_ = 0;
+    sync_estimate_avg_gap_ms_ = 0.0;
+    sync_estimate_score_ = 0.0;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -1549,6 +1867,9 @@ void StitchEngine::stop() {
     sync_offset_confidence_ = 0.0;
     sync_recalibration_count_ = 0;
     sync_offset_source_ = "arrival-fallback";
+    sync_estimate_pairs_ = 0;
+    sync_estimate_avg_gap_ms_ = 0.0;
+    sync_estimate_score_ = 0.0;
     consecutive_left_reuse_ = 0;
     consecutive_right_reuse_ = 0;
 }
@@ -1602,6 +1923,9 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
     sync_offset_confidence_ = 0.0;
     sync_recalibration_count_ = 0;
     sync_offset_source_ = "arrival-fallback";
+    sync_estimate_pairs_ = 0;
+    sync_estimate_avg_gap_ms_ = 0.0;
+    sync_estimate_score_ = 0.0;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -1671,6 +1995,9 @@ void StitchEngine::reset_calibration() {
     sync_offset_confidence_ = 0.0;
     sync_recalibration_count_ = 0;
     sync_offset_source_ = "arrival-fallback";
+    sync_estimate_pairs_ = 0;
+    sync_estimate_avg_gap_ms_ = 0.0;
+    sync_estimate_score_ = 0.0;
     last_stitched_count_ = 0;
     last_stitch_timestamp_ns_ = 0;
     last_output_frames_written_ = 0;
@@ -1708,11 +2035,12 @@ bool StitchEngine::load_homography_locked(cv::Mat* homography_out) {
     if (homography_out == nullptr) {
         return false;
     }
+    homography_distortion_reference_ = "raw";
     if (config_.homography_file.empty()) {
         *homography_out = cv::Mat::eye(3, 3, CV_64F);
         return true;
     }
-    return load_homography_from_file(config_.homography_file, homography_out);
+    return load_homography_from_file(config_.homography_file, homography_out, &homography_distortion_reference_);
 }
 
 bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv::Size& right_size) {
@@ -1808,6 +2136,120 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
             metrics_.gpu_reason = std::string("cuda calibration upload failed: ") + e.what();
         }
     }
+
+    auto configure_distortion_state = [&](const std::string& configured_path,
+                                          const std::string& configured_hint,
+                                          const cv::Size& runtime_size,
+                                          DistortionState* state) {
+        if (state == nullptr) {
+            return;
+        }
+        *state = DistortionState{};
+        state->model = "opencv_pinhole";
+        if (config_.distortion_mode == "off") {
+            return;
+        }
+        if (homography_distortion_reference_ != "undistorted") {
+            return;
+        }
+        if (runtime_size.width <= 0 || runtime_size.height <= 0) {
+            return;
+        }
+
+        std::string source_hint = configured_hint;
+        for (char& ch : source_hint) {
+            ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+        }
+        if (source_hint.empty()) {
+            source_hint = "off";
+        }
+        if (source_hint == "off" && config_.use_saved_distortion && !configured_path.empty()) {
+            source_hint = "saved";
+        }
+        if (source_hint == "off" || configured_path.empty()) {
+            return;
+        }
+
+        DistortionProfileData profile;
+        if (!load_distortion_profile_from_file(configured_path, &profile)) {
+            return;
+        }
+
+        cv::Mat scaled_camera_matrix =
+            scale_camera_matrix_to_runtime(profile.camera_matrix, profile.image_size, runtime_size);
+        if (scaled_camera_matrix.empty() || profile.dist_coeffs.empty()) {
+            return;
+        }
+
+        cv::Mat map_x_cpu;
+        cv::Mat map_y_cpu;
+        if (profile.model == "opencv_fisheye") {
+            cv::Mat fisheye_dist = profile.dist_coeffs.reshape(1, 1).clone();
+            if (fisheye_dist.cols < 4) {
+                return;
+            }
+            if (fisheye_dist.cols > 4) {
+                fisheye_dist = fisheye_dist.colRange(0, 4).clone();
+            }
+            cv::fisheye::initUndistortRectifyMap(
+                scaled_camera_matrix,
+                fisheye_dist,
+                cv::Mat::eye(3, 3, CV_64F),
+                scaled_camera_matrix,
+                runtime_size,
+                CV_32FC1,
+                map_x_cpu,
+                map_y_cpu);
+        } else {
+            cv::initUndistortRectifyMap(
+                scaled_camera_matrix,
+                profile.dist_coeffs,
+                cv::Mat(),
+                scaled_camera_matrix,
+                runtime_size,
+                CV_32FC1,
+                map_x_cpu,
+                map_y_cpu);
+        }
+        if (map_x_cpu.empty() || map_y_cpu.empty()) {
+            return;
+        }
+
+        state->enabled = true;
+        state->source = source_hint;
+        state->model = profile.model.empty() ? "opencv_pinhole" : profile.model;
+        state->confidence = std::max(0.0, profile.confidence);
+        state->fit_score = std::max(0.0, profile.fit_score);
+        state->line_count = std::max<std::int64_t>(0, profile.line_count);
+        state->frame_count_used = std::max<std::int64_t>(0, profile.frame_count_used);
+        state->image_size = runtime_size;
+        state->camera_matrix = scaled_camera_matrix;
+        state->dist_coeffs = profile.dist_coeffs.clone();
+        state->map_x_cpu = map_x_cpu;
+        state->map_y_cpu = map_y_cpu;
+
+        if (gpu_available_) {
+            try {
+                state->map_x_gpu.upload(state->map_x_cpu);
+                state->map_y_gpu.upload(state->map_y_cpu);
+            } catch (const cv::Exception& e) {
+                gpu_available_ = false;
+                metrics_.gpu_errors += 1;
+                metrics_.gpu_reason = std::string("cuda distortion map upload failed: ") + e.what();
+            }
+        }
+    };
+
+    configure_distortion_state(
+        config_.left_distortion_file,
+        config_.left_distortion_source_hint,
+        left_size,
+        &left_distortion_);
+    configure_distortion_state(
+        config_.right_distortion_file,
+        config_.right_distortion_source_hint,
+        right_size,
+        &right_distortion_);
 
     calibrated_ = true;
     metrics_.calibrated = true;
@@ -2040,6 +2482,8 @@ bool StitchEngine::stitch_pair_locked(
     cv::Mat stitched;
     cv::Mat warped_right;
     cv::Mat canvas_left;
+    cv::Mat left_corrected_cpu;
+    cv::Mat right_corrected_cpu;
     bool used_gpu_blend = false;
 
     if (gpu_available_) {
@@ -2166,10 +2610,30 @@ bool StitchEngine::stitch_pair_locked(
                 cached_left_gpu_input_seq_ = selected_pair.left_seq;
             }
             if (cached_left_canvas_seq_ != selected_pair.left_seq || gpu_left_canvas_.empty()) {
+                const cv::cuda::GpuMat* left_gpu_for_stitch = &gpu_left_input_;
+                if (left_distortion_.enabled) {
+                    if (left_distortion_.map_x_gpu.empty() || left_distortion_.map_y_gpu.empty()) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "left distortion gpu map unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    cv::cuda::remap(
+                        gpu_left_input_,
+                        gpu_left_corrected_,
+                        left_distortion_.map_x_gpu,
+                        left_distortion_.map_y_gpu,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar());
+                    left_gpu_for_stitch = &gpu_left_corrected_;
+                }
                 gpu_left_canvas_.create(output_size_, CV_8UC3);
                 gpu_left_canvas_.setTo(cv::Scalar::all(0));
                 cv::cuda::GpuMat left_roi_gpu(gpu_left_canvas_, left_roi_);
-                gpu_left_input_.copyTo(left_roi_gpu);
+                left_gpu_for_stitch->copyTo(left_roi_gpu);
                 cached_left_canvas_seq_ = selected_pair.left_seq;
             }
 
@@ -2206,8 +2670,28 @@ bool StitchEngine::stitch_pair_locked(
                 cached_right_gpu_input_seq_ = selected_pair.right_seq;
             }
             if (cached_right_warped_seq_ != selected_pair.right_seq || gpu_right_warped_.empty()) {
+                const cv::cuda::GpuMat* right_gpu_for_stitch = &gpu_right_input_;
+                if (right_distortion_.enabled) {
+                    if (right_distortion_.map_x_gpu.empty() || right_distortion_.map_y_gpu.empty()) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "right distortion gpu map unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    cv::cuda::remap(
+                        gpu_right_input_,
+                        gpu_right_corrected_,
+                        right_distortion_.map_x_gpu,
+                        right_distortion_.map_y_gpu,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar());
+                    right_gpu_for_stitch = &gpu_right_corrected_;
+                }
                 cv::cuda::warpPerspective(
-                    gpu_right_input_,
+                    *right_gpu_for_stitch,
                     gpu_right_warped_,
                     homography_adjusted_,
                     output_size_);
@@ -2299,11 +2783,37 @@ bool StitchEngine::stitch_pair_locked(
             metrics_.stitch_fps = 0.0;
             return false;
         }
+        const cv::Mat* left_cpu_for_stitch = &left_cpu_frame;
+        if (left_distortion_.enabled && !left_distortion_.map_x_cpu.empty() && !left_distortion_.map_y_cpu.empty()) {
+            cv::remap(
+                left_cpu_frame,
+                left_corrected_cpu,
+                left_distortion_.map_x_cpu,
+                left_distortion_.map_y_cpu,
+                cv::INTER_LINEAR,
+                cv::BORDER_CONSTANT);
+            if (!left_corrected_cpu.empty()) {
+                left_cpu_for_stitch = &left_corrected_cpu;
+            }
+        }
+        const cv::Mat* right_cpu_for_stitch = &right_cpu_frame;
+        if (right_distortion_.enabled && !right_distortion_.map_x_cpu.empty() && !right_distortion_.map_y_cpu.empty()) {
+            cv::remap(
+                right_cpu_frame,
+                right_corrected_cpu,
+                right_distortion_.map_x_cpu,
+                right_distortion_.map_y_cpu,
+                cv::INTER_LINEAR,
+                cv::BORDER_CONSTANT);
+            if (!right_corrected_cpu.empty()) {
+                right_cpu_for_stitch = &right_corrected_cpu;
+            }
+        }
         if (cached_left_canvas_seq_ == selected_pair.left_seq && !cached_left_canvas_cpu_.empty()) {
             canvas_left = cached_left_canvas_cpu_;
         } else {
             canvas_left = cv::Mat::zeros(output_size_, CV_8UC3);
-            left_cpu_frame.copyTo(canvas_left(left_roi_));
+            left_cpu_for_stitch->copyTo(canvas_left(left_roi_));
             cached_left_canvas_cpu_ = canvas_left;
             cached_left_canvas_seq_ = selected_pair.left_seq;
         }
@@ -2311,7 +2821,7 @@ bool StitchEngine::stitch_pair_locked(
             warped_right = cached_right_warped_cpu_;
         } else {
             cv::warpPerspective(
-                right_cpu_frame,
+                *right_cpu_for_stitch,
                 warped_right,
                 homography_adjusted_,
                 output_size_);
@@ -2569,6 +3079,29 @@ void StitchEngine::update_metrics_locked() {
     metrics_.sync_offset_source = "arrival-fallback";
     metrics_.sync_offset_confidence = 0.0;
     metrics_.sync_recalibration_count = sync_recalibration_count_;
+    metrics_.sync_estimate_pairs = sync_estimate_pairs_;
+    metrics_.sync_estimate_avg_gap_ms = sync_estimate_avg_gap_ms_;
+    metrics_.sync_estimate_score = sync_estimate_score_;
+    metrics_.distortion_enabled_left = left_distortion_.enabled;
+    metrics_.distortion_enabled_right = right_distortion_.enabled;
+    metrics_.distortion_source_left = left_distortion_.enabled ? left_distortion_.source : "off";
+    metrics_.distortion_source_right = right_distortion_.enabled ? right_distortion_.source : "off";
+    metrics_.distortion_confidence_left = left_distortion_.enabled ? left_distortion_.confidence : 0.0;
+    metrics_.distortion_confidence_right = right_distortion_.enabled ? right_distortion_.confidence : 0.0;
+    metrics_.distortion_model =
+        (left_distortion_.enabled && right_distortion_.enabled && left_distortion_.model != right_distortion_.model)
+            ? "mixed"
+            : (left_distortion_.enabled
+                ? left_distortion_.model
+                : (right_distortion_.enabled ? right_distortion_.model : "opencv_pinhole"));
+    metrics_.distortion_fit_score_left = left_distortion_.enabled ? left_distortion_.fit_score : 0.0;
+    metrics_.distortion_fit_score_right = right_distortion_.enabled ? right_distortion_.fit_score : 0.0;
+    metrics_.distortion_line_count_left = left_distortion_.enabled ? left_distortion_.line_count : 0;
+    metrics_.distortion_line_count_right = right_distortion_.enabled ? right_distortion_.line_count : 0;
+    metrics_.distortion_frame_count_left = left_distortion_.enabled ? left_distortion_.frame_count_used : 0;
+    metrics_.distortion_frame_count_right = right_distortion_.enabled ? right_distortion_.frame_count_used : 0;
+    metrics_.distortion_lens_model_left = left_distortion_.enabled ? left_distortion_.model : "opencv_pinhole";
+    metrics_.distortion_lens_model_right = right_distortion_.enabled ? right_distortion_.model : "opencv_pinhole";
     if (preselect_time_domain == hogak::input::FrameTimeDomain::kSourceWallclock) {
         metrics_.sync_offset_source = "wallclock";
         metrics_.sync_offset_confidence = 1.0;
@@ -2786,6 +3319,9 @@ void StitchEngine::update_metrics_locked() {
     metrics_.sync_offset_source = pair.offset_source;
     metrics_.sync_offset_confidence = pair.offset_confidence;
     metrics_.sync_recalibration_count = sync_recalibration_count_;
+    metrics_.sync_estimate_pairs = sync_estimate_pairs_;
+    metrics_.sync_estimate_avg_gap_ms = sync_estimate_avg_gap_ms_;
+    metrics_.sync_estimate_score = sync_estimate_score_;
     metrics_.selected_left_lag_frames = std::max<std::int64_t>(0, left.latest_seq - pair.left_seq);
     metrics_.selected_right_lag_frames = std::max<std::int64_t>(0, right.latest_seq - pair.right_seq);
     metrics_.selected_left_lag_ms =

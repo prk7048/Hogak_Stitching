@@ -95,6 +95,24 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"sync_offset_source\":\"" << json_escape(metrics.sync_offset_source) << "\","
         << "\"sync_offset_confidence\":" << metrics.sync_offset_confidence << ','
         << "\"sync_recalibration_count\":" << metrics.sync_recalibration_count << ','
+        << "\"sync_estimate_pairs\":" << metrics.sync_estimate_pairs << ','
+        << "\"sync_estimate_avg_gap_ms\":" << metrics.sync_estimate_avg_gap_ms << ','
+        << "\"sync_estimate_score\":" << metrics.sync_estimate_score << ','
+        << "\"distortion_enabled_left\":" << (metrics.distortion_enabled_left ? "true" : "false") << ','
+        << "\"distortion_enabled_right\":" << (metrics.distortion_enabled_right ? "true" : "false") << ','
+        << "\"distortion_source_left\":\"" << json_escape(metrics.distortion_source_left) << "\","
+        << "\"distortion_source_right\":\"" << json_escape(metrics.distortion_source_right) << "\","
+        << "\"distortion_confidence_left\":" << metrics.distortion_confidence_left << ','
+        << "\"distortion_confidence_right\":" << metrics.distortion_confidence_right << ','
+        << "\"distortion_model\":\"" << json_escape(metrics.distortion_model) << "\","
+        << "\"distortion_fit_score_left\":" << metrics.distortion_fit_score_left << ','
+        << "\"distortion_fit_score_right\":" << metrics.distortion_fit_score_right << ','
+        << "\"distortion_line_count_left\":" << metrics.distortion_line_count_left << ','
+        << "\"distortion_line_count_right\":" << metrics.distortion_line_count_right << ','
+        << "\"distortion_frame_count_left\":" << metrics.distortion_frame_count_left << ','
+        << "\"distortion_frame_count_right\":" << metrics.distortion_frame_count_right << ','
+        << "\"distortion_lens_model_left\":\"" << json_escape(metrics.distortion_lens_model_left) << "\","
+        << "\"distortion_lens_model_right\":\"" << json_escape(metrics.distortion_lens_model_right) << "\","
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
         << "\"gpu_errors\":" << metrics.gpu_errors << ','
