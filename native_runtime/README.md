@@ -134,6 +134,19 @@ native runtime이 기대하는 주요 입력:
 
 실제 기본값은 [config/runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json)과 profile override에서 온다.
 
+현재 sync 관련 핵심 키:
+
+- `sync_time_source`
+- `sync_manual_offset_ms`
+- `sync_auto_offset_window_sec`
+- `sync_auto_offset_max_search_ms`
+- `sync_recalibration_interval_sec`
+- `sync_recalibration_trigger_skew_ms`
+- `sync_recalibration_trigger_wait_ratio`
+- `sync_auto_offset_confidence_min`
+
+기본값은 `sync_time_source=pts-offset-auto`다.
+
 ## What To Watch
 
 운영 중 먼저 볼 값:
@@ -146,6 +159,10 @@ native runtime이 기대하는 주요 입력:
 - `pair_skew_ms`
 - `pair_source_skew_ms_mean`
 - `source_time_mode`
+- `sync_effective_offset_ms`
+- `sync_offset_source`
+- `sync_offset_confidence`
+- `sync_recalibration_count`
 - `read_fail`, `restart`, `gpu_errors`
 
 간단 해석:
@@ -153,10 +170,21 @@ native runtime이 기대하는 주요 입력:
 - `stitch_actual_fps`: 실제 fresh stitched frame 속도
 - `transmit_fps`: 실제 송출 cadence
 - `age_ms`: arrival 기준 입력 지연
-- `source_age_ms`: reader가 보존한 source wallclock 기준 age
+- `source_age_ms`: explicit `wallclock` 진단 모드에서만 의미 있는 source age
 - `pair_skew_ms`: arrival 기준 좌우 시간 차이
-- `pair_source_skew_ms_mean`: source wallclock이 있을 때의 좌우 시간 차이
-- `source_time_mode`: `wallclock` 또는 `fallback-arrival`
+- `pair_source_skew_ms_mean`: `stream_pts_offset` 또는 `wallclock` 기준 좌우 시간 차이
+- `source_time_mode`: `stream_pts_offset`, `wallclock`, `fallback-arrival`
+- `sync_effective_offset_ms`: 현재 pair selection에 실제 적용 중인 right-stream offset
+- `sync_offset_source`: `auto`, `manual`, `recalibration`, `arrival-fallback`, `wallclock`
+- `sync_offset_confidence`: auto/recalibration offset 신뢰도
+- `sync_recalibration_count`: runtime 중 offset 재보정 횟수
+
+운영 권장:
+
+- 기본은 `pts-offset-auto`
+- 현장에 고정 offset이 있으면 `pts-offset-manual`
+- auto 실패 시 manual까지 같이 준비하려면 `pts-offset-hybrid`
+- `wallclock`은 기본 운영이 아니라 비교/진단용
 
 ## Notes
 

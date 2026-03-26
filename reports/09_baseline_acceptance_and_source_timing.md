@@ -8,7 +8,7 @@
 
 1. baseline을 `ffmpeg-cuda + nv12 + service + gpu-direct + strict fresh 30`으로 고정
 2. input timestamp를 `arrival`과 `source`로 분리
-3. source wallclock이 안전하게 비교 가능할 때만 source 기준 pairing을 사용하고, 아니면 `fallback-arrival`로 유지
+3. 기본 pairing을 `stream_pts + auto offset`으로 옮기고, 실패 시 `fallback-arrival`로 유지
 
 ## Baseline Definition
 
@@ -35,7 +35,8 @@ reader는 프레임마다 두 종류의 시간을 보존한다.
   - 운영 age / queue health / arrival skew 해석에 사용
 - `source`
   - 스트림 안의 frame timestamp를 바탕으로 보존한 시각
-  - source wallclock이 cross-camera 비교에 안전할 때만 pair selection에 사용
+  - 기본 운영 경로에서는 `stream_pts + offset` 기준 pair selection에 사용
+  - `wallclock`은 진단용/명시적 opt-in 기준으로만 유지
 
 현재 monitor에서 보는 값의 의미는 아래와 같다.
 
@@ -44,14 +45,24 @@ reader는 프레임마다 두 종류의 시간을 보존한다.
 - `pair_skew_ms_mean`
   - arrival 기준 pair skew
 - `left_source_age_ms`, `right_source_age_ms`
-  - source wallclock이 있을 때의 source age
+  - explicit `wallclock` 모드에서만 해석하는 source age
 - `pair_source_skew_ms_mean`
-  - source wallclock이 있을 때의 source skew
+  - `stream_pts_offset` 또는 `wallclock` 기준 source skew
 - `source_time_mode`
-  - `wallclock`: source wallclock 기준 pairing 사용
+  - `stream_pts_offset`: source PTS + offset 기준 pairing 사용
+  - `wallclock`: explicit opt-in 시에만 wallclock 기준 pairing 사용
   - `fallback-arrival`: cross-camera source 비교가 안전하지 않아 arrival 기준 pairing 사용
+- `sync_effective_offset_ms`
+  - 현재 pair selection에 적용한 right-stream offset
+- `sync_offset_source`
+  - `auto`, `manual`, `recalibration`, `arrival-fallback`, `wallclock`
+- `sync_offset_confidence`
+  - auto/recalibration offset 신뢰도
+- `sync_recalibration_count`
+  - runtime 중 offset 재보정 횟수
 
-이번 단계에서는 raw stream-relative PTS를 cross-camera absolute time처럼 직접 비교하지 않는다.
+이번 단계의 기본 운영 모드는 `pts-offset-auto`다. auto가 실패하면 `arrival`로 떨어지고,
+운영자가 원하면 `pts-offset-manual` 또는 `pts-offset-hybrid`로 고정할 수 있다.
 
 ## Acceptance Checks
 
@@ -133,11 +144,12 @@ pass 기준:
 - runtime가 안정적으로 유지
 - input restart storm 없음
 - `transmit_fps`와 `stitch_actual_fps` 해석이 가능함
-- source comparable 환경이면 `source_time_mode=wallclock`이 의미 있게 유지되거나, 아니면 명확히 `fallback-arrival`로 유지됨
+- 기본 운영 경로에서 `source_time_mode=stream_pts_offset`이 유지되거나, 아니면 명확히 `fallback-arrival`로 유지됨
+- `sync_effective_offset_ms`, `sync_offset_source`, `sync_offset_confidence`로 현재 offset 전략을 읽을 수 있음
 
 investigate 기준:
 - `waiting sync pair` 비율이 높음
-- source mode가 자주 바뀜
+- source mode가 자주 바뀌거나 confidence가 계속 낮음
 - arrival skew와 source skew가 함께 크게 흔들림
 
 fail 기준:
@@ -157,8 +169,8 @@ python -m stitching.cli native-validate --duration-sec 1800
 
 pass 기준:
 - 30분 동안 종료/재시작 없이 지속
-- source comparable 환경이면 source-based skew 개선이 확인됨
-- source가 비교 불가능한 환경에서는 `fallback-arrival`로 안전하게 동작하고 회귀가 없음
+- `pts-offset-auto` 또는 `pts-offset-hybrid`가 실제 offset을 안정적으로 유지함
+- source 기반 skew 개선이 확인되거나, 실패 시 `fallback-arrival`로 안전하게 동작하고 회귀가 없음
 - 결과만 보고 source-limited인지 code-limited인지 구분 가능
 
 investigate 기준:
@@ -171,10 +183,12 @@ fail 기준:
 
 ## Operator Notes
 
-- `source_time_valid_left/right=true`는 source timestamp가 들어왔다는 뜻이지, cross-camera 비교가 항상 안전하다는 뜻은 아니다.
+- `source_time_valid_left/right=true`는 source timestamp가 들어왔다는 뜻이지, auto offset이 항상 신뢰 가능하다는 뜻은 아니다.
 - `source_time_mode=fallback-arrival`이면 현재 pair selection은 arrival 기준이다.
-- `left_source_age_ms`, `right_source_age_ms`는 source wallclock이 실제 카메라 시계와 얼마나 가까운지 진단할 때 참고값으로 본다.
-- `source_probe.cross_camera_wallclock_comparable=true`인데도 runtime가 계속 `fallback-arrival`이면, 카메라가 힌트를 보내고 있는데 reader/pairing 쪽이 아직 못 쓰는 상황으로 보고 `code-limited` 쪽으로 먼저 분류한다.
+- `left_source_age_ms`, `right_source_age_ms`는 `wallclock` 진단 모드일 때만 적극적으로 본다.
+- `sync_offset_source=auto` 또는 `recalibration`이면 motion correlation이 offset을 잡고 있다는 뜻이다.
+- `sync_offset_source=manual`이면 operator가 넣은 offset으로 고정한 상태다.
+- `source_probe.cross_camera_wallclock_comparable=true`여도 기본 운영 경로는 wallclock을 자동 사용하지 않는다.
 
 ## Next Decision
 

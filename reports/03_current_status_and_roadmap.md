@@ -34,7 +34,10 @@
 - timing model:
   - arrival metrics는 계속 운영 기준
   - source timestamp는 병행 수집
-  - cross-camera comparable source time이 없으면 pairing은 `fallback-arrival`
+  - 기본 pairing은 `pts-offset-auto`
+  - auto 실패 시 `fallback-arrival`
+  - manual offset은 선택 가능
+  - `wallclock`은 진단/명시적 opt-in 전용
 - supported presets:
   - `realtime_hq_1080p`
   - `realtime_gpu_1080p`
@@ -68,9 +71,10 @@
 
 1. right-side input cadence/source jitter
 2. source wallclock이 모든 환경에서 cross-camera comparable하지 않을 수 있음
-3. long-run strict fresh `30fps` 미검증
-4. OpenCV CUDA build에서 `NV12 -> BGR` GPU 변환 미지원
-5. source 문제와 code 문제를 완전히 분리 진단하지 않은 상태
+3. motion이 약한 장면에서 auto offset confidence가 떨어질 수 있음
+4. long-run strict fresh `30fps` 미검증
+5. OpenCV CUDA build에서 `NV12 -> BGR` GPU 변환 미지원
+6. source 문제와 code 문제를 완전히 분리 진단하지 않은 상태
 
 핵심은 더 이상 viewer나 output writer가 아니라 `input/pair/source` 쪽 변동성이다.
 
@@ -97,6 +101,7 @@
 - `gpu-direct` transmit baseline을 유지하고
 - input/source 흔들림이 실제 병목인지 분리 확인하고
 - source timestamp가 있는 환경에서는 arrival보다 더 나은 pair 선택이 가능한지 확인하고
+- 기본 `pts-offset-auto`가 실제 현장 offset을 안정적으로 따라가는지 확인하고
 - 장시간 실행에서도 운영 가능한지 검증하는 상태
 
 ## Priority Order

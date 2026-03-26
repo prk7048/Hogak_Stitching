@@ -67,6 +67,15 @@ python -m stitching.cli native-validate --duration-sec 600
 
 검증 결과는 `output/debug/native_validate_*.json`으로 저장된다.
 
+기본 sync 기준은 `pts-offset-auto`다. 즉 runtime은 카메라 wallclock을 기본으로 믿지 않고,
+`stream_pts + auto-estimated offset`을 먼저 시도한다.
+
+명시적으로 고정하고 싶으면 manual mode를 쓴다.
+
+```cmd
+python -m stitching.cli native-runtime --sync-time-source pts-offset-manual --sync-manual-offset-ms -64
+```
+
 ## Config
 
 기본 설정은 [runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json)에서 읽는다.
@@ -95,6 +104,14 @@ python -m stitching.cli native-validate --duration-sec 600
 ```text
 RTSP -> libav ingest/decode -> pair/sync -> stitch -> encode -> output
 ```
+
+기본 pair/sync 시간축은 아래 순서로 본다.
+
+- 기본: `pts-offset-auto`
+- 수동 고정: `pts-offset-manual`
+- 혼합: `pts-offset-hybrid`
+- fallback: `arrival`
+- 진단 전용: `wallclock`
 
 출력 역할은 둘로 나눈다.
 
