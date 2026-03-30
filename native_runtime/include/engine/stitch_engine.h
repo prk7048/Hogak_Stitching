@@ -44,6 +44,7 @@ private:
         std::int64_t frame_count_used = 0;
         cv::Size image_size{};
         cv::Mat camera_matrix{};
+        cv::Mat projection_matrix{};
         cv::Mat dist_coeffs{};
         cv::Mat map_x_cpu{};
         cv::Mat map_y_cpu{};

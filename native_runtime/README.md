@@ -12,10 +12,10 @@ C++ native runtime:
 RTSP ingest -> pair/sync -> stitch -> encode -> output
 ```
 
-현재 stitch 앞단에는 camera-slot별 distortion correction이 들어간다.
+현재 제품 경로에서는 distortion correction을 잠정적으로 끄고, raw homography 기준으로만 stitch한다.
 
 ```text
-RTSP ingest -> pair/sync -> undistort/remap -> homography warp -> feather blend -> encode -> output
+RTSP ingest -> pair/sync -> homography warp -> feather blend -> encode -> output
 ```
 
 ## Scope
@@ -157,7 +157,7 @@ native runtime이 기대하는 주요 입력:
 - `right_distortion_file`
 
 기본값은 `sync_time_source=pts-offset-auto`다.
-기본 distortion 모드는 `runtime-lines`다.
+기본 distortion 모드는 현재 `off`다.
 
 현재 auto sync는 `0ms prior + strong-evidence correction` 방식이다.
 
@@ -202,18 +202,17 @@ native runtime이 기대하는 주요 입력:
 - `sync_estimate_avg_gap_ms`: auto estimate가 선택한 후보들의 평균 gap
 - `sync_estimate_score`: auto estimate selection score
 - `distortion_enabled_left/right`: runtime에서 실제 distortion remap이 켜졌는지
-- `distortion_source_left/right`: `manual-lines`, `saved`, `off`
+- `distortion_source_left/right`: 현재는 항상 `off`
 - `distortion_confidence_left/right`: 선택된 distortion profile confidence
-- `distortion_model`: 현재는 `opencv_pinhole`
+- `distortion_model`: 현재는 metrics 호환성용으로만 남아 있다
 
 distortion 관련 중요한 안전 규칙:
 
-- interactive `native-runtime` 시작 UI는 기본으로 좌/우 manual line selection을 수행한다
-- `Reuse saved distortion calibration`을 체크하면 saved distortion을 그대로 재사용한다
-- headless runtime과 `native-calibrate`는 saved distortion file이 있을 때만 distortion을 사용한다
-- distortion correction은 **undistorted 기준으로 만든 homography** 와 같이 써야 한다
-- homography file의 `distortion_reference`가 `undistorted`가 아니면 runtime은 distortion을 실제 적용하지 않는다
-- 즉 saved distortion file이 있어도 old raw homography와 자동으로 섞어 쓰지 않는다
+- distortion 기능은 현재 제품 경로에서 **완전히 비활성화** 되어 있다
+- interactive web은 `Start -> Stitch Review -> Runtime Dashboard`만 노출한다
+- `Prepare stitch review`는 active homography가 `undistorted`이면 먼저 raw homography를 복구하거나 raw calibration을 다시 만든다
+- calibration-time inlier overlay는 웹 preview 전용이며, 실제 송출 영상에는 burn-in 하지 않는다
+- overlay는 `data/runtime_calibration_inliers.json`이 active homography와 일치할 때만 보여준다
 
 운영 권장:
 

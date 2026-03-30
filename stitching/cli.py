@@ -79,33 +79,33 @@ def _add_native_calibration_args(
         "--distortion-mode",
         choices=["off", "runtime-lines"],
         default=DEFAULT_NATIVE_DISTORTION_MODE,
-        help="Camera distortion handling before calibration matching",
+        help="Compatibility flag. Distortion is currently disabled and calibration uses raw images.",
     )
     cmd.add_argument(
         "--use-saved-distortion",
         dest="use_saved_distortion",
         action="store_true",
         default=DEFAULT_NATIVE_USE_SAVED_DISTORTION,
-        help="Reuse saved left/right distortion files during calibration when they are available",
+        help="Compatibility flag. Ignored because distortion is currently disabled.",
     )
     cmd.add_argument(
         "--no-use-saved-distortion",
         dest="use_saved_distortion",
         action="store_false",
-        help="Ignore saved left/right distortion files during calibration",
+        help="Compatibility flag. Ignored because distortion is currently disabled.",
     )
     cmd.add_argument(
         "--distortion-auto-save",
         dest="distortion_auto_save",
         action="store_true",
         default=DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
-        help="Compatibility flag. Interactive runtime line selection always saves on confirm",
+        help="Compatibility flag. Ignored because distortion is currently disabled.",
     )
     cmd.add_argument(
         "--no-distortion-auto-save",
         dest="distortion_auto_save",
         action="store_false",
-        help="Compatibility flag retained for config/CLI compatibility",
+        help="Compatibility flag. Ignored because distortion is currently disabled.",
     )
     cmd.add_argument("--left-distortion-file", default=DEFAULT_NATIVE_LEFT_DISTORTION_FILE)
     cmd.add_argument("--right-distortion-file", default=DEFAULT_NATIVE_RIGHT_DISTORTION_FILE)

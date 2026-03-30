@@ -455,6 +455,7 @@ struct DistortionProfileData {
     std::int64_t frame_count_used = 0;
     cv::Size image_size{};
     cv::Mat camera_matrix{};
+    cv::Mat projection_matrix{};
     cv::Mat dist_coeffs{};
 };
 
@@ -537,6 +538,7 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
         if (fs.isOpened() && fs.root().isMap()) {
             DistortionProfileData parsed;
             cv::Mat camera_matrix;
+            cv::Mat projection_matrix;
             cv::Mat dist_coeffs;
             std::vector<int> image_size;
             cv::FileNode model_node = fs["model"];
@@ -547,6 +549,7 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
             cv::FileNode frame_count_used_node = fs["frame_count_used"];
             cv::FileNode image_size_node = fs["image_size"];
             fs["camera_matrix"] >> camera_matrix;
+            fs["projection_matrix"] >> projection_matrix;
             fs["dist_coeffs"] >> dist_coeffs;
             if (!model_node.empty()) {
                 model_node >> parsed.model;
@@ -577,6 +580,11 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
                 image_size[0] > 0 &&
                 image_size[1] > 0) {
                 camera_matrix.convertTo(parsed.camera_matrix, CV_64F);
+                if (!projection_matrix.empty() && projection_matrix.rows == 3 && projection_matrix.cols == 3) {
+                    projection_matrix.convertTo(parsed.projection_matrix, CV_64F);
+                } else {
+                    parsed.projection_matrix = parsed.camera_matrix.clone();
+                }
                 dist_coeffs = dist_coeffs.reshape(1, 1);
                 dist_coeffs.convertTo(parsed.dist_coeffs, CV_64F);
                 parsed.image_size = cv::Size(image_size[0], image_size[1]);
@@ -598,8 +606,10 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
     std::string image_size_text;
     std::string camera_matrix_text;
     std::string dist_coeffs_text;
+    std::string projection_matrix_text;
     std::vector<double> image_size_values;
     std::vector<double> camera_matrix_values;
+    std::vector<double> projection_matrix_values;
     std::vector<double> dist_coeff_values;
     extract_json_string_for_key(text, "\"model\"", &parsed.model);
     extract_json_string_for_key(text, "\"source\"", &parsed.source);
@@ -632,6 +642,13 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
         return false;
     }
     parsed.camera_matrix = cv::Mat(3, 3, CV_64F, camera_matrix_values.data()).clone();
+    if (extract_json_array_for_key(text, "\"projection_matrix\"", &projection_matrix_text) &&
+        parse_numeric_vector(projection_matrix_text, &projection_matrix_values) &&
+        projection_matrix_values.size() >= 9) {
+        parsed.projection_matrix = cv::Mat(3, 3, CV_64F, projection_matrix_values.data()).clone();
+    } else {
+        parsed.projection_matrix = parsed.camera_matrix.clone();
+    }
     parsed.dist_coeffs = cv::Mat(1, static_cast<int>(dist_coeff_values.size()), CV_64F, dist_coeff_values.data()).clone();
     if (parsed.model.empty()) {
         parsed.model = "opencv_pinhole";
@@ -2177,8 +2194,16 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
 
         cv::Mat scaled_camera_matrix =
             scale_camera_matrix_to_runtime(profile.camera_matrix, profile.image_size, runtime_size);
+        cv::Mat scaled_projection_matrix =
+            scale_camera_matrix_to_runtime(
+                profile.projection_matrix.empty() ? profile.camera_matrix : profile.projection_matrix,
+                profile.image_size,
+                runtime_size);
         if (scaled_camera_matrix.empty() || profile.dist_coeffs.empty()) {
             return;
+        }
+        if (scaled_projection_matrix.empty()) {
+            scaled_projection_matrix = scaled_camera_matrix.clone();
         }
 
         cv::Mat map_x_cpu;
@@ -2195,7 +2220,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
                 scaled_camera_matrix,
                 fisheye_dist,
                 cv::Mat::eye(3, 3, CV_64F),
-                scaled_camera_matrix,
+                scaled_projection_matrix,
                 runtime_size,
                 CV_32FC1,
                 map_x_cpu,
@@ -2205,7 +2230,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
                 scaled_camera_matrix,
                 profile.dist_coeffs,
                 cv::Mat(),
-                scaled_camera_matrix,
+                scaled_projection_matrix,
                 runtime_size,
                 CV_32FC1,
                 map_x_cpu,
@@ -2224,6 +2249,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         state->frame_count_used = std::max<std::int64_t>(0, profile.frame_count_used);
         state->image_size = runtime_size;
         state->camera_matrix = scaled_camera_matrix;
+        state->projection_matrix = scaled_projection_matrix;
         state->dist_coeffs = profile.dist_coeffs.clone();
         state->map_x_cpu = map_x_cpu;
         state->map_y_cpu = map_y_cpu;

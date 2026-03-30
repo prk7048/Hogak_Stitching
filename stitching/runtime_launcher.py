@@ -57,8 +57,8 @@ class RuntimeLaunchSpec:
     ffmpeg_bin: str = ""
     homography_file: str = ""
     distortion_mode: str = DEFAULT_NATIVE_DISTORTION_MODE
-    use_saved_distortion: bool = DEFAULT_NATIVE_USE_SAVED_DISTORTION
-    distortion_auto_save: bool = DEFAULT_NATIVE_DISTORTION_AUTO_SAVE
+    use_saved_distortion: bool = False
+    distortion_auto_save: bool = False
     left_distortion_file: str = DEFAULT_NATIVE_LEFT_DISTORTION_FILE
     right_distortion_file: str = DEFAULT_NATIVE_RIGHT_DISTORTION_FILE
     left_distortion_source_hint: str = "off"

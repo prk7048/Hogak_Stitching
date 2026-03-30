@@ -71,20 +71,19 @@ python -m stitching.cli native-runtime
 주요 distortion 키:
 
 - `distortion_mode`
-  - 기본값 `runtime-lines`
-  - 선택 가능: `off`, `runtime-lines`
+  - 현재 제품 경로 기본값은 `off`
+  - CLI/config 호환성을 위해 키는 유지하지만, 현재 런타임은 raw-only로 동작한다
 - `use_saved_distortion`
-  - interactive runtime 시작 UI에서 저장된 좌/우 distortion file을 재사용할지 여부
-  - headless runtime / `native-calibrate`에서는 saved distortion fallback 사용 여부
+  - 현재 제품 경로에서는 항상 `false`로 강제된다
 - `distortion_auto_save`
-  - 현재 interactive manual workflow는 confirm 시 항상 저장한다
-  - 이 필드는 shared config / CLI 호환성용으로 유지된다
+  - 현재 제품 경로에서는 항상 `false`로 강제된다
 - `left_distortion_file`
 - `right_distortion_file`
 
 운영 규칙:
 
-- saved distortion file은 homography file과 분리 저장한다
-- interactive runtime은 기본적으로 manual line selection을 먼저 수행하고, 사용자가 체크할 때만 saved distortion을 재사용한다
-- distortion correction은 `undistorted` 기준으로 다시 만든 homography와 같이 써야 한다
-- 기존 raw homography 파일이면 runtime은 distortion file이 있어도 실제 remap을 끈다
+- distortion 기능은 잠정적으로 **비활성화** 되어 있다
+- interactive runtime, headless runtime, validation, native launch는 모두 현재 `raw` 기준으로만 동작한다
+- active homography는 현재 항상 `raw` 기준이어야 한다
+- interactive web 흐름은 `Start -> Stitch Review -> Runtime Dashboard`만 사용한다
+- calibration-time inlier overlay는 `data/runtime_calibration_inliers.json`이 있을 때만 웹 preview에서 보여준다

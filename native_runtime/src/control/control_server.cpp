@@ -290,13 +290,16 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
             config.sync_auto_offset_confidence_min = number_value;
         }
         if (extract_json_string(line, "distortion_mode", &text_value)) {
-            config.distortion_mode = text_value;
+            (void)text_value;
+            config.distortion_mode = "off";
         }
         if (extract_json_bool(line, "use_saved_distortion", &bool_value)) {
-            config.use_saved_distortion = bool_value;
+            (void)bool_value;
+            config.use_saved_distortion = false;
         }
         if (extract_json_bool(line, "distortion_auto_save", &bool_value)) {
-            config.distortion_auto_save = bool_value;
+            (void)bool_value;
+            config.distortion_auto_save = false;
         }
         if (extract_json_string(line, "left_distortion_file", &text_value)) {
             config.left_distortion_file = text_value;

@@ -203,21 +203,27 @@ int main(int argc, char** argv) {
     config.production_output.height = read_int_arg(argc, argv, "--transmit-output-height", 0);
     config.production_output.fps = read_double_arg(argc, argv, "--transmit-output-fps", 30.0);
     config.production_output.debug_overlay = has_flag(argc, argv, "--transmit-output-debug-overlay");
-    config.distortion_mode = read_string_arg(argc, argv, "--distortion-mode", "runtime-lines");
+    config.distortion_mode = read_string_arg(argc, argv, "--distortion-mode", "off");
     config.use_saved_distortion = has_flag(argc, argv, "--use-saved-distortion")
         ? true
-        : (has_flag(argc, argv, "--no-use-saved-distortion") ? false : true);
+        : (has_flag(argc, argv, "--no-use-saved-distortion") ? false : false);
     config.distortion_auto_save = has_flag(argc, argv, "--distortion-auto-save")
         ? true
-        : (has_flag(argc, argv, "--no-distortion-auto-save") ? false : true);
+        : (has_flag(argc, argv, "--no-distortion-auto-save") ? false : false);
     config.left_distortion_file = read_string_arg(argc, argv, "--left-distortion-file", "data/runtime_distortion_left.json");
     config.right_distortion_file = read_string_arg(argc, argv, "--right-distortion-file", "data/runtime_distortion_right.json");
     config.left_distortion_source_hint = read_string_arg(argc, argv, "--left-distortion-source-hint", "off");
     config.right_distortion_source_hint = read_string_arg(argc, argv, "--right-distortion-source-hint", "off");
-    config.distortion_lens_model_hint = read_string_arg(argc, argv, "--distortion-lens-model-hint", "auto");
+    config.distortion_lens_model_hint = read_string_arg(argc, argv, "--distortion-lens-model-hint", "pinhole");
     config.distortion_horizontal_fov_deg = read_double_arg(argc, argv, "--distortion-horizontal-fov-deg", 0.0);
     config.distortion_vertical_fov_deg = read_double_arg(argc, argv, "--distortion-vertical-fov-deg", 0.0);
-    config.distortion_camera_model = read_string_arg(argc, argv, "--distortion-camera-model", "");
+    config.distortion_camera_model = read_string_arg(argc, argv, "--distortion-camera-model", "DH-IPC-HFW4841T-ZAS");
+    if (config.distortion_mode != "off" || config.use_saved_distortion || config.distortion_auto_save) {
+        std::cerr << "[stitch_runtime] distortion is disabled; forcing raw-only mode\n";
+    }
+    config.distortion_mode = "off";
+    config.use_saved_distortion = false;
+    config.distortion_auto_save = false;
     config.sync_pair_mode = read_string_arg(argc, argv, "--sync-pair-mode", "none");
     config.allow_frame_reuse = has_flag(argc, argv, "--allow-frame-reuse");
     config.pair_reuse_max_age_ms = read_double_arg(argc, argv, "--pair-reuse-max-age-ms", 90.0);

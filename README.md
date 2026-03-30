@@ -125,17 +125,16 @@ strict fresh `30fps` acceptance 기준과 source timing 지표는 [reports/09_ba
 
 ## Distortion Correction
 
-기본 distortion 모드는 `runtime-lines`다.
+현재 distortion 기능은 잠정적으로 **비활성화** 되어 있고, runtime/calibration은 `raw` 기준으로 동작한다.
 
-- interactive `native-runtime` 시작 UI에서는 기본으로 left/right 카메라 직선을 수동 선택한다
-- 시작 UI의 `Reuse saved distortion calibration` 체크박스를 켜면 저장된 `data/runtime_distortion_left.json`, `data/runtime_distortion_right.json`을 그대로 재사용한다
-- headless runtime과 `native-calibrate`는 saved distortion file이 있으면 그 값을 사용하고, 없으면 distortion 없이 진행한다
+- interactive `native-runtime` 웹 흐름은 `Start -> Stitch Review -> Runtime Dashboard`만 사용한다
+- `Prepare stitch review`는 active homography가 `undistorted`이면 raw 기준 homography를 먼저 복구한다
+- 웹 preview에는 calibration-time inlier overlay를 켤 수 있지만, 실제 송출 영상에는 burn-in 하지 않는다
 
 중요한 안전 규칙:
 
-- distortion은 **undistorted 기준으로 다시 만든 homography** 와 같이 써야 한다
-- 기존 raw-frame homography와 새 distortion correction을 섞으면 품질이 더 나빠질 수 있다
-- 그래서 runtime은 homography 파일의 `distortion_reference`가 `undistorted`일 때만 실제 remap을 켠다
+- active homography는 현재 항상 `raw` 기준이어야 한다
+- calibration-time inlier overlay는 active homography와 sidecar가 일치할 때만 웹에서 보여준다
 
 ## Documentation Map
 

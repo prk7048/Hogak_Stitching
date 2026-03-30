@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import numpy as np
@@ -40,11 +40,13 @@ from stitching.core import (
 )
 from stitching.distortion_calibration import (
     apply_distortion_profile,
+    load_homography_distortion_reference,
     resolve_distortion_profile,
 )
 from stitching.errors import ErrorCode
 from stitching.project_defaults import (
     DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+    DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
     DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
     DEFAULT_NATIVE_DISTORTION_MODE,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
@@ -64,6 +66,7 @@ class NativeCalibrationConfig(StitchConfig):
     left_rtsp: str = ""
     right_rtsp: str = ""
     output_path: Path = Path(DEFAULT_NATIVE_HOMOGRAPHY_PATH)
+    inliers_output_path: Path = Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE)
     debug_dir: Path = Path(DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR)
     rtsp_transport: str = "tcp"
     rtsp_timeout_sec: float = 10.0
@@ -548,6 +551,58 @@ def _save_homography_file(
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
+def _extract_inlier_points(
+    keypoints_left: list[CvKeyPoint],
+    keypoints_right: list[CvKeyPoint],
+    matches: list[CvDMatch],
+    inlier_mask: np.ndarray,
+) -> tuple[list[list[float]], list[list[float]]]:
+    left_points: list[list[float]] = []
+    right_points: list[list[float]] = []
+    flat_mask = inlier_mask.ravel().tolist()
+    for match, is_inlier in zip(matches, flat_mask):
+        if not bool(is_inlier):
+            continue
+        try:
+            left_point = keypoints_left[int(match.queryIdx)].pt
+            right_point = keypoints_right[int(match.trainIdx)].pt
+        except Exception:
+            continue
+        left_points.append([float(left_point[0]), float(left_point[1])])
+        right_points.append([float(right_point[0]), float(right_point[1])])
+    return left_points, right_points
+
+
+def _save_calibration_inliers_file(
+    path: Path,
+    *,
+    homography: np.ndarray,
+    distortion_reference: str,
+    left_resolution: tuple[int, int],
+    right_resolution: tuple[int, int],
+    output_resolution: tuple[int, int],
+    inliers_count: int,
+    inlier_ratio: float,
+    left_points: list[list[float]],
+    right_points: list[list[float]],
+) -> None:
+    payload = {
+        "version": 1,
+        "saved_at_epoch_sec": int(time.time()),
+        "distortion_reference": str(distortion_reference or "raw"),
+        "homography": homography.tolist(),
+        "left_resolution": [int(left_resolution[0]), int(left_resolution[1])],
+        "right_resolution": [int(right_resolution[0]), int(right_resolution[1])],
+        "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
+        "inliers_count": int(inliers_count),
+        "inlier_ratio": float(inlier_ratio),
+        "left_inlier_points": left_points,
+        "right_inlier_points": right_points,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def _resolve_calibration_distortion(
     left: np.ndarray,
     right: np.ndarray,
@@ -717,6 +772,41 @@ def _build_assisted_matches(
             f"seed-guided matches below threshold: {len(filtered_auto_matches)} < {_assisted_min_matches(config)}",
         )
     return keypoints_left_auto, keypoints_right_auto, filtered_auto_matches, "assisted", seed_model, backend_name
+
+
+def _build_manual_matches(
+    left_points: list[tuple[float, float]],
+    right_points: list[tuple[float, float]],
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str, str, str]:
+    pair_count = min(len(left_points), len(right_points))
+    if pair_count < 4:
+        raise StitchingFailure(
+            ErrorCode.HOMOGRAPHY_FAIL,
+            f"manual correspondence pairs below threshold: {pair_count} < 4",
+        )
+
+    keypoints_left: list[CvKeyPoint] = []
+    keypoints_right: list[CvKeyPoint] = []
+    matches: list[CvDMatch] = []
+    for index, (left_pt, right_pt) in enumerate(zip(left_points[:pair_count], right_points[:pair_count])):
+        keypoints_left.append(cv2.KeyPoint(float(left_pt[0]), float(left_pt[1]), 1.0))
+        keypoints_right.append(cv2.KeyPoint(float(right_pt[0]), float(right_pt[1]), 1.0))
+        matches.append(cv2.DMatch(index, index, 0, 0.0))
+    return keypoints_left, keypoints_right, matches, "manual", "manual_pairs", "manual_points"
+
+
+def _manual_candidate_config(
+    config: NativeCalibrationConfig,
+    *,
+    pair_count: int,
+) -> NativeCalibrationConfig:
+    manual_min_inliers = max(4, min(int(pair_count), 6))
+    manual_min_matches = max(4, min(int(pair_count), int(config.min_matches)))
+    return replace(
+        config,
+        min_inliers=manual_min_inliers,
+        min_matches=manual_min_matches,
+    )
 
 
 def _detect_auto_matches(
@@ -1106,25 +1196,74 @@ def _write_debug_outputs(
     cv2.imwrite(str(config.debug_dir / "native_calibration_preview.jpg"), stitched)
 
 
-def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
-    left_raw, right_raw = _capture_pair(config)
+def save_native_calibration_artifacts(
+    config: NativeCalibrationConfig,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    homography = np.asarray(result.get("homography_matrix"), dtype=np.float64).reshape(3, 3)
+    left = np.asarray(result.get("left_frame"), dtype=np.uint8)
+    right = np.asarray(result.get("right_frame"), dtype=np.uint8)
+    stitched = np.asarray(result.get("stitched_preview_frame"), dtype=np.uint8)
+    inlier_preview = np.asarray(result.get("inlier_preview_frame"), dtype=np.uint8)
+    metadata = dict(result.get("metadata") or {})
+    left_inlier_points = list(result.get("left_inlier_points") or [])
+    right_inlier_points = list(result.get("right_inlier_points") or [])
+    distortion_reference = str(result.get("distortion_reference") or metadata.get("distortion_reference") or "raw")
+
+    _write_debug_outputs(config, left, right, stitched, inlier_preview)
+    _save_homography_file(
+        config.output_path,
+        homography,
+        metadata,
+        distortion_reference=distortion_reference,
+    )
+    _save_calibration_inliers_file(
+        Path(config.inliers_output_path),
+        homography=homography,
+        distortion_reference=distortion_reference,
+        left_resolution=(int(left.shape[1]), int(left.shape[0])),
+        right_resolution=(int(right.shape[1]), int(right.shape[0])),
+        output_resolution=(int(result["output_resolution"][0]), int(result["output_resolution"][1])),
+        inliers_count=int(result["inliers_count"]),
+        inlier_ratio=float(result["inlier_ratio"]),
+        left_points=left_inlier_points,
+        right_points=right_inlier_points,
+    )
+    result["homography_file"] = str(config.output_path)
+    result["inliers_file"] = str(config.inliers_output_path)
+    result["debug_dir"] = str(config.debug_dir)
+    return result
+
+
+def calibrate_native_homography_from_frames(
+    config: NativeCalibrationConfig,
+    left_raw: np.ndarray,
+    right_raw: np.ndarray,
+    *,
+    left_points: list[tuple[float, float]] | None = None,
+    right_points: list[tuple[float, float]] | None = None,
+    prompt_for_points: bool = False,
+    review_required: bool | None = None,
+    save_outputs: bool = False,
+) -> dict[str, Any]:
     left, right, distortion_metadata = _resolve_calibration_distortion(left_raw, right_raw, config)
     requested_mode = str(config.calibration_mode).lower().strip()
-    left_points: list[tuple[float, float]] = []
-    right_points: list[tuple[float, float]] = []
+    left_points_local = list(left_points or [])
+    right_points_local = list(right_points or [])
     left_overlap_hint, right_overlap_hint = _estimate_overlap_hints(left, right, config)
-    if requested_mode in {"assisted", "manual"}:
-        left_points, right_points = _AssistedCalibrationUi(
+    if prompt_for_points and requested_mode in {"assisted", "manual"} and not left_points_local:
+        left_points_local, right_points_local = _AssistedCalibrationUi(
             left,
             right,
             left_overlap_hint=left_overlap_hint,
             right_overlap_hint=right_overlap_hint,
         ).run()
+    if len(left_points_local) != len(right_points_local):
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "manual point counts must match")
 
     candidates: list[_CalibrationCandidate] = []
     failures: list[str] = []
 
-    # Baseline auto path is always preserved and evaluated first.
     try:
         auto_kp_left, auto_kp_right, auto_matches, auto_backend_name = _detect_auto_matches(left, right, config)
         candidates.append(
@@ -1144,15 +1283,37 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
     except StitchingFailure as exc:
         failures.append(f"auto:{exc.code.value}:{exc.detail}")
 
-    # Assisted/manual points only propose an improvement candidate; they never replace auto unless better.
-    if left_points:
+    if left_points_local:
+        try:
+            manual_kp_left, manual_kp_right, manual_matches, manual_mode, manual_seed_model, manual_backend_name = _build_manual_matches(
+                left_points_local,
+                right_points_local,
+            )
+            candidates.append(
+                _build_candidate(
+                    left=left,
+                    right=right,
+                    keypoints_left=manual_kp_left,
+                    keypoints_right=manual_kp_right,
+                    matches=manual_matches,
+                    calibration_mode=manual_mode,
+                    seed_guidance_model=manual_seed_model,
+                    backend_name=manual_backend_name,
+                    config=_manual_candidate_config(config, pair_count=len(manual_matches)),
+                    enforce_quality_gate=False,
+                )
+            )
+        except StitchingFailure as exc:
+            failures.append(f"manual:{exc.code.value}:{exc.detail}")
+
+    if left_points_local:
         try:
             assisted_kp_left, assisted_kp_right, assisted_matches, assisted_mode, seed_guidance_model, assisted_backend_name = _build_assisted_matches(
                 left,
                 right,
                 config,
-                left_points,
-                right_points,
+                left_points_local,
+                right_points_local,
             )
             candidates.append(
                 _build_candidate(
@@ -1178,9 +1339,16 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "no valid calibration candidate")
 
     auto_candidate = next((item for item in candidates if item.calibration_mode == "auto"), None)
+    manual_candidate = next((item for item in candidates if item.calibration_mode == "manual"), None)
+    assisted_candidate = next((item for item in candidates if item.calibration_mode == "assisted"), None)
     best_candidate = max(candidates, key=lambda item: item.score)
     score_margin = 0.03
-    if auto_candidate is not None and best_candidate is not auto_candidate:
+    if requested_mode in {"assisted", "manual"} and left_points_local:
+        if manual_candidate is not None:
+            best_candidate = manual_candidate
+        elif assisted_candidate is not None:
+            best_candidate = assisted_candidate
+    elif auto_candidate is not None and best_candidate is not auto_candidate:
         if float(best_candidate.score) < float(auto_candidate.score) + score_margin:
             best_candidate = auto_candidate
     homography = best_candidate.homography
@@ -1193,7 +1361,6 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
     seed_guidance_model = best_candidate.seed_guidance_model
 
     plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
-
     warped_right = cv2.warpPerspective(
         right,
         plan.homography_adjusted,
@@ -1217,17 +1384,24 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         f"score={best_candidate.score:.3f}  match={best_candidate.match_score:.3f}  geom={best_candidate.geometry_score:.3f}  visual={best_candidate.visual_score:.3f}",
         f"matches={len(matches)}  inliers={inliers_count}  inlier_ratio={best_candidate.inlier_ratio:.3f}  repr_err={best_candidate.mean_reprojection_error:.2f}px",
         f"output={plan.width}x{plan.height}  luma_diff={best_candidate.overlap_luma_diff:.3f}  edge_diff={best_candidate.overlap_edge_diff:.3f}  ghost={best_candidate.ghosting_score:.3f}",
-        f"manual_points={min(len(left_points), len(right_points))}  backend={best_candidate.backend_name}",
+        f"manual_points={min(len(left_points_local), len(right_points_local))}  backend={best_candidate.backend_name}",
         "CONFIRM saves this homography and launches runtime. CANCEL stops here.",
     ]
-    if bool(config.review_required):
+    use_review = bool(config.review_required) if review_required is None else bool(review_required)
+    if use_review:
         if not _CalibrationReviewUi(
             inlier_preview=inlier_preview,
             stitched_preview=stitched,
             summary_lines=review_lines,
         ).run():
             raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration review cancelled by user")
-    _write_debug_outputs(config, left, right, stitched, inlier_preview)
+
+    left_inlier_points, right_inlier_points = _extract_inlier_points(
+        keypoints_left,
+        keypoints_right,
+        matches,
+        inlier_mask,
+    )
     metadata = {
         "source": "native_runtime_calibration",
         "calibration_mode_requested": str(config.calibration_mode),
@@ -1236,7 +1410,7 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "right_rtsp": config.right_rtsp,
         "rtsp_transport": config.rtsp_transport,
         "process_scale": float(config.process_scale),
-        "manual_points_count": int(min(len(left_points), len(right_points))),
+        "manual_points_count": int(min(len(left_points_local), len(right_points_local))),
         "match_backend_requested": str(config.match_backend),
         "match_backend_effective": best_candidate.backend_name,
         "selected_candidate": calibration_mode_effective,
@@ -1283,18 +1457,13 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
             for item in candidates
         ],
     }
-    _save_homography_file(
-        config.output_path,
-        homography,
-        metadata,
-        distortion_reference=str(distortion_metadata.get("distortion_reference") or "raw"),
-    )
-    return {
+    result = {
         "homography_file": str(config.output_path),
+        "inliers_file": str(config.inliers_output_path),
         "debug_dir": str(config.debug_dir),
         "matches_count": int(len(matches)),
         "inliers_count": inliers_count,
-        "manual_points_count": int(min(len(left_points), len(right_points))),
+        "manual_points_count": int(min(len(left_points_local), len(right_points_local))),
         "calibration_mode": calibration_mode_effective,
         "seed_guidance_model": seed_guidance_model,
         "candidate_failures": failures,
@@ -1310,7 +1479,31 @@ def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
         "distortion_reference": str(distortion_metadata.get("distortion_reference") or "raw"),
         "left_distortion_source": str(distortion_metadata.get("left_distortion_source") or "off"),
         "right_distortion_source": str(distortion_metadata.get("right_distortion_source") or "off"),
+        "homography_matrix": homography,
+        "metadata": metadata,
+        "left_frame": left,
+        "right_frame": right,
+        "stitched_preview_frame": stitched,
+        "inlier_preview_frame": inlier_preview,
+        "left_inlier_points": left_inlier_points,
+        "right_inlier_points": right_inlier_points,
+        "review_lines": review_lines,
     }
+    if save_outputs:
+        save_native_calibration_artifacts(config, result)
+    return result
+
+
+def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
+    left_raw, right_raw = _capture_pair(config)
+    return calibrate_native_homography_from_frames(
+        config,
+        left_raw,
+        right_raw,
+        prompt_for_points=True,
+        review_required=bool(config.review_required),
+        save_outputs=True,
+    )
 
 
 def backup_homography_file(path: Path) -> Path | None:
@@ -1323,11 +1516,93 @@ def backup_homography_file(path: Path) -> Path | None:
     return backup_path
 
 
+def find_latest_homography_backup(
+    output_path: Path,
+    *,
+    distortion_reference: str,
+) -> Path | None:
+    file_path = Path(output_path)
+    candidates = sorted(
+        file_path.parent.glob(f"{file_path.stem}.bak_*{file_path.suffix}"),
+        key=lambda item: item.name,
+        reverse=True,
+    )
+    target_reference = str(distortion_reference or "").strip().lower()
+    for candidate in candidates:
+        if load_homography_distortion_reference(candidate) == target_reference:
+            return candidate
+    return None
+
+
+def ensure_runtime_raw_homography(
+    *,
+    left_rtsp: str,
+    right_rtsp: str,
+    output_path: Path,
+    inliers_output_path: Path,
+    debug_dir: Path,
+    rtsp_transport: str,
+    rtsp_timeout_sec: float,
+    warmup_frames: int,
+    process_scale: float,
+    backup_existing: bool = True,
+) -> tuple[str, Path | None, dict[str, Any] | None, list[str]]:
+    messages: list[str] = []
+    file_path = Path(output_path)
+    current_reference = load_homography_distortion_reference(file_path)
+    if current_reference == "raw":
+        messages.append("Active homography already uses raw reference.")
+        return current_reference, None, None, messages
+
+    raw_backup = find_latest_homography_backup(file_path, distortion_reference="raw")
+    if raw_backup is not None:
+        backup_path = backup_homography_file(file_path) if backup_existing and file_path.exists() else None
+        shutil.copy2(raw_backup, file_path)
+        messages.append(f"Restored raw homography from backup {raw_backup}")
+        if backup_path is not None:
+            messages.append(f"Backed up current homography -> {backup_path}")
+        return "raw", backup_path, {"restored_from": str(raw_backup)}, messages
+
+    result, backup_path = ensure_runtime_distortion_homography(
+        left_rtsp=str(left_rtsp),
+        right_rtsp=str(right_rtsp),
+        output_path=file_path,
+        inliers_output_path=Path(inliers_output_path),
+        debug_dir=Path(debug_dir),
+        rtsp_transport=str(rtsp_transport),
+        rtsp_timeout_sec=max(1.0, float(rtsp_timeout_sec)),
+        warmup_frames=max(1, int(warmup_frames)),
+        process_scale=max(0.1, float(process_scale)),
+        distortion_mode="off",
+        use_saved_distortion=False,
+        distortion_auto_save=False,
+        left_distortion_file=Path(DEFAULT_NATIVE_LEFT_DISTORTION_FILE),
+        right_distortion_file=Path(DEFAULT_NATIVE_RIGHT_DISTORTION_FILE),
+        distortion_lens_model_hint=DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
+        distortion_horizontal_fov_deg=None,
+        distortion_vertical_fov_deg=None,
+        distortion_camera_model=DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
+        backup_existing=backup_existing,
+    )
+    updated_reference = str(result.get("distortion_reference") or load_homography_distortion_reference(file_path) or current_reference)
+    if updated_reference == "raw":
+        messages.append(
+            "Generated new raw homography "
+            f"(matches={int(result.get('matches_count') or 0)} "
+            f"inliers={int(result.get('inliers_count') or 0)} "
+            f"score={float(result.get('candidate_score') or 0.0):.3f})"
+        )
+    else:
+        messages.append(f"Raw homography preparation completed, but reference remains {updated_reference}")
+    return updated_reference, backup_path, result, messages
+
+
 def ensure_runtime_distortion_homography(
     *,
     left_rtsp: str,
     right_rtsp: str,
     output_path: Path,
+    inliers_output_path: Path | None,
     debug_dir: Path,
     rtsp_transport: str,
     rtsp_timeout_sec: float,
@@ -1349,6 +1624,7 @@ def ensure_runtime_distortion_homography(
         left_rtsp=str(left_rtsp),
         right_rtsp=str(right_rtsp),
         output_path=Path(output_path),
+        inliers_output_path=Path(inliers_output_path) if inliers_output_path is not None else Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE),
         debug_dir=Path(debug_dir),
         rtsp_transport=str(rtsp_transport),
         rtsp_timeout_sec=max(1.0, float(rtsp_timeout_sec)),
@@ -1384,6 +1660,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         left_rtsp=str(args.left_rtsp),
         right_rtsp=str(args.right_rtsp),
         output_path=Path(args.out),
+        inliers_output_path=Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE),
         debug_dir=Path(args.debug_dir),
         rtsp_transport=str(args.rtsp_transport),
         rtsp_timeout_sec=max(1.0, float(args.rtsp_timeout_sec)),
@@ -1398,7 +1675,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         distortion_auto_save=bool(args.distortion_auto_save),
         left_distortion_file=Path(str(args.left_distortion_file)),
         right_distortion_file=Path(str(args.right_distortion_file)),
-        distortion_lens_model_hint=str(getattr(args, "distortion_lens_model_hint", "auto")),
+        distortion_lens_model_hint=str(getattr(args, "distortion_lens_model_hint", DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT)),
         distortion_horizontal_fov_deg=(
             float(args.distortion_horizontal_fov_deg)
             if getattr(args, "distortion_horizontal_fov_deg", None) is not None
@@ -1409,7 +1686,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
             if getattr(args, "distortion_vertical_fov_deg", None) is not None
             else None
         ),
-        distortion_camera_model=str(getattr(args, "distortion_camera_model", "") or ""),
+        distortion_camera_model=str(getattr(args, "distortion_camera_model", DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL) or DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL),
         review_required=not bool(getattr(args, "skip_review", False)),
         min_matches=max(8, int(args.min_matches)),
         min_inliers=max(6, int(args.min_inliers)),
@@ -1426,6 +1703,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     output_width, output_height = result["output_resolution"]
     print(
         f"homography_saved={result['homography_file']} "
+        f"inliers_saved={result['inliers_file']} "
         f"output={output_width}x{output_height} "
         f"matches={result['matches_count']} "
         f"inliers={result['inliers_count']} "
@@ -1448,20 +1726,20 @@ def run_native_calibration(args: argparse.Namespace) -> int:
             "native-runtime",
             "--no-output-ui",
             "--distortion-mode",
-            str(args.distortion_mode),
+            "off",
             "--left-distortion-file",
             str(args.left_distortion_file),
             "--right-distortion-file",
             str(args.right_distortion_file),
         ]
-        runtime_command.append("--use-saved-distortion" if bool(args.use_saved_distortion) else "--no-use-saved-distortion")
-        runtime_command.append("--distortion-auto-save" if bool(args.distortion_auto_save) else "--no-distortion-auto-save")
+        runtime_command.append("--no-use-saved-distortion")
+        runtime_command.append("--no-distortion-auto-save")
         runtime_command.extend(
             [
                 "--distortion-lens-model-hint",
-                str(getattr(args, "distortion_lens_model_hint", "auto") or "auto"),
+                str(getattr(args, "distortion_lens_model_hint", DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT) or DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT),
                 "--distortion-camera-model",
-                str(getattr(args, "distortion_camera_model", "") or ""),
+                str(getattr(args, "distortion_camera_model", DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL) or DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL),
             ]
         )
         if float(getattr(args, "distortion_horizontal_fov_deg", 0.0) or 0.0) > 0.0:
