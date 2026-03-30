@@ -96,7 +96,20 @@ struct EngineMetrics {
     int64_t cpu_blend_count = 0;
     int64_t gpu_errors = 0;
     int64_t gpu_feature_errors = 0;
+    std::string geometry_mode = "-";
+    std::string alignment_mode = "-";
+    std::string seam_mode = "-";
+    std::string exposure_mode = "-";
     std::string blend_mode = "-";
+    std::string geometry_artifact_path;
+    std::string geometry_artifact_model = "-";
+    double cylindrical_focal_px = 0.0;
+    double cylindrical_center_x = 0.0;
+    double cylindrical_center_y = 0.0;
+    double residual_alignment_error_px = 0.0;
+    double seam_path_jitter_px = 0.0;
+    double exposure_gain = 1.0;
+    double exposure_bias = 0.0;
     double overlap_diff_mean = 0.0;
     double stitched_mean_luma = 0.0;
     double left_mean_luma = 0.0;
@@ -133,6 +146,7 @@ struct EngineMetrics {
     std::string output_target;
     std::string output_command_line;
     std::string output_effective_codec;
+    std::string output_runtime_mode;
     std::string output_last_error;
     bool production_output_active = false;
     int64_t production_output_frames_written = 0;
@@ -140,6 +154,7 @@ struct EngineMetrics {
     std::string production_output_target;
     std::string production_output_command_line;
     std::string production_output_effective_codec;
+    std::string production_output_runtime_mode;
     std::string production_output_last_error;
     bool calibrated = false;
     int32_t output_width = 0;

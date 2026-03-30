@@ -51,3 +51,21 @@
   - [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
 - 신입 온보딩 자료가 필요하다
   - [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)
+
+## Redesign Pack
+
+- [10_end_to_end_redesign_spec.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/10_end_to_end_redesign_spec.md)
+  - approved redesign baseline, subsystem ownership, and migration order
+- [11_runtime_contract_and_supervisor_spec.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/11_runtime_contract_and_supervisor_spec.md)
+  - schema v2, runtime supervisor, and control-plane cleanup
+- [12_geometry_cylindrical_spec.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/12_geometry_cylindrical_spec.md)
+  - cylindrical baseline, geometry artifact, and blend policy
+- [13_validation_rollout_and_acceptance_spec.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/13_validation_rollout_and_acceptance_spec.md)
+  - read-only validation boundary, rollout, and acceptance metrics
+
+### ADRs
+
+- [ADR-001-runtime-schema-v2.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/adr/ADR-001-runtime-schema-v2.md)
+- [ADR-002-prepare-run-validate-boundary.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/adr/ADR-002-prepare-run-validate-boundary.md)
+- [ADR-003-cylindrical-baseline.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/adr/ADR-003-cylindrical-baseline.md)
+- [ADR-004-native-transmit-and-reproducible-build.md](/C:/Users/prk70/OneDrive/바탕%20화면/새%20폴더%20(2)/reports/adr/ADR-004-native-transmit-and-reproducible-build.md)

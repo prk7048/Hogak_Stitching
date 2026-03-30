@@ -58,6 +58,12 @@ from stitching.project_defaults import (
     DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
     DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
 )
+from stitching.runtime_geometry_artifact import (
+    build_runtime_geometry_artifact,
+    RUNTIME_GEOMETRY_SCHEMA_VERSION,
+    runtime_geometry_artifact_path,
+    save_runtime_geometry_artifact,
+)
 from stitching.runtime_site_config import require_configured_rtsp_urls
 
 
@@ -700,19 +706,63 @@ def _reprojection_error(homography: np.ndarray, right_point: tuple[float, float]
     return float(np.linalg.norm(projected - dst))
 
 
-def _detect_and_match_classic_raw(
+def _estimate_runtime_alignment_affine(
+    right_points: list[list[float]] | list[tuple[float, float]],
+    left_points: list[list[float]] | list[tuple[float, float]],
+    homography: np.ndarray,
+) -> np.ndarray:
+    if len(right_points) >= 3 and len(left_points) >= 3:
+        src_points = np.float32(right_points).reshape(-1, 2)
+        dst_points = np.float32(left_points).reshape(-1, 2)
+        affine, _ = cv2.estimateAffinePartial2D(
+            src_points,
+            dst_points,
+            method=cv2.LMEDS,
+        )
+        if affine is not None:
+            return np.asarray(affine, dtype=np.float64).reshape(2, 3)
+
+    homography_array = np.asarray(homography, dtype=np.float64).reshape(3, 3)
+    return homography_array[:2, :].copy()
+
+
+def _match_backend_priority(match_backend: str) -> list[str]:
+    requested = str(match_backend or "").strip().lower()
+    if requested in {"orb", "orb-only"}:
+        return ["orb"]
+    if requested in {"sift", "sift-primary", "classic", "auto", ""}:
+        return ["sift", "orb"]
+    return ["sift", "orb"]
+
+
+def _detect_matches_for_backend_raw(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
-) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch]]:
+    backend: str,
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
     gray_left = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
     gray_right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-    detector = cv2.ORB_create(nfeatures=config.max_features)
+    requested_backend = str(config.match_backend or "").strip().lower()
+
+    if backend == "sift":
+        sift_factory = getattr(cv2, "SIFT_create", None)
+        if sift_factory is None:
+            raise StitchingFailure(ErrorCode.OVERLAP_LOW, "sift detector unavailable")
+        detector = sift_factory(nfeatures=max(0, int(config.max_features)))
+        norm_type = cv2.NORM_L2
+        backend_name = "sift-primary"
+    else:
+        detector = cv2.ORB_create(nfeatures=max(0, int(config.max_features)))
+        norm_type = cv2.NORM_HAMMING
+        backend_name = "orb" if requested_backend in {"orb", "orb-only"} else "orb-fallback"
+
     keypoints_left, descriptors_left = detector.detectAndCompute(gray_left, None)
     keypoints_right, descriptors_right = detector.detectAndCompute(gray_right, None)
     if descriptors_left is None or descriptors_right is None:
         raise StitchingFailure(ErrorCode.OVERLAP_LOW, "descriptor extraction failed")
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
+
+    matcher = cv2.BFMatcher(norm_type, crossCheck=False)
     knn_matches = matcher.knnMatch(descriptors_left, descriptors_right, k=2)
     good_matches: list[CvDMatch] = []
     for pair in knn_matches:
@@ -721,7 +771,46 @@ def _detect_and_match_classic_raw(
         m, n = pair
         if m.distance < config.ratio_test * n.distance:
             good_matches.append(m)
-    return keypoints_left, keypoints_right, good_matches
+    if not good_matches:
+        raise StitchingFailure(ErrorCode.OVERLAP_LOW, f"{backend_name} produced no matches")
+    return keypoints_left, keypoints_right, good_matches, backend_name
+
+
+def _detect_and_match_feature_raw(
+    left: np.ndarray,
+    right: np.ndarray,
+    config: NativeCalibrationConfig,
+    *,
+    minimum_match_count: int | None = None,
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
+    for backend in _match_backend_priority(config.match_backend):
+        try:
+            keypoints_left, keypoints_right, good_matches, backend_name = _detect_matches_for_backend_raw(
+                left,
+                right,
+                config,
+                backend,
+            )
+        except StitchingFailure:
+            continue
+        if minimum_match_count is None or len(good_matches) >= int(minimum_match_count):
+            return keypoints_left, keypoints_right, good_matches, backend_name
+
+    raise StitchingFailure(ErrorCode.OVERLAP_LOW, "feature matching failed with SIFT and ORB backends")
+
+
+def _detect_and_match_classic_raw(
+    left: np.ndarray,
+    right: np.ndarray,
+    config: NativeCalibrationConfig,
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch]]:
+    keypoints_left, keypoints_right, matches, _backend_name = _detect_and_match_feature_raw(
+        left,
+        right,
+        config,
+        minimum_match_count=8,
+    )
+    return keypoints_left, keypoints_right, matches
 
 
 def _guidance_threshold_px(config: NativeCalibrationConfig, seed_model: str) -> float:
@@ -814,13 +903,13 @@ def _detect_auto_matches(
     right: np.ndarray,
     config: NativeCalibrationConfig,
 ) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
-    keypoints_left, keypoints_right, matches = _detect_and_match_classic_raw(left, right, config)
-    if len(matches) < int(config.min_matches):
-        raise StitchingFailure(
-            ErrorCode.OVERLAP_LOW,
-            f"matches below threshold: {len(matches)} < {int(config.min_matches)}",
-        )
-    return keypoints_left, keypoints_right, matches, "classic"
+    keypoints_left, keypoints_right, matches, backend_name = _detect_and_match_feature_raw(
+        left,
+        right,
+        config,
+        minimum_match_count=int(config.min_matches),
+    )
+    return keypoints_left, keypoints_right, matches, backend_name
 
 
 def _validate_calibration_quality(
@@ -1209,6 +1298,11 @@ def save_native_calibration_artifacts(
     left_inlier_points = list(result.get("left_inlier_points") or [])
     right_inlier_points = list(result.get("right_inlier_points") or [])
     distortion_reference = str(result.get("distortion_reference") or metadata.get("distortion_reference") or "raw")
+    geometry_file = runtime_geometry_artifact_path(config.output_path)
+    metadata["runtime_geometry_schema_version"] = RUNTIME_GEOMETRY_SCHEMA_VERSION
+    metadata["runtime_geometry_model"] = "cylindrical-affine"
+    metadata["runtime_geometry_warp_model"] = "warpPerspective"
+    metadata["runtime_geometry_file"] = str(geometry_file)
 
     _write_debug_outputs(config, left, right, stitched, inlier_preview)
     _save_homography_file(
@@ -1217,6 +1311,26 @@ def save_native_calibration_artifacts(
         metadata,
         distortion_reference=distortion_reference,
     )
+    geometry_artifact = build_runtime_geometry_artifact(
+        source_homography_file=config.output_path,
+        geometry_file=geometry_file,
+        homography=homography,
+        metadata=metadata,
+        distortion_reference=distortion_reference,
+        left_resolution=(int(left.shape[1]), int(left.shape[0])),
+        right_resolution=(int(right.shape[1]), int(right.shape[0])),
+        output_resolution=(int(result["output_resolution"][0]), int(result["output_resolution"][1])),
+        inliers_count=int(result["inliers_count"]),
+        inlier_ratio=float(result["inlier_ratio"]),
+        left_inlier_points=left_inlier_points,
+        right_inlier_points=right_inlier_points,
+        geometry_model="cylindrical-affine",
+        alignment_model="affine",
+        alignment_matrix=_estimate_runtime_alignment_affine(right_inlier_points, left_inlier_points, homography),
+        projection_focal_px=float(max(int(result["output_resolution"][0]), int(result["output_resolution"][1])) * 0.90),
+        seam_transition_px=max(48, int(round(min(int(result["output_resolution"][0]), int(result["output_resolution"][1])) * 0.04))),
+    )
+    save_runtime_geometry_artifact(geometry_file, geometry_artifact)
     _save_calibration_inliers_file(
         Path(config.inliers_output_path),
         homography=homography,
@@ -1230,8 +1344,12 @@ def save_native_calibration_artifacts(
         right_points=right_inlier_points,
     )
     result["homography_file"] = str(config.output_path)
+    result["geometry_file"] = str(geometry_file)
+    result["geometry_schema_version"] = RUNTIME_GEOMETRY_SCHEMA_VERSION
+    result["geometry_model"] = str(geometry_artifact.get("geometry", {}).get("model") or "cylindrical-affine")
     result["inliers_file"] = str(config.inliers_output_path)
     result["debug_dir"] = str(config.debug_dir)
+    result["runtime_geometry_file"] = str(geometry_file)
     return result
 
 
@@ -1703,6 +1821,7 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     output_width, output_height = result["output_resolution"]
     print(
         f"homography_saved={result['homography_file']} "
+        f"geometry_saved={result['geometry_file']} "
         f"inliers_saved={result['inliers_file']} "
         f"output={output_width}x{output_height} "
         f"matches={result['matches_count']} "
@@ -1712,6 +1831,8 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         f"seed_model={result['seed_guidance_model']} "
         f"model={result['transform_model']} "
         f"backend={result['match_backend']} "
+        f"geometry_schema={result['geometry_schema_version']} "
+        f"geometry_model={result.get('geometry_model', 'cylindrical-affine')} "
         f"distortion_ref={result['distortion_reference']} "
         f"distortion=({result['left_distortion_source']},{result['right_distortion_source']}) "
         f"score={result['candidate_score']:.3f} "

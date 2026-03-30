@@ -62,6 +62,7 @@ public:
     virtual std::string last_error() const = 0;
     virtual std::string effective_codec() const = 0;
     virtual std::string command_line() const = 0;
+    virtual std::string runtime_mode() const = 0;
     virtual std::string muxer() const = 0;
 };
 

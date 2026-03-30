@@ -39,6 +39,7 @@ public:
     std::string last_error() const override;
     std::string effective_codec() const override;
     std::string command_line() const override;
+    std::string runtime_mode() const override;
     std::string muxer() const override;
 
 private:
@@ -56,6 +57,7 @@ private:
     std::string output_target_{};
     std::string last_error_{"gpu-direct output writer not started"};
     std::string command_line_{"gpu-direct://pending-backend"};
+    std::string runtime_mode_{"native-nvenc-bridge"};
     int width_ = 0;
     int height_ = 0;
     double fps_ = 0.0;

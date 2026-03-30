@@ -374,6 +374,35 @@ bool extract_json_array_for_key(const std::string& text, const std::string& key,
     return false;
 }
 
+bool extract_json_object_for_key(const std::string& text, const std::string& key, std::string* object_text_out) {
+    if (object_text_out == nullptr) {
+        return false;
+    }
+    const auto key_pos = text.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto first_brace = text.find('{', key_pos);
+    if (first_brace == std::string::npos) {
+        return false;
+    }
+
+    int depth = 0;
+    for (std::size_t index = first_brace; index < text.size(); ++index) {
+        const char ch = text[index];
+        if (ch == '{') {
+            depth += 1;
+        } else if (ch == '}') {
+            depth -= 1;
+            if (depth == 0) {
+                *object_text_out = text.substr(first_brace, index - first_brace + 1);
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool extract_json_string_for_key(const std::string& text, const std::string& key, std::string* value_out) {
     if (value_out == nullptr) {
         return false;
@@ -396,6 +425,33 @@ bool extract_json_string_for_key(const std::string& text, const std::string& key
     }
     *value_out = text.substr(quote_pos + 1, end_quote_pos - quote_pos - 1);
     return true;
+}
+
+bool extract_json_bool(const std::string& text, const std::string& key, bool* value_out) {
+    if (value_out == nullptr) {
+        return false;
+    }
+    const auto key_pos = text.find(key);
+    if (key_pos == std::string::npos) {
+        return false;
+    }
+    const auto colon_pos = text.find(':', key_pos + key.size());
+    if (colon_pos == std::string::npos) {
+        return false;
+    }
+    std::size_t value_begin = colon_pos + 1;
+    while (value_begin < text.size() && std::isspace(static_cast<unsigned char>(text[value_begin]))) {
+        value_begin += 1;
+    }
+    if (text.compare(value_begin, 4, "true") == 0) {
+        *value_out = true;
+        return true;
+    }
+    if (text.compare(value_begin, 5, "false") == 0) {
+        *value_out = false;
+        return true;
+    }
+    return false;
 }
 
 bool extract_json_number_for_key(const std::string& text, const std::string& key, double* value_out) {
@@ -444,6 +500,26 @@ bool parse_numeric_vector(const std::string& text, std::vector<double>* out) {
         out->push_back(value);
     }
     return !out->empty();
+}
+
+std::string runtime_geometry_artifact_candidate_path(const EngineConfig& config) {
+    if (!config.geometry.artifact_file.empty()) {
+        return config.geometry.artifact_file;
+    }
+    if (config.homography_file.empty()) {
+        return {};
+    }
+    std::string candidate = config.homography_file;
+    const auto homography_pos = candidate.find("homography");
+    if (homography_pos != std::string::npos) {
+        candidate.replace(homography_pos, std::string("homography").size(), "geometry");
+        return candidate;
+    }
+    const auto dot_pos = candidate.find_last_of('.');
+    if (dot_pos != std::string::npos) {
+        return candidate.substr(0, dot_pos) + ".geometry" + candidate.substr(dot_pos);
+    }
+    return candidate + ".geometry.json";
 }
 
 struct DistortionProfileData {
@@ -660,6 +736,320 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
     return true;
 }
 
+struct RuntimeGeometryArtifactData {
+    std::string model = "planar-homography";
+    std::string alignment_model = "homography";
+    std::string artifact_path;
+    std::string source_homography_file;
+    std::string source_geometry_file;
+    cv::Mat alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+    cv::Size output_size{};
+    cv::Size left_input_size{};
+    cv::Size right_input_size{};
+    double focal_px = 0.0;
+    double center_x = 0.0;
+    double center_y = 0.0;
+    double residual_alignment_error_px = 0.0;
+    int seam_transition_px = 64;
+    double seam_smoothness_penalty = 4.0;
+    double seam_temporal_penalty = 2.0;
+    bool exposure_enabled = true;
+    double exposure_gain_min = 0.7;
+    double exposure_gain_max = 1.4;
+    double exposure_bias_abs_max = 35.0;
+};
+
+bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGeometryArtifactData* artifact_out) {
+    if (artifact_out == nullptr) {
+        return false;
+    }
+    *artifact_out = RuntimeGeometryArtifactData{};
+    artifact_out->artifact_path = path;
+
+    try {
+        cv::FileStorage fs(path, cv::FileStorage::READ | cv::FileStorage::FORMAT_AUTO);
+        if (!fs.isOpened()) {
+            return false;
+        }
+
+        auto read_size = [](const cv::FileNode& node, cv::Size* size_out) {
+            if (size_out == nullptr || node.empty() || !node.isSeq()) {
+                return false;
+            }
+            std::vector<double> values;
+            node >> values;
+            if (values.size() < 2) {
+                return false;
+            }
+            *size_out = cv::Size(static_cast<int>(std::llround(values[0])), static_cast<int>(std::llround(values[1])));
+            return size_out->width > 0 && size_out->height > 0;
+        };
+
+        cv::FileNode source_node = fs["source"];
+        if (!source_node.empty()) {
+            source_node["homography_file"] >> artifact_out->source_homography_file;
+            source_node["geometry_file"] >> artifact_out->source_geometry_file;
+        }
+
+        cv::FileNode geometry_node = fs["geometry"];
+        if (!geometry_node.empty()) {
+            geometry_node["model"] >> artifact_out->model;
+            geometry_node["warp_model"] >> artifact_out->alignment_model;
+            cv::FileNode homography_node = geometry_node["homography"];
+            if (!homography_node.empty() && homography_node.isSeq()) {
+                std::vector<double> values;
+                homography_node >> values;
+                if (values.size() >= 9) {
+                    artifact_out->alignment_matrix =
+                        cv::Mat(3, 3, CV_64F, values.data()).clone();
+                }
+            }
+            std::vector<double> output_resolution;
+            geometry_node["output_resolution"] >> output_resolution;
+            if (output_resolution.size() >= 2) {
+                artifact_out->output_size = cv::Size(
+                    static_cast<int>(std::llround(output_resolution[0])),
+                    static_cast<int>(std::llround(output_resolution[1])));
+            }
+        }
+
+        cv::FileNode alignment_node = fs["alignment"];
+        if (!alignment_node.empty()) {
+            alignment_node["model"] >> artifact_out->alignment_model;
+            cv::FileNode matrix_node = alignment_node["matrix"];
+            if (!matrix_node.empty() && matrix_node.isSeq()) {
+                std::vector<double> values;
+                matrix_node >> values;
+                if (values.size() >= 9) {
+                    artifact_out->alignment_matrix =
+                        cv::Mat(3, 3, CV_64F, values.data()).clone();
+                } else if (values.size() >= 6) {
+                    artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+                    artifact_out->alignment_matrix.at<double>(0, 0) = values[0];
+                    artifact_out->alignment_matrix.at<double>(0, 1) = values[1];
+                    artifact_out->alignment_matrix.at<double>(0, 2) = values[2];
+                    artifact_out->alignment_matrix.at<double>(1, 0) = values[3];
+                    artifact_out->alignment_matrix.at<double>(1, 1) = values[4];
+                    artifact_out->alignment_matrix.at<double>(1, 2) = values[5];
+                }
+            }
+        }
+
+        cv::FileNode projection_node = fs["projection"];
+        if (!projection_node.empty()) {
+            cv::FileNode left_projection = projection_node["left"];
+            cv::FileNode right_projection = projection_node["right"];
+            std::vector<double> left_center;
+            std::vector<double> right_center;
+            std::vector<double> left_input_resolution;
+            std::vector<double> right_input_resolution;
+            std::vector<double> left_output_resolution;
+            std::vector<double> right_output_resolution;
+            if (!left_projection.empty()) {
+                left_projection["focal_px"] >> artifact_out->focal_px;
+                left_projection["center"] >> left_center;
+                left_projection["input_resolution"] >> left_input_resolution;
+                left_projection["output_resolution"] >> left_output_resolution;
+            }
+            if (!right_projection.empty()) {
+                double right_focal_px = 0.0;
+                right_projection["focal_px"] >> right_focal_px;
+                if (artifact_out->focal_px <= 0.0) {
+                    artifact_out->focal_px = right_focal_px;
+                }
+                right_projection["center"] >> right_center;
+                right_projection["input_resolution"] >> right_input_resolution;
+                right_projection["output_resolution"] >> right_output_resolution;
+            }
+            if (left_center.size() >= 2) {
+                artifact_out->center_x = left_center[0];
+                artifact_out->center_y = left_center[1];
+            } else if (right_center.size() >= 2) {
+                artifact_out->center_x = right_center[0];
+                artifact_out->center_y = right_center[1];
+            }
+            if (left_input_resolution.size() >= 2) {
+                artifact_out->left_input_size = cv::Size(
+                    static_cast<int>(std::llround(left_input_resolution[0])),
+                    static_cast<int>(std::llround(left_input_resolution[1])));
+            }
+            if (right_input_resolution.size() >= 2) {
+                artifact_out->right_input_size = cv::Size(
+                    static_cast<int>(std::llround(right_input_resolution[0])),
+                    static_cast<int>(std::llround(right_input_resolution[1])));
+            }
+            if (artifact_out->output_size.width <= 0 && left_output_resolution.size() >= 2) {
+                artifact_out->output_size = cv::Size(
+                    static_cast<int>(std::llround(left_output_resolution[0])),
+                    static_cast<int>(std::llround(left_output_resolution[1])));
+            }
+            if (artifact_out->output_size.width <= 0 && right_output_resolution.size() >= 2) {
+                artifact_out->output_size = cv::Size(
+                    static_cast<int>(std::llround(right_output_resolution[0])),
+                    static_cast<int>(std::llround(right_output_resolution[1])));
+            }
+        }
+
+        cv::FileNode canvas_node = fs["canvas"];
+        if (!canvas_node.empty()) {
+            canvas_node["width"] >> artifact_out->output_size.width;
+            canvas_node["height"] >> artifact_out->output_size.height;
+        }
+
+        cv::FileNode seam_node = fs["seam"];
+        if (!seam_node.empty()) {
+            seam_node["transition_px"] >> artifact_out->seam_transition_px;
+            seam_node["smoothness_penalty"] >> artifact_out->seam_smoothness_penalty;
+            seam_node["temporal_penalty"] >> artifact_out->seam_temporal_penalty;
+        }
+
+        cv::FileNode exposure_node = fs["exposure"];
+        if (!exposure_node.empty()) {
+            exposure_node["enabled"] >> artifact_out->exposure_enabled;
+            exposure_node["gain_min"] >> artifact_out->exposure_gain_min;
+            exposure_node["gain_max"] >> artifact_out->exposure_gain_max;
+            exposure_node["bias_abs_max"] >> artifact_out->exposure_bias_abs_max;
+        }
+        cv::FileNode calibration_node = fs["calibration"];
+        if (!calibration_node.empty()) {
+            cv::FileNode metrics_node = calibration_node["metrics"];
+            if (!metrics_node.empty()) {
+                double residual_error_px = 0.0;
+                if (metrics_node["mean_reprojection_error"] >> residual_error_px) {
+                    artifact_out->residual_alignment_error_px = residual_error_px;
+                } else if (metrics_node["reprojection_error_px"] >> residual_error_px) {
+                    artifact_out->residual_alignment_error_px = residual_error_px;
+                }
+            }
+        }
+
+        if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
+            const int base_width = std::max(
+                1,
+                std::max(
+                    artifact_out->left_input_size.width,
+                    artifact_out->right_input_size.width));
+            const int base_height = std::max(
+                1,
+                std::max(
+                    artifact_out->left_input_size.height,
+                    artifact_out->right_input_size.height));
+            artifact_out->output_size = cv::Size(base_width, base_height);
+        }
+
+        if (artifact_out->focal_px <= 0.0) {
+            artifact_out->focal_px = static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+        }
+        if (artifact_out->center_x <= 0.0 && artifact_out->output_size.width > 0) {
+            artifact_out->center_x = static_cast<double>(artifact_out->output_size.width) * 0.5;
+        }
+        if (artifact_out->center_y <= 0.0 && artifact_out->output_size.height > 0) {
+            artifact_out->center_y = static_cast<double>(artifact_out->output_size.height) * 0.5;
+        }
+        if (artifact_out->alignment_matrix.empty()) {
+            artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+        }
+        return true;
+    } catch (const cv::Exception&) {
+        // Fall through to permissive parsing below.
+    }
+
+    std::ifstream file(path);
+    if (!file.is_open()) {
+        return false;
+    }
+    const std::string text((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+    if (text.find("\"artifact_type\"") == std::string::npos) {
+        return false;
+    }
+
+    extract_json_string_for_key(text, "\"model\"", &artifact_out->model);
+    extract_json_string_for_key(text, "\"alignment_model\"", &artifact_out->alignment_model);
+    if (artifact_out->alignment_model.empty()) {
+        artifact_out->alignment_model = "affine";
+    }
+    if (artifact_out->model.empty()) {
+        artifact_out->model = "planar-homography";
+    }
+    if (artifact_out->model == "cylindrical_affine") {
+        artifact_out->model = "cylindrical-affine";
+    }
+
+    std::string alignment_text;
+    if (extract_json_array_for_key(text, "\"alignment\"", &alignment_text)) {
+        std::vector<double> values;
+        if (parse_numeric_vector(alignment_text, &values)) {
+            if (values.size() >= 9) {
+                artifact_out->alignment_matrix = cv::Mat(3, 3, CV_64F, values.data()).clone();
+            } else if (values.size() >= 6) {
+                artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+                artifact_out->alignment_matrix.at<double>(0, 0) = values[0];
+                artifact_out->alignment_matrix.at<double>(0, 1) = values[1];
+                artifact_out->alignment_matrix.at<double>(0, 2) = values[2];
+                artifact_out->alignment_matrix.at<double>(1, 0) = values[3];
+                artifact_out->alignment_matrix.at<double>(1, 1) = values[4];
+                artifact_out->alignment_matrix.at<double>(1, 2) = values[5];
+            }
+        }
+    }
+    if (artifact_out->alignment_matrix.empty()) {
+        artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+    }
+
+    double numeric_value = 0.0;
+    if (extract_json_number_for_key(text, "\"focal_px\"", &numeric_value)) {
+        artifact_out->focal_px = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"center_x\"", &numeric_value)) {
+        artifact_out->center_x = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"center_y\"", &numeric_value)) {
+        artifact_out->center_y = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"transition_px\"", &numeric_value)) {
+        artifact_out->seam_transition_px = static_cast<int>(std::llround(numeric_value));
+    }
+    if (extract_json_number_for_key(text, "\"smoothness_penalty\"", &numeric_value)) {
+        artifact_out->seam_smoothness_penalty = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"temporal_penalty\"", &numeric_value)) {
+        artifact_out->seam_temporal_penalty = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"gain_min\"", &numeric_value)) {
+        artifact_out->exposure_gain_min = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"gain_max\"", &numeric_value)) {
+        artifact_out->exposure_gain_max = numeric_value;
+    }
+    if (extract_json_number_for_key(text, "\"bias_abs_max\"", &numeric_value)) {
+        artifact_out->exposure_bias_abs_max = numeric_value;
+    }
+    std::string exposure_block_text;
+    bool exposure_enabled = artifact_out->exposure_enabled;
+    if (extract_json_object_for_key(text, "\"exposure\"", &exposure_block_text) &&
+        extract_json_bool(exposure_block_text, "\"enabled\"", &exposure_enabled)) {
+        artifact_out->exposure_enabled = exposure_enabled;
+    }
+    if (extract_json_number_for_key(text, "\"mean_reprojection_error\"", &numeric_value)) {
+        artifact_out->residual_alignment_error_px = numeric_value;
+    } else if (extract_json_number_for_key(text, "\"reprojection_error_px\"", &numeric_value)) {
+        artifact_out->residual_alignment_error_px = numeric_value;
+    }
+    if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
+        artifact_out->output_size = cv::Size(artifact_out->left_input_size.width, artifact_out->left_input_size.height);
+    }
+    if (artifact_out->focal_px <= 0.0) {
+        artifact_out->focal_px = static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+    }
+    if (artifact_out->center_x <= 0.0) {
+        artifact_out->center_x = static_cast<double>(artifact_out->output_size.width) * 0.5;
+    }
+    if (artifact_out->center_y <= 0.0) {
+        artifact_out->center_y = static_cast<double>(artifact_out->output_size.height) * 0.5;
+    }
+    return true;
+}
+
 cv::Mat scale_camera_matrix_to_runtime(
     const cv::Mat& camera_matrix,
     const cv::Size& stored_size,
@@ -765,6 +1155,310 @@ bool prepare_warp_plan(
     return true;
 }
 
+bool StitchEngine::build_cylindrical_maps_locked(
+    const cv::Size& image_size,
+    double focal_px,
+    double center_x,
+    double center_y,
+    cv::Mat* map_x_out,
+    cv::Mat* map_y_out) const {
+    if (map_x_out == nullptr || map_y_out == nullptr || image_size.width <= 0 || image_size.height <= 0) {
+        return false;
+    }
+
+    const double focal = (focal_px > 1e-6)
+        ? focal_px
+        : static_cast<double>(std::max(image_size.width, image_size.height)) * 0.90;
+    const double cx = (center_x > 0.0) ? center_x : static_cast<double>(image_size.width) * 0.5;
+    const double cy = (center_y > 0.0) ? center_y : static_cast<double>(image_size.height) * 0.5;
+
+    map_x_out->create(image_size, CV_32FC1);
+    map_y_out->create(image_size, CV_32FC1);
+    for (int y = 0; y < image_size.height; ++y) {
+        auto* map_x_row = map_x_out->ptr<float>(y);
+        auto* map_y_row = map_y_out->ptr<float>(y);
+        const double dest_y = static_cast<double>(y) - cy;
+        for (int x = 0; x < image_size.width; ++x) {
+            const double dest_x = static_cast<double>(x) - cx;
+            const double theta = dest_x / focal;
+            const double source_x = focal * std::tan(theta) + cx;
+            const double source_y =
+                (dest_y * std::sqrt((source_x - cx) * (source_x - cx) + (focal * focal))) / focal + cy;
+            map_x_row[x] = static_cast<float>(source_x);
+            map_y_row[x] = static_cast<float>(source_y);
+        }
+    }
+    return true;
+}
+
+bool StitchEngine::build_affine_output_plan_locked(
+    const cv::Size& left_size,
+    const cv::Size& right_size,
+    const cv::Mat& affine_matrix,
+    cv::Size* output_size_out,
+    cv::Rect* left_roi_out,
+    cv::Rect* overlap_roi_out,
+    cv::Mat* adjusted_affine_out) {
+    if (output_size_out == nullptr || left_roi_out == nullptr || overlap_roi_out == nullptr || adjusted_affine_out == nullptr) {
+        return false;
+    }
+    cv::Mat affine = affine_matrix.empty() ? cv::Mat::eye(3, 3, CV_64F) : affine_matrix.clone();
+    return prepare_warp_plan(
+        left_size,
+        right_size,
+        affine,
+        config_.process_scale <= 0.0 ? 4.0 : config_.process_scale,
+        40'000'000,
+        adjusted_affine_out,
+        output_size_out,
+        left_roi_out);
+}
+
+bool StitchEngine::compute_exposure_compensation_locked(
+    const cv::Mat& canvas_left,
+    const cv::Mat& warped_right,
+    const cv::Mat& overlap_mask,
+    cv::Mat* compensated_right_out,
+    double* gain_out,
+    double* bias_out) const {
+    if (compensated_right_out == nullptr || gain_out == nullptr || bias_out == nullptr) {
+        return false;
+    }
+    *gain_out = 1.0;
+    *bias_out = 0.0;
+    if (!runtime_geometry_.exposure_enabled || overlap_mask.empty() || !cv::countNonZero(overlap_mask)) {
+        *compensated_right_out = warped_right.clone();
+        return !compensated_right_out->empty();
+    }
+
+    cv::Mat gray_left;
+    cv::Mat gray_right;
+    cv::cvtColor(canvas_left, gray_left, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(warped_right, gray_right, cv::COLOR_BGR2GRAY);
+
+    const cv::Scalar left_mean = cv::mean(gray_left, overlap_mask);
+    const cv::Scalar right_mean = cv::mean(gray_right, overlap_mask);
+    cv::Mat left_gray_f;
+    cv::Mat right_gray_f;
+    gray_left.convertTo(left_gray_f, CV_32F);
+    gray_right.convertTo(right_gray_f, CV_32F);
+    cv::Scalar left_stddev;
+    cv::Scalar right_stddev;
+    cv::Scalar dummy_mean;
+    cv::meanStdDev(left_gray_f, dummy_mean, left_stddev, overlap_mask);
+    cv::meanStdDev(right_gray_f, dummy_mean, right_stddev, overlap_mask);
+
+    const double left_std = std::max(1e-3, left_stddev[0]);
+    const double right_std = std::max(1e-3, right_stddev[0]);
+    double gain = left_std / right_std;
+    gain = std::clamp(gain, runtime_geometry_.exposure_gain_min, runtime_geometry_.exposure_gain_max);
+    double bias = left_mean[0] - gain * right_mean[0];
+    bias = std::clamp(bias, -runtime_geometry_.exposure_bias_abs_max, runtime_geometry_.exposure_bias_abs_max);
+
+    warped_right.convertTo(*compensated_right_out, warped_right.type(), gain, bias);
+    *gain_out = gain;
+    *bias_out = bias;
+    return !compensated_right_out->empty();
+}
+
+bool StitchEngine::build_dynamic_seam_path_locked(
+    const cv::Mat& canvas_left,
+    const cv::Mat& warped_right,
+    const cv::Mat& overlap_mask,
+    std::vector<int>* seam_path_out) const {
+    if (seam_path_out == nullptr || canvas_left.empty() || warped_right.empty() || overlap_mask.empty()) {
+        return false;
+    }
+
+    cv::Mat gray_left;
+    cv::Mat gray_right;
+    cv::cvtColor(canvas_left, gray_left, cv::COLOR_BGR2GRAY);
+    cv::cvtColor(warped_right, gray_right, cv::COLOR_BGR2GRAY);
+
+    cv::Mat diff;
+    cv::absdiff(gray_left, gray_right, diff);
+    cv::Mat grad_x;
+    cv::Mat grad_y;
+    cv::Sobel(gray_left, grad_x, CV_32F, 1, 0, 3);
+    cv::Sobel(gray_left, grad_y, CV_32F, 0, 1, 3);
+    cv::Mat grad_mag;
+    cv::magnitude(grad_x, grad_y, grad_mag);
+
+    cv::Mat diff_f;
+    cv::Mat grad_f;
+    diff.convertTo(diff_f, CV_32F);
+    grad_mag.convertTo(grad_f, CV_32F);
+    cv::Mat cost = diff_f + (0.25f * grad_f);
+    cost.setTo(1e9f, overlap_mask == 0);
+
+    const int height = overlap_mask.rows;
+    const int width = overlap_mask.cols;
+    std::vector<int> seam_path(height, -1);
+    std::vector<std::vector<double>> dp(height, std::vector<double>(width, std::numeric_limits<double>::infinity()));
+    std::vector<std::vector<int>> prev_index(height, std::vector<int>(width, -1));
+
+    int first_valid_row = -1;
+    int last_valid_row = -1;
+    int x_min = width;
+    int x_max = -1;
+    for (int y = 0; y < height; ++y) {
+        const auto* mask_row = overlap_mask.ptr<std::uint8_t>(y);
+        for (int x = 0; x < width; ++x) {
+            if (mask_row[x] > 0) {
+                first_valid_row = (first_valid_row < 0) ? y : first_valid_row;
+                last_valid_row = y;
+                x_min = std::min(x_min, x);
+                x_max = std::max(x_max, x);
+            }
+        }
+    }
+    if (first_valid_row < 0 || x_max < x_min) {
+        return false;
+    }
+
+    const double temporal_penalty = std::max(0.0, runtime_geometry_.seam_temporal_penalty);
+    const double smoothness_penalty = std::max(0.0, runtime_geometry_.seam_smoothness_penalty);
+    const bool has_prev_seam = previous_seam_path_.size() == static_cast<std::size_t>(height);
+
+    for (int y = first_valid_row; y <= last_valid_row; ++y) {
+        const auto* mask_row = overlap_mask.ptr<std::uint8_t>(y);
+        const auto* cost_row = cost.ptr<float>(y);
+        for (int x = x_min; x <= x_max; ++x) {
+            if (mask_row[x] == 0) {
+                continue;
+            }
+            const double temporal_cost = has_prev_seam
+                ? temporal_penalty * std::abs(static_cast<double>(x) - static_cast<double>(previous_seam_path_[y]))
+                : 0.0;
+            const double row_cost = static_cast<double>(cost_row[x]) + temporal_cost;
+            if (y == first_valid_row) {
+                dp[y][x] = row_cost;
+                prev_index[y][x] = x;
+                continue;
+            }
+            double best_cost = std::numeric_limits<double>::infinity();
+            int best_index = x;
+            for (int step = -1; step <= 1; ++step) {
+                const int prev_x = x + step;
+                if (prev_x < x_min || prev_x > x_max) {
+                    continue;
+                }
+                const double candidate = dp[y - 1][prev_x];
+                if (!std::isfinite(candidate)) {
+                    continue;
+                }
+                const double score = candidate + (smoothness_penalty * static_cast<double>(std::abs(step)));
+                if (score < best_cost) {
+                    best_cost = score;
+                    best_index = prev_x;
+                }
+            }
+            if (!std::isfinite(best_cost)) {
+                best_cost = row_cost;
+                best_index = x;
+            }
+            dp[y][x] = row_cost + best_cost;
+            prev_index[y][x] = best_index;
+        }
+    }
+
+    double best_final = std::numeric_limits<double>::infinity();
+    int best_x = (x_min + x_max) / 2;
+    const auto* last_mask_row = overlap_mask.ptr<std::uint8_t>(last_valid_row);
+    for (int x = x_min; x <= x_max; ++x) {
+        if (last_mask_row[x] == 0) {
+            continue;
+        }
+        if (dp[last_valid_row][x] < best_final) {
+            best_final = dp[last_valid_row][x];
+            best_x = x;
+        }
+    }
+    seam_path[last_valid_row] = best_x;
+    for (int y = last_valid_row; y > first_valid_row; --y) {
+        const int prev_x = prev_index[y][seam_path[y]];
+        seam_path[y - 1] = (prev_x >= x_min && prev_x <= x_max) ? prev_x : seam_path[y];
+    }
+    for (int y = 0; y < first_valid_row; ++y) {
+        seam_path[y] = seam_path[first_valid_row];
+    }
+    for (int y = first_valid_row; y < height; ++y) {
+        if (seam_path[y] < 0) {
+            seam_path[y] = (y > 0) ? seam_path[y - 1] : best_x;
+        }
+    }
+    *seam_path_out = std::move(seam_path);
+    return true;
+}
+
+void StitchEngine::blend_with_dynamic_seam_locked(
+    const cv::Mat& canvas_left,
+    const cv::Mat& warped_right,
+    const cv::Mat& left_mask,
+    const cv::Mat& right_mask,
+    const std::vector<int>& seam_path,
+    int transition_px,
+    cv::Mat* stitched_out) const {
+    if (stitched_out == nullptr) {
+        return;
+    }
+    stitched_out->create(canvas_left.size(), CV_8UC3);
+    stitched_out->setTo(cv::Scalar::all(0));
+    const cv::Mat left_valid = left_mask > 0;
+    const cv::Mat right_valid = right_mask > 0;
+    const cv::Mat overlap = left_valid & right_valid;
+    canvas_left.copyTo(*stitched_out, left_valid & ~right_valid);
+    warped_right.copyTo(*stitched_out, right_valid & ~left_valid);
+    if (!cv::countNonZero(overlap)) {
+        return;
+    }
+
+    const int width = stitched_out->cols;
+    const int height = stitched_out->rows;
+    const int transition = std::max(2, transition_px);
+    const cv::Rect overlap_bounds = cv::boundingRect(overlap);
+    const int x_min = std::max(0, std::min(width - 1, overlap_bounds.x));
+    const int x_max = std::min(width - 1, overlap_bounds.x + overlap_bounds.width - 1);
+    const int y_min = std::max(0, overlap_bounds.y);
+    const int y_max = std::min(height - 1, overlap_bounds.y + overlap_bounds.height - 1);
+    for (int y = y_min; y <= y_max && y < static_cast<int>(seam_path.size()); ++y) {
+        const int seam_x = std::clamp(seam_path[y], x_min, x_max);
+        const double start_x = static_cast<double>(seam_x) - (static_cast<double>(transition) * 0.5);
+        const double end_x = static_cast<double>(seam_x) + (static_cast<double>(transition) * 0.5);
+        for (int x = x_min; x <= x_max; ++x) {
+            if (!overlap.at<std::uint8_t>(y, x)) {
+                continue;
+            }
+            const double right_w = std::clamp((static_cast<double>(x) - start_x) / std::max(1.0, end_x - start_x), 0.0, 1.0);
+            const double left_w = 1.0 - right_w;
+            const cv::Vec3b left_px = canvas_left.at<cv::Vec3b>(y, x);
+            const cv::Vec3b right_px = warped_right.at<cv::Vec3b>(y, x);
+            const cv::Vec3d blended(
+                (left_px[0] * left_w) + (right_px[0] * right_w),
+                (left_px[1] * left_w) + (right_px[1] * right_w),
+                (left_px[2] * left_w) + (right_px[2] * right_w));
+            stitched_out->at<cv::Vec3b>(y, x) = cv::Vec3b(
+                static_cast<std::uint8_t>(std::clamp(blended[0], 0.0, 255.0)),
+                static_cast<std::uint8_t>(std::clamp(blended[1], 0.0, 255.0)),
+                static_cast<std::uint8_t>(std::clamp(blended[2], 0.0, 255.0)));
+        }
+    }
+}
+
+void StitchEngine::update_seam_path_jitter_locked(const std::vector<int>& seam_path) {
+    if (previous_seam_path_.size() != seam_path.size() || seam_path.empty()) {
+        last_seam_path_jitter_px_ = 0.0;
+        previous_seam_path_ = seam_path;
+        return;
+    }
+    double total = 0.0;
+    for (std::size_t index = 0; index < seam_path.size(); ++index) {
+        total += std::abs(static_cast<double>(seam_path[index] - previous_seam_path_[index]));
+    }
+    last_seam_path_jitter_px_ = total / static_cast<double>(seam_path.size());
+    previous_seam_path_ = seam_path;
+}
+
 struct ServicePairCandidate {
     hogak::input::BufferedFrameInfo left_info;
     hogak::input::BufferedFrameInfo right_info;
@@ -822,6 +1516,19 @@ const char* metrics_source_time_mode_name(hogak::input::FrameTimeDomain time_dom
         default:
             return "fallback-arrival";
     }
+}
+
+std::string output_runtime_mode_hint(const std::string& runtime) {
+    if (runtime == "ffmpeg") {
+        return "ffmpeg-process";
+    }
+    if (runtime == "gpu-direct") {
+        return "native-nvenc-bridge";
+    }
+    if (runtime.empty()) {
+        return "none";
+    }
+    return runtime;
 }
 
 double clamp_unit(double value) {
@@ -1681,6 +2388,8 @@ bool StitchEngine::select_pair_locked(
 void StitchEngine::clear_calibration_state_locked() {
     calibrated_ = false;
     homography_distortion_reference_ = "raw";
+    runtime_geometry_ = RuntimeGeometryState{};
+    runtime_geometry_source_path_.clear();
     homography_.release();
     homography_adjusted_.release();
     left_mask_template_.release();
@@ -1695,6 +2404,7 @@ void StitchEngine::clear_calibration_state_locked() {
     weight_right_3c_.release();
     previous_stitched_probe_gray_.release();
     latest_stitched_.release();
+    previous_seam_path_.clear();
     gpu_left_nv12_y_.release();
     gpu_left_nv12_uv_.release();
     gpu_left_decoded_.release();
@@ -1748,6 +2458,24 @@ void StitchEngine::clear_calibration_state_locked() {
     metrics_.matches = 0;
     metrics_.inliers = 0;
     metrics_.overlap_diff_mean = 0.0;
+    metrics_.geometry_mode = "planar-homography";
+    metrics_.alignment_mode = "homography";
+    metrics_.seam_mode = "seam_feather";
+    metrics_.exposure_mode = "off";
+    metrics_.geometry_artifact_path.clear();
+    metrics_.geometry_artifact_model = "planar-homography";
+    metrics_.cylindrical_focal_px = 0.0;
+    metrics_.cylindrical_center_x = 0.0;
+    metrics_.cylindrical_center_y = 0.0;
+    metrics_.residual_alignment_error_px = 0.0;
+    metrics_.seam_path_jitter_px = 0.0;
+    metrics_.exposure_gain = 1.0;
+    metrics_.exposure_bias = 0.0;
+    metrics_.blend_mode = "seam_feather";
+    last_exposure_gain_ = 1.0;
+    last_exposure_bias_ = 0.0;
+    last_residual_alignment_error_px_ = 0.0;
+    last_seam_path_jitter_px_ = 0.0;
     metrics_.left_motion_mean = 0.0;
     metrics_.right_motion_mean = 0.0;
     metrics_.stitched_motion_mean = 0.0;
@@ -1798,10 +2526,13 @@ bool StitchEngine::start(const EngineConfig& config) {
     metrics_.sync_pair_mode = config.sync_pair_mode;
     metrics_.gpu_enabled = (config.gpu_mode != "off");
     metrics_.gpu_reason = metrics_.gpu_enabled ? "native runtime stitch pipeline" : "gpu disabled by config";
+    metrics_.geometry_mode = "planar-homography";
     metrics_.output_target = config.output.target;
     metrics_.output_command_line.clear();
+    metrics_.output_runtime_mode = output_runtime_mode_hint(config.output.runtime);
     metrics_.production_output_target = config.production_output.target;
     metrics_.production_output_command_line.clear();
+    metrics_.production_output_runtime_mode = output_runtime_mode_hint(config.production_output.runtime);
     last_left_seq_ = 0;
     last_right_seq_ = 0;
     last_service_pair_ts_ns_ = 0;
@@ -1828,6 +2559,7 @@ bool StitchEngine::start(const EngineConfig& config) {
     last_left_reader_restart_ns_ = 0;
     last_right_reader_restart_ns_ = 0;
     clear_calibration_state_locked();
+    load_runtime_geometry_locked();
     output_writer_.reset();
     production_output_writer_.reset();
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
@@ -1962,12 +2694,15 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
     metrics_.output_last_error.clear();
     metrics_.output_command_line.clear();
     metrics_.output_effective_codec.clear();
+    metrics_.output_runtime_mode = output_runtime_mode_hint(config.output.runtime);
     metrics_.output_target = config.output.target;
     metrics_.production_output_last_error.clear();
     metrics_.production_output_command_line.clear();
     metrics_.production_output_effective_codec.clear();
+    metrics_.production_output_runtime_mode = output_runtime_mode_hint(config.production_output.runtime);
     metrics_.production_output_target = config.production_output.target;
     metrics_.status = "config reloaded";
+    load_runtime_geometry_locked();
 
     if (restart_readers) {
         const auto ffmpeg_bin = config.ffmpeg_bin;
@@ -1995,12 +2730,15 @@ void StitchEngine::reset_calibration() {
         production_output_writer_.reset();
     }
     clear_calibration_state_locked();
+    load_runtime_geometry_locked();
     metrics_.output_last_error.clear();
     metrics_.output_command_line.clear();
     metrics_.output_effective_codec.clear();
+    metrics_.output_runtime_mode = output_runtime_mode_hint(config_.output.runtime);
     metrics_.production_output_last_error.clear();
     metrics_.production_output_command_line.clear();
     metrics_.production_output_effective_codec.clear();
+    metrics_.production_output_runtime_mode = output_runtime_mode_hint(config_.production_output.runtime);
     metrics_.status = "calibration reset";
     last_left_seq_ = 0;
     last_right_seq_ = 0;
@@ -2060,6 +2798,205 @@ bool StitchEngine::load_homography_locked(cv::Mat* homography_out) {
     return load_homography_from_file(config_.homography_file, homography_out, &homography_distortion_reference_);
 }
 
+bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, RuntimeGeometryState* state) {
+    if (state == nullptr || path.empty()) {
+        return false;
+    }
+
+    RuntimeGeometryArtifactData artifact;
+    if (!load_runtime_geometry_artifact_from_file(path, &artifact)) {
+        return false;
+    }
+
+    state->model = artifact.model.empty() ? "planar-homography" : artifact.model;
+    state->alignment_model = artifact.alignment_model.empty() ? "homography" : artifact.alignment_model;
+    if (state->model == "cylindrical_affine") {
+        state->model = "cylindrical-affine";
+    }
+    state->artifact_path = artifact.artifact_path.empty() ? path : artifact.artifact_path;
+    state->output_size = artifact.output_size;
+    state->alignment_matrix = artifact.alignment_matrix.empty() ? cv::Mat::eye(3, 3, CV_64F) : artifact.alignment_matrix.clone();
+    state->focal_px = artifact.focal_px;
+    state->center_x = artifact.center_x;
+    state->center_y = artifact.center_y;
+    state->residual_alignment_error_px = artifact.residual_alignment_error_px;
+    state->seam_transition_px = std::max(2, artifact.seam_transition_px);
+    state->seam_smoothness_penalty = std::max(0.0, artifact.seam_smoothness_penalty);
+    state->seam_temporal_penalty = std::max(0.0, artifact.seam_temporal_penalty);
+    state->exposure_enabled = artifact.exposure_enabled;
+    state->exposure_gain_min = std::max(0.0, artifact.exposure_gain_min);
+    state->exposure_gain_max = std::max(state->exposure_gain_min, artifact.exposure_gain_max);
+    state->exposure_bias_abs_max = std::max(0.0, artifact.exposure_bias_abs_max);
+    return true;
+}
+
+bool StitchEngine::load_runtime_geometry_locked() {
+    runtime_geometry_ = RuntimeGeometryState{};
+    runtime_geometry_source_path_.clear();
+
+    const std::string candidate_path = runtime_geometry_artifact_candidate_path(config_);
+    if (!candidate_path.empty() && load_runtime_geometry_from_file(candidate_path, &runtime_geometry_)) {
+        runtime_geometry_source_path_ = runtime_geometry_.artifact_path.empty() ? candidate_path : runtime_geometry_.artifact_path;
+        last_residual_alignment_error_px_ = runtime_geometry_.residual_alignment_error_px;
+        apply_runtime_geometry_to_metrics_locked();
+        return true;
+    }
+
+    apply_runtime_geometry_to_metrics_locked();
+    return false;
+}
+
+bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, const cv::Size& right_size) {
+    if (left_size.width <= 0 || left_size.height <= 0 || right_size.width <= 0 || right_size.height <= 0) {
+        return false;
+    }
+
+    if (runtime_geometry_.artifact_path.empty() && !load_runtime_geometry_locked()) {
+        return false;
+    }
+    if (runtime_geometry_.model != "cylindrical-affine") {
+        return false;
+    }
+
+    if (!build_cylindrical_maps_locked(
+            left_size,
+            runtime_geometry_.focal_px,
+            runtime_geometry_.center_x,
+            runtime_geometry_.center_y,
+            &runtime_geometry_.cylindrical_left_map_x,
+            &runtime_geometry_.cylindrical_left_map_y)) {
+        return false;
+    }
+    if (!build_cylindrical_maps_locked(
+            right_size,
+            runtime_geometry_.focal_px,
+            runtime_geometry_.center_x,
+            runtime_geometry_.center_y,
+            &runtime_geometry_.cylindrical_right_map_x,
+            &runtime_geometry_.cylindrical_right_map_y)) {
+        return false;
+    }
+
+    cv::Size output_size;
+    cv::Rect left_roi;
+    cv::Rect overlap_roi_unused;
+    cv::Mat adjusted_affine;
+    if (!build_affine_output_plan_locked(
+            left_size,
+            right_size,
+            runtime_geometry_.alignment_matrix,
+            &output_size,
+            &left_roi,
+            &overlap_roi_unused,
+            &adjusted_affine)) {
+        return false;
+    }
+
+    runtime_geometry_.output_size = output_size;
+    runtime_geometry_.alignment_matrix = adjusted_affine;
+    last_residual_alignment_error_px_ = runtime_geometry_.residual_alignment_error_px;
+    left_roi_ = left_roi;
+    output_size_ = output_size;
+    homography_ = runtime_geometry_.alignment_matrix.clone();
+    homography_adjusted_ = runtime_geometry_.alignment_matrix.clone();
+
+    left_mask_template_ = cv::Mat::zeros(output_size_, CV_8UC1);
+    if (left_roi_.area() > 0) {
+        left_mask_template_(left_roi_).setTo(cv::Scalar(255));
+    }
+    cv::Mat right_mask_source(right_size, CV_8UC1, cv::Scalar(255));
+    cv::warpPerspective(
+        right_mask_source,
+        right_mask_template_,
+        runtime_geometry_.alignment_matrix,
+        output_size_,
+        cv::INTER_NEAREST,
+        cv::BORDER_CONSTANT);
+
+    cv::Mat right_mask_not;
+    cv::Mat left_mask_not;
+    cv::bitwise_and(left_mask_template_, right_mask_template_, overlap_mask_);
+    cv::bitwise_not(right_mask_template_, right_mask_not);
+    cv::bitwise_not(left_mask_template_, left_mask_not);
+    cv::bitwise_and(left_mask_template_, right_mask_not, only_left_mask_);
+    cv::bitwise_and(right_mask_template_, left_mask_not, only_right_mask_);
+    metrics_.only_left_pixels = cv::countNonZero(only_left_mask_);
+    metrics_.only_right_pixels = cv::countNonZero(only_right_mask_);
+    metrics_.overlap_pixels = cv::countNonZero(overlap_mask_);
+    full_overlap_ = (metrics_.overlap_pixels > 0) &&
+                    (metrics_.only_left_pixels == 0) &&
+                    (metrics_.only_right_pixels == 0);
+
+    if (metrics_.overlap_pixels > 0) {
+        overlap_roi_ = cv::boundingRect(overlap_mask_);
+        overlap_mask_roi_ = overlap_mask_(overlap_roi_).clone();
+        build_seam_blend_weights(overlap_mask_, overlap_roi_, &weight_left_, &weight_right_);
+        std::vector<cv::Mat> wl(3, weight_left_);
+        std::vector<cv::Mat> wr(3, weight_right_);
+        cv::merge(wl, weight_left_3c_);
+        cv::merge(wr, weight_right_3c_);
+    } else {
+        overlap_roi_ = cv::Rect();
+        overlap_mask_roi_.release();
+        weight_left_ = cv::Mat::zeros(output_size_, CV_32FC1);
+        weight_right_ = cv::Mat::zeros(output_size_, CV_32FC1);
+        weight_left_3c_ = cv::Mat::zeros(output_size_, CV_32FC3);
+        weight_right_3c_ = cv::Mat::zeros(output_size_, CV_32FC3);
+    }
+
+    if (gpu_available_ && runtime_geometry_.model != "cylindrical-affine") {
+        try {
+            gpu_overlap_mask_.upload(overlap_mask_);
+            gpu_only_left_mask_.upload(only_left_mask_);
+            gpu_only_right_mask_.upload(only_right_mask_);
+            if (overlap_roi_.area() > 0) {
+                gpu_overlap_mask_roi_.upload(overlap_mask_roi_);
+                gpu_weight_left_roi_.upload(weight_left_(overlap_roi_));
+                gpu_weight_right_roi_.upload(weight_right_(overlap_roi_));
+            }
+        } catch (const cv::Exception& e) {
+            gpu_available_ = false;
+            metrics_.gpu_errors += 1;
+            metrics_.gpu_reason = std::string("cuda calibration upload failed: ") + e.what();
+        }
+    }
+
+    metrics_.geometry_mode = runtime_geometry_.model;
+    metrics_.alignment_mode = runtime_geometry_.alignment_model;
+    metrics_.seam_mode = "dynamic-path";
+    metrics_.exposure_mode =
+        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+    metrics_.geometry_artifact_path = runtime_geometry_source_path_;
+    metrics_.geometry_artifact_model = runtime_geometry_.model;
+    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
+    metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+    metrics_.exposure_gain = last_exposure_gain_;
+    metrics_.exposure_bias = last_exposure_bias_;
+    metrics_.blend_mode = metrics_.seam_mode;
+    return true;
+}
+
+void StitchEngine::apply_runtime_geometry_to_metrics_locked() {
+    metrics_.geometry_mode = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+    metrics_.alignment_mode = runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model;
+    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
+    metrics_.exposure_mode =
+        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+    metrics_.geometry_artifact_path = runtime_geometry_source_path_;
+    metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
+    metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+    metrics_.exposure_gain = last_exposure_gain_;
+    metrics_.exposure_bias = last_exposure_bias_;
+    metrics_.blend_mode = metrics_.seam_mode;
+}
+
 bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv::Size& right_size) {
     if (calibrated_) {
         return true;
@@ -2079,7 +3016,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
             left_size,
             right_size,
             homography,
-            config_.process_scale <= 0.0 ? 4.0 : 4.0,
+            config_.process_scale <= 0.0 ? 4.0 : config_.process_scale,
             40'000'000,
             &adjusted_h,
             &output_size,
@@ -2137,7 +3074,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         weight_right_3c_ = cv::Mat::zeros(output_size_, CV_32FC3);
     }
 
-    if (gpu_available_) {
+    if (gpu_available_ && runtime_geometry_.model != "cylindrical-affine") {
         try {
             gpu_overlap_mask_.upload(overlap_mask_);
             gpu_only_left_mask_.upload(only_left_mask_);
@@ -2266,6 +3203,55 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         }
     };
 
+    if (runtime_geometry_.model == "cylindrical-affine" && prepare_runtime_geometry_locked(left_size, right_size)) {
+        configure_distortion_state(
+            config_.left_distortion_file,
+            config_.left_distortion_source_hint,
+            left_size,
+            &left_distortion_);
+        configure_distortion_state(
+            config_.right_distortion_file,
+            config_.right_distortion_source_hint,
+            right_size,
+            &right_distortion_);
+        calibrated_ = true;
+        metrics_.calibrated = true;
+        metrics_.output_width = (config_.output.width > 0) ? config_.output.width : output_size_.width;
+        metrics_.output_height = (config_.output.height > 0) ? config_.output.height : output_size_.height;
+        if (config_.production_output.runtime != "none" && !config_.production_output.target.empty()) {
+            metrics_.production_output_width =
+                (config_.production_output.width > 0) ? config_.production_output.width : output_size_.width;
+            metrics_.production_output_height =
+                (config_.production_output.height > 0) ? config_.production_output.height : output_size_.height;
+        } else {
+            metrics_.production_output_width = 0;
+            metrics_.production_output_height = 0;
+        }
+        metrics_.geometry_mode = runtime_geometry_.model;
+        metrics_.alignment_mode = runtime_geometry_.alignment_model;
+        metrics_.seam_mode = "dynamic-path";
+        metrics_.exposure_mode =
+            (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+        metrics_.geometry_artifact_path = runtime_geometry_source_path_;
+        metrics_.geometry_artifact_model = runtime_geometry_.model;
+        metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
+        metrics_.cylindrical_center_x = runtime_geometry_.center_x;
+        metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+        metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
+        metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+        metrics_.exposure_gain = last_exposure_gain_;
+        metrics_.exposure_bias = last_exposure_bias_;
+        metrics_.blend_mode = metrics_.seam_mode;
+        metrics_.status = "calibrated";
+        return true;
+    }
+    if (runtime_geometry_.model == "cylindrical-affine") {
+        runtime_geometry_ = RuntimeGeometryState{};
+        runtime_geometry_source_path_.clear();
+        last_residual_alignment_error_px_ = 0.0;
+        apply_runtime_geometry_to_metrics_locked();
+    }
+
     configure_distortion_state(
         config_.left_distortion_file,
         config_.left_distortion_source_hint,
@@ -2290,7 +3276,21 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         metrics_.production_output_width = 0;
         metrics_.production_output_height = 0;
     }
-    metrics_.blend_mode = "seam_feather";
+    metrics_.geometry_mode = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+    metrics_.alignment_mode = runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model;
+    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
+    metrics_.exposure_mode =
+        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+    metrics_.geometry_artifact_path = runtime_geometry_source_path_;
+    metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
+    metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+    metrics_.exposure_gain = last_exposure_gain_;
+    metrics_.exposure_bias = last_exposure_bias_;
+    metrics_.blend_mode = metrics_.seam_mode;
     metrics_.status = "calibrated";
     return true;
 }
@@ -2776,6 +3776,140 @@ bool StitchEngine::stitch_pair_locked(
     }
 
     if (!used_gpu_blend) {
+        if (runtime_geometry_.model == "cylindrical-affine") {
+            if (left_cpu_frame.empty()) {
+                if (selected_pair.left_seq > 0 &&
+                    cached_left_cpu_seq_ == selected_pair.left_seq &&
+                    !cached_left_cpu_frame_.empty()) {
+                    left_cpu_frame = cached_left_cpu_frame_;
+                } else if (left_raw_input != nullptr) {
+                    cv::Mat left_decoded = decode_input_frame_for_stitch(*left_raw_input, config_.left);
+                    if (!left_decoded.empty()) {
+                        left_cpu_frame = resize_frame_for_runtime(left_decoded, output_scale);
+                        cached_left_cpu_frame_ = left_cpu_frame;
+                        cached_left_cpu_seq_ = selected_pair.left_seq;
+                    }
+                }
+            }
+            if (right_cpu_frame.empty()) {
+                if (selected_pair.right_seq > 0 &&
+                    cached_right_cpu_seq_ == selected_pair.right_seq &&
+                    !cached_right_cpu_frame_.empty()) {
+                    right_cpu_frame = cached_right_cpu_frame_;
+                } else if (right_raw_input != nullptr) {
+                    cv::Mat right_decoded = decode_input_frame_for_stitch(*right_raw_input, config_.right);
+                    if (!right_decoded.empty()) {
+                        right_cpu_frame = resize_frame_for_runtime(right_decoded, output_scale);
+                        cached_right_cpu_frame_ = right_cpu_frame;
+                        cached_right_cpu_seq_ = selected_pair.right_seq;
+                    }
+                }
+            }
+            if (left_cpu_frame.empty() || right_cpu_frame.empty()) {
+                metrics_.status = "input decode failed";
+                metrics_.stitch_fps = 0.0;
+                return false;
+            }
+            const cv::Mat* left_cylindrical = &left_cpu_frame;
+            const cv::Mat* right_cylindrical = &right_cpu_frame;
+            if (!runtime_geometry_.cylindrical_left_map_x.empty() && !runtime_geometry_.cylindrical_left_map_y.empty()) {
+                cv::remap(
+                    left_cpu_frame,
+                    left_corrected_cpu,
+                    runtime_geometry_.cylindrical_left_map_x,
+                    runtime_geometry_.cylindrical_left_map_y,
+                    cv::INTER_LINEAR,
+                    cv::BORDER_CONSTANT);
+                if (!left_corrected_cpu.empty()) {
+                    left_cylindrical = &left_corrected_cpu;
+                }
+            }
+            if (!runtime_geometry_.cylindrical_right_map_x.empty() && !runtime_geometry_.cylindrical_right_map_y.empty()) {
+                cv::remap(
+                    right_cpu_frame,
+                    right_corrected_cpu,
+                    runtime_geometry_.cylindrical_right_map_x,
+                    runtime_geometry_.cylindrical_right_map_y,
+                    cv::INTER_LINEAR,
+                    cv::BORDER_CONSTANT);
+                if (!right_corrected_cpu.empty()) {
+                    right_cylindrical = &right_corrected_cpu;
+                }
+            }
+            if (cached_left_canvas_seq_ == selected_pair.left_seq && !cached_left_canvas_cpu_.empty()) {
+                canvas_left = cached_left_canvas_cpu_;
+            } else {
+                canvas_left = cv::Mat::zeros(output_size_, CV_8UC3);
+                if (left_roi_.area() > 0) {
+                    left_cylindrical->copyTo(canvas_left(left_roi_));
+                }
+                cached_left_canvas_cpu_ = canvas_left;
+                cached_left_canvas_seq_ = selected_pair.left_seq;
+            }
+            if (cached_right_warped_seq_ == selected_pair.right_seq && !cached_right_warped_cpu_.empty()) {
+                warped_right = cached_right_warped_cpu_;
+            } else {
+                cv::warpPerspective(
+                    *right_cylindrical,
+                    warped_right,
+                    homography_adjusted_,
+                    output_size_);
+                metrics_.cpu_warp_count += 1;
+                cached_right_warped_cpu_ = warped_right;
+                cached_right_warped_seq_ = selected_pair.right_seq;
+            }
+
+            cv::Mat compensated_right = warped_right;
+            double exposure_gain = 1.0;
+            double exposure_bias = 0.0;
+            if (!runtime_geometry_.exposure_enabled) {
+                last_exposure_gain_ = exposure_gain;
+                last_exposure_bias_ = exposure_bias;
+            } else if (!compute_exposure_compensation_locked(
+                           canvas_left,
+                           warped_right,
+                           overlap_mask_,
+                           &compensated_right,
+                           &exposure_gain,
+                           &exposure_bias)) {
+                compensated_right = warped_right;
+            }
+            last_exposure_gain_ = exposure_gain;
+            last_exposure_bias_ = exposure_bias;
+            metrics_.exposure_gain = exposure_gain;
+            metrics_.exposure_bias = exposure_bias;
+
+            std::vector<int> seam_path;
+            if (!build_dynamic_seam_path_locked(canvas_left, compensated_right, overlap_mask_, &seam_path)) {
+                seam_path.assign(output_size_.height, output_size_.width / 2);
+            }
+            update_seam_path_jitter_locked(seam_path);
+            metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+
+            stitched = cv::Mat::zeros(output_size_, CV_8UC3);
+            blend_with_dynamic_seam_locked(
+                canvas_left,
+                compensated_right,
+                left_mask_template_,
+                right_mask_template_,
+                seam_path,
+                runtime_geometry_.seam_transition_px,
+                &stitched);
+            metrics_.warped_mean_luma = mean_luma(compensated_right);
+            if (cv::countNonZero(overlap_mask_) > 0) {
+                cv::Mat left_gray;
+                cv::Mat right_gray;
+                cv::Mat abs_diff;
+                cv::cvtColor(canvas_left, left_gray, cv::COLOR_BGR2GRAY);
+                cv::cvtColor(compensated_right, right_gray, cv::COLOR_BGR2GRAY);
+                cv::absdiff(left_gray, right_gray, abs_diff);
+                metrics_.overlap_diff_mean = cv::mean(abs_diff, overlap_mask_)[0];
+            } else {
+                metrics_.overlap_diff_mean = 0.0;
+            }
+            metrics_.cpu_blend_count += 1;
+            metrics_.blend_mode = "dynamic-path";
+        } else {
         if (left_cpu_frame.empty()) {
             if (selected_pair.left_seq > 0 &&
                 cached_left_cpu_seq_ == selected_pair.left_seq &&
@@ -2889,6 +4023,7 @@ bool StitchEngine::stitch_pair_locked(
         }
 
         metrics_.cpu_blend_count += 1;
+        }
     }
 
     if (!stitched.empty()) {
@@ -2905,7 +4040,7 @@ bool StitchEngine::stitch_pair_locked(
     metrics_.stitched_count += 1;
     metrics_.frame_index += 1;
     metrics_.status = "stitching";
-    metrics_.blend_mode = "seam_feather";
+    metrics_.blend_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
     if (last_worker_timestamp_ns_ > 0) {
         metrics_.stitch_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
@@ -3050,6 +4185,7 @@ void StitchEngine::update_metrics_locked() {
         std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch())
             .count();
     const auto now_source_wallclock_ns = wallclock_now_ns();
+    apply_runtime_geometry_to_metrics_locked();
 
     metrics_.left_fps = left.fps;
     metrics_.right_fps = right.fps;
@@ -3213,6 +4349,8 @@ void StitchEngine::update_metrics_locked() {
         (output_writer_ != nullptr) ? output_writer_->command_line() : metrics_.output_command_line;
     metrics_.output_effective_codec =
         (output_writer_ != nullptr) ? output_writer_->effective_codec() : metrics_.output_effective_codec;
+    metrics_.output_runtime_mode =
+        (output_writer_ != nullptr) ? output_writer_->runtime_mode() : metrics_.output_runtime_mode;
     metrics_.output_last_error = (output_writer_ != nullptr) ? output_writer_->last_error() : metrics_.output_last_error;
     metrics_.production_output_active =
         (production_output_writer_ != nullptr) && production_output_writer_->active();
@@ -3228,6 +4366,10 @@ void StitchEngine::update_metrics_locked() {
         (production_output_writer_ != nullptr)
             ? production_output_writer_->effective_codec()
             : metrics_.production_output_effective_codec;
+    metrics_.production_output_runtime_mode =
+        (production_output_writer_ != nullptr)
+            ? production_output_writer_->runtime_mode()
+            : metrics_.production_output_runtime_mode;
     metrics_.production_output_last_error =
         (production_output_writer_ != nullptr)
             ? production_output_writer_->last_error()

@@ -1,9 +1,66 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <string>
 
 namespace hogak::engine {
+
+struct LensCorrectionConfig {
+    bool enabled = false;
+    std::string source = "off";
+    std::string model = "opencv_pinhole";
+    std::string left_profile_file;
+    std::string right_profile_file;
+    std::string left_source_hint = "off";
+    std::string right_source_hint = "off";
+    std::string camera_model = "DH-IPC-HFW4841T-ZAS";
+    double horizontal_fov_deg = 0.0;
+    double vertical_fov_deg = 0.0;
+};
+
+struct ProjectionConfig {
+    std::string model = "cylindrical";
+    double focal_px = 0.0;
+    double center_x = 0.0;
+    double center_y = 0.0;
+    int32_t input_width = 0;
+    int32_t input_height = 0;
+    int32_t output_width = 0;
+    int32_t output_height = 0;
+};
+
+struct AlignmentConfig {
+    std::string model = "affine";
+    std::array<double, 9> matrix = {1.0, 0.0, 0.0,
+                                    0.0, 1.0, 0.0,
+                                    0.0, 0.0, 1.0};
+    bool has_matrix = false;
+};
+
+struct SeamConfig {
+    std::string mode = "dynamic-path";
+    int32_t transition_px = 64;
+    double smoothness_penalty = 4.0;
+    double temporal_penalty = 2.0;
+};
+
+struct ExposureConfig {
+    bool enabled = true;
+    double gain_min = 0.7;
+    double gain_max = 1.4;
+    double bias_abs_max = 35.0;
+};
+
+struct GeometryRuntimeConfig {
+    std::string mode = "planar-homography";
+    std::string artifact_file;
+    LensCorrectionConfig lens_correction;
+    ProjectionConfig projection;
+    AlignmentConfig alignment;
+    SeamConfig seam;
+    ExposureConfig exposure;
+};
 
 struct StreamConfig {
     std::string name;
@@ -38,6 +95,7 @@ struct EngineConfig {
     StreamConfig right;
     OutputConfig output;
     OutputConfig production_output;
+    GeometryRuntimeConfig geometry;
     std::string ffmpeg_bin;
     std::string homography_file;
     std::string distortion_mode = "off";

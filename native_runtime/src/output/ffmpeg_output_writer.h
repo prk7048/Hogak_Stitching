@@ -38,6 +38,7 @@ public:
     std::string last_error() const override;
     std::string effective_codec() const override;
     std::string command_line() const override;
+    std::string runtime_mode() const override;
     std::string muxer() const override;
 
 private:

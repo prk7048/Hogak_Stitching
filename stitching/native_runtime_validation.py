@@ -16,10 +16,7 @@ from stitching.distortion_calibration import (
     load_homography_distortion_reference,
     ResolvedDistortion,
 )
-from stitching.native_calibration import ensure_runtime_raw_homography
 from stitching.project_defaults import (
-    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-    DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
     DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
     DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
     DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
@@ -50,8 +47,8 @@ from stitching.project_defaults import (
     default_output_standard,
     default_right_rtsp,
 )
-from stitching.runtime_client import RuntimeClient
 from stitching.runtime_launcher import RuntimeLaunchSpec, resolve_ffmpeg_binary
+from stitching.runtime_supervisor import RuntimeSupervisor
 from stitching.runtime_site_config import repo_root, require_configured_rtsp_urls
 
 
@@ -360,31 +357,6 @@ def _normalize_distortion_args(args: argparse.Namespace) -> None:
     args.distortion_auto_save = False
 
 
-def _maybe_prepare_raw_homography(
-    args: argparse.Namespace,
-) -> tuple[str, Path | None, dict[str, Any] | None]:
-    homography_path = Path(str(args.homography_file or "")).expanduser()
-    current_reference = load_homography_distortion_reference(homography_path) if str(args.homography_file or "").strip() else "missing"
-    if current_reference == "raw":
-        return current_reference, None, None
-    try:
-        updated_reference, backup_path, result, _messages = ensure_runtime_raw_homography(
-            left_rtsp=str(args.left_rtsp),
-            right_rtsp=str(args.right_rtsp),
-            output_path=homography_path,
-            inliers_output_path=Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE).expanduser(),
-            debug_dir=Path(DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR).expanduser(),
-            rtsp_transport=str(args.rtsp_transport),
-            rtsp_timeout_sec=10.0,
-            warmup_frames=max(8, int(args.input_buffer_frames) * 2),
-            process_scale=1.0,
-            backup_existing=homography_path.exists(),
-        )
-    except Exception as exc:
-        return current_reference, None, {"error": f"{type(exc).__name__}: {exc}"}
-    return updated_reference, backup_path, result
-
-
 def _compact_runtime_metrics(payload: dict[str, Any]) -> dict[str, Any]:
     keys = (
         "status",
@@ -393,6 +365,7 @@ def _compact_runtime_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "right_fps",
         "stitch_actual_fps",
         "production_output_written_fps",
+        "geometry_mode",
         "pair_skew_ms_mean",
         "pair_source_skew_ms_mean",
         "sync_effective_offset_ms",
@@ -434,6 +407,8 @@ def _compact_runtime_metrics(payload: dict[str, Any]) -> dict[str, Any]:
         "left_buffered_frames",
         "right_buffered_frames",
         "gpu_errors",
+        "output_runtime_mode",
+        "production_output_runtime_mode",
     )
     return {key: payload.get(key) for key in keys}
 
@@ -520,7 +495,13 @@ def run_native_validation(args: argparse.Namespace) -> int:
     distortion_metadata = _distortion_metadata(args)
     left_distortion = ResolvedDistortion()
     right_distortion = ResolvedDistortion()
-    homography_reference, homography_backup_path, homography_prepare_result = _maybe_prepare_raw_homography(args)
+    homography_path = Path(str(args.homography_file or "")).expanduser()
+    homography_reference = (
+        load_homography_distortion_reference(homography_path)
+        if str(args.homography_file or "").strip()
+        else "missing"
+    )
+    read_only_notice = f"validate-runtime is read-only; homography_reference={homography_reference}"
     spec = RuntimeLaunchSpec(
         emit_hello=True,
         once=False,
@@ -591,17 +572,17 @@ def run_native_validation(args: argparse.Namespace) -> int:
     started_at = datetime.now().isoformat(timespec="seconds")
     started_monotonic = time.time()
 
-    client = RuntimeClient.launch(spec)
+    supervisor = RuntimeSupervisor.launch(spec)
     returncode = 0
     stderr_tail = ""
     try:
-        hello = client.wait_for_hello(timeout_sec=5.0)
+        hello = supervisor.wait_for_hello(timeout_sec=5.0)
         hello_payload = dict(hello.payload)
         deadline = time.time() + max(1.0, float(args.duration_sec))
         while time.time() < deadline:
-            event = client.read_event(timeout_sec=1.5)
+            event = supervisor.read_event(timeout_sec=1.5)
             if event is None:
-                if client.process.poll() is not None:
+                if supervisor.process.poll() is not None:
                     break
                 continue
             if event.type != "metrics":
@@ -633,22 +614,11 @@ def run_native_validation(args: argparse.Namespace) -> int:
                     transmit_values.append(transmit_value)
             except (TypeError, ValueError):
                 pass
-        try:
-            client.shutdown()
-        except Exception:
-            pass
-        try:
-            client.process.wait(timeout=5)
-        except Exception:
-            client.process.kill()
-        returncode = int(client.process.returncode or 0)
-        stderr_tail = client.get_stderr_tail().strip()
     finally:
-        if client.process.poll() is None:
-            try:
-                client.process.kill()
-            except Exception:
-                pass
+        supervisor.close(wait_timeout_sec=5.0)
+
+    returncode = int(supervisor.process.returncode or 0)
+    stderr_tail = supervisor.get_stderr_tail().strip()
 
     decision, bottleneck_guess, reasons = _classify_validation(
         returncode=returncode,
@@ -742,8 +712,11 @@ def run_native_validation(args: argparse.Namespace) -> int:
         "source_probe": source_probe,
         "homography_prepare": {
             "distortion_reference": homography_reference,
-            "backup_path": str(homography_backup_path) if homography_backup_path is not None else "",
-            "result": homography_prepare_result or {},
+            "backup_path": "",
+            "result": {
+                "read_only": True,
+                "notice": read_only_notice,
+            },
         },
         "runtime_validation": {
             "returncode": returncode,

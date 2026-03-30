@@ -349,64 +349,44 @@ def build_runtime_command(spec: RuntimeLaunchSpec | None = None) -> list[str]:
     command.extend(["--reconnect-cooldown-sec", f"{float(spec.reconnect_cooldown_sec):.3f}"])
     if spec.output_runtime:
         command.extend(["--probe-output-runtime", spec.output_runtime])
-        command.extend(["--output-runtime", spec.output_runtime])
     if spec.output_target:
         command.extend(["--probe-output-target", spec.output_target])
-        command.extend(["--output-target", spec.output_target])
     if spec.output_codec:
         command.extend(["--probe-output-codec", spec.output_codec])
-        command.extend(["--output-codec", spec.output_codec])
     if spec.output_bitrate:
         command.extend(["--probe-output-bitrate", spec.output_bitrate])
-        command.extend(["--output-bitrate", spec.output_bitrate])
     if spec.output_preset:
         command.extend(["--probe-output-preset", spec.output_preset])
-        command.extend(["--output-preset", spec.output_preset])
     if spec.output_muxer:
         command.extend(["--probe-output-muxer", spec.output_muxer])
-        command.extend(["--output-muxer", spec.output_muxer])
     if spec.output_width > 0:
         command.extend(["--probe-output-width", str(int(spec.output_width))])
-        command.extend(["--output-width", str(int(spec.output_width))])
     if spec.output_height > 0:
         command.extend(["--probe-output-height", str(int(spec.output_height))])
-        command.extend(["--output-height", str(int(spec.output_height))])
     if spec.output_fps > 0.0:
         command.extend(["--probe-output-fps", f"{float(spec.output_fps):.3f}"])
-        command.extend(["--output-fps", f"{float(spec.output_fps):.3f}"])
     if spec.output_debug_overlay:
         command.append("--probe-output-debug-overlay")
-        command.append("--output-debug-overlay")
     if spec.production_output_runtime:
         command.extend(["--transmit-output-runtime", spec.production_output_runtime])
-        command.extend(["--production-output-runtime", spec.production_output_runtime])
     if spec.production_output_target:
         command.extend(["--transmit-output-target", spec.production_output_target])
-        command.extend(["--production-output-target", spec.production_output_target])
     if spec.production_output_codec:
         command.extend(["--transmit-output-codec", spec.production_output_codec])
-        command.extend(["--production-output-codec", spec.production_output_codec])
     if spec.production_output_bitrate:
         command.extend(["--transmit-output-bitrate", spec.production_output_bitrate])
-        command.extend(["--production-output-bitrate", spec.production_output_bitrate])
     if spec.production_output_preset:
         command.extend(["--transmit-output-preset", spec.production_output_preset])
-        command.extend(["--production-output-preset", spec.production_output_preset])
     if spec.production_output_muxer:
         command.extend(["--transmit-output-muxer", spec.production_output_muxer])
-        command.extend(["--production-output-muxer", spec.production_output_muxer])
     if spec.production_output_width > 0:
         command.extend(["--transmit-output-width", str(int(spec.production_output_width))])
-        command.extend(["--production-output-width", str(int(spec.production_output_width))])
     if spec.production_output_height > 0:
         command.extend(["--transmit-output-height", str(int(spec.production_output_height))])
-        command.extend(["--production-output-height", str(int(spec.production_output_height))])
     if spec.production_output_fps > 0.0:
         command.extend(["--transmit-output-fps", f"{float(spec.production_output_fps):.3f}"])
-        command.extend(["--production-output-fps", f"{float(spec.production_output_fps):.3f}"])
     if spec.production_output_debug_overlay:
         command.append("--transmit-output-debug-overlay")
-        command.append("--production-output-debug-overlay")
     if spec.sync_pair_mode:
         command.extend(["--sync-pair-mode", spec.sync_pair_mode])
     if spec.allow_frame_reuse:

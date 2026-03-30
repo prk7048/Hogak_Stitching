@@ -156,6 +156,7 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"output_target\":\"" << json_escape(metrics.output_target) << "\","
         << "\"output_command_line\":\"" << json_escape(metrics.output_command_line) << "\","
         << "\"output_effective_codec\":\"" << json_escape(metrics.output_effective_codec) << "\","
+        << "\"output_runtime_mode\":\"" << json_escape(metrics.output_runtime_mode) << "\","
         << "\"output_last_error\":\"" << json_escape(metrics.output_last_error) << "\","
         << "\"production_output_active\":" << (metrics.production_output_active ? "true" : "false") << ','
         << "\"production_output_frames_written\":" << metrics.production_output_frames_written << ','
@@ -163,6 +164,7 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"production_output_target\":\"" << json_escape(metrics.production_output_target) << "\","
         << "\"production_output_command_line\":\"" << json_escape(metrics.production_output_command_line) << "\","
         << "\"production_output_effective_codec\":\"" << json_escape(metrics.production_output_effective_codec) << "\","
+        << "\"production_output_runtime_mode\":\"" << json_escape(metrics.production_output_runtime_mode) << "\","
         << "\"production_output_last_error\":\"" << json_escape(metrics.production_output_last_error) << "\","
         << "\"left_last_error\":\"" << json_escape(metrics.left_last_error) << "\","
         << "\"right_last_error\":\"" << json_escape(metrics.right_last_error) << "\","
@@ -170,7 +172,20 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"cpu_warp_count\":" << metrics.cpu_warp_count << ','
         << "\"gpu_blend_count\":" << metrics.gpu_blend_count << ','
         << "\"cpu_blend_count\":" << metrics.cpu_blend_count << ','
+        << "\"geometry_mode\":\"" << json_escape(metrics.geometry_mode) << "\","
+        << "\"alignment_mode\":\"" << json_escape(metrics.alignment_mode) << "\","
+        << "\"seam_mode\":\"" << json_escape(metrics.seam_mode) << "\","
+        << "\"exposure_mode\":\"" << json_escape(metrics.exposure_mode) << "\","
         << "\"blend_mode\":\"" << json_escape(metrics.blend_mode) << "\","
+        << "\"geometry_artifact_path\":\"" << json_escape(metrics.geometry_artifact_path) << "\","
+        << "\"geometry_artifact_model\":\"" << json_escape(metrics.geometry_artifact_model) << "\","
+        << "\"cylindrical_focal_px\":" << metrics.cylindrical_focal_px << ','
+        << "\"cylindrical_center_x\":" << metrics.cylindrical_center_x << ','
+        << "\"cylindrical_center_y\":" << metrics.cylindrical_center_y << ','
+        << "\"residual_alignment_error_px\":" << metrics.residual_alignment_error_px << ','
+        << "\"seam_path_jitter_px\":" << metrics.seam_path_jitter_px << ','
+        << "\"exposure_gain\":" << metrics.exposure_gain << ','
+        << "\"exposure_bias\":" << metrics.exposure_bias << ','
         << "\"overlap_diff_mean\":" << metrics.overlap_diff_mean << ','
         << "\"stitched_mean_luma\":" << metrics.stitched_mean_luma << ','
         << "\"left_mean_luma\":" << metrics.left_mean_luma << ','
@@ -180,6 +195,35 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"only_right_pixels\":" << metrics.only_right_pixels << ','
         << "\"overlap_pixels\":" << metrics.overlap_pixels
         << "}}";
+    return out.str();
+}
+
+inline std::string command_status_json(
+    std::int64_t seq,
+    double timestamp_sec,
+    const std::string& status,
+    const std::string& message) {
+    std::ostringstream out;
+    out << "{\"seq\":" << seq
+        << ",\"type\":\"status\",\"timestamp_sec\":" << std::fixed << std::setprecision(3) << timestamp_sec
+        << ",\"payload\":{\"status\":\"" << json_escape(status) << "\",\"message\":\"" << json_escape(message) << "\"}}";
+    return out.str();
+}
+
+inline std::string command_error_json(
+    std::int64_t seq,
+    double timestamp_sec,
+    const std::string& code,
+    const std::string& message,
+    const std::string& details = "") {
+    std::ostringstream out;
+    out << "{\"seq\":" << seq
+        << ",\"type\":\"error\",\"timestamp_sec\":" << std::fixed << std::setprecision(3) << timestamp_sec
+        << ",\"payload\":{\"code\":\"" << json_escape(code) << "\",\"message\":\"" << json_escape(message) << "\"";
+    if (!details.empty()) {
+        out << ",\"details\":\"" << json_escape(details) << "\"";
+    }
+    out << "}}";
     return out.str();
 }
 

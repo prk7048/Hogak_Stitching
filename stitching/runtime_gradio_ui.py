@@ -887,7 +887,7 @@ class RuntimeUiSession:
             [
                 f"**{step_labels.get(self.current_step, self.current_step)}**",
                 f"homography={self.homography_reference}",
-                f"stitch=raw",
+                "bridge=calibration-only",
                 f"inliers={'on' if self.show_calibration_inliers else 'off'}",
             ]
         )
@@ -1020,6 +1020,7 @@ class RuntimeUiSession:
             f"- run calibration first={self.run_calibration_first}",
             f"- open VLC low-latency transmit={self.open_vlc_low_latency}",
             "- distortion=disabled (raw only)",
+            "- runtime ownership has moved to the FastAPI/React operator surface",
             f"- homography reference={summary['distortion_reference']}",
             f"- manual_points_count={summary['manual_points_count']}",
             f"- inliers_count={summary['inliers_count']}",
@@ -2065,106 +2066,26 @@ class RuntimeUiSession:
         )
 
     def launch_runtime(self) -> tuple[str, np.ndarray | None, np.ndarray | None, np.ndarray | None, str]:
-        if not self.use_current_homography_enabled():
-            self.current_step = "stitch-review"
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} runtime launch blocked: assisted calibration required")
-            return self.dashboard_snapshot()
         self.current_step = "dashboard"
-        self.left_distortion_runtime = ResolvedDistortion(source="off", status_message="distortion disabled")
-        self.right_distortion_runtime = ResolvedDistortion(source="off", status_message="distortion disabled")
-        self.homography_reference, self.homography_messages = _legacy_cli()._ensure_runtime_homography_ready(
-            self.args,
-            left_distortion=ResolvedDistortion(),
-            right_distortion=ResolvedDistortion(),
+        self.recent_events.appendleft(
+            f"{time.strftime('%H:%M:%S')} runtime launch is handled by the FastAPI/React operator surface"
         )
-        spec = self._build_runtime_launch_spec(
-            left_distortion=self.left_distortion_runtime,
-            right_distortion=self.right_distortion_runtime,
-        )
-        self.runtime_client = RuntimeClient.launch(spec)
-        try:
-            hello = self.runtime_client.wait_for_hello(timeout_sec=5.0)
-        except Exception as exc:
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} runtime hello failed: {type(exc).__name__}: {exc}")
-            self.hello_payload = {}
-        else:
-            self.hello_payload = dict(hello.payload)
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} runtime hello received")
-        if self.probe_source != "disabled" and self.probe_target_for_viewer.strip():
-            self.runtime_preview_worker = _RuntimePreviewWorker(self.probe_target_for_viewer)
-            self.runtime_preview_worker.start()
         return self.dashboard_snapshot()
 
     def _maybe_launch_vlc(self) -> None:
-        if not self.open_vlc_low_latency or self.runtime_client is None or self.vlc_proc is not None:
-            return
-        if not bool(self.latest_metrics.get("transmit_active")) or int(self.latest_metrics.get("transmit_frames_written") or 0) < 8:
-            return
-        target = str(getattr(self.args, "vlc_target", "") or self.transmit_target_for_display or "")
-        if not target.strip():
-            return
-        try:
-            self.vlc_proc = launch_final_stream_viewer(
-                FinalStreamViewerSpec(
-                    target=target,
-                    ffmpeg_bin=str(getattr(self.args, "ffmpeg_bin", "") or ""),
-                    backend="vlc-low-latency",
-                    window_title="Hogak Transmit VLC",
-                    width=int(self.latest_metrics.get("transmit_width") or 0),
-                    height=int(self.latest_metrics.get("transmit_height") or 0),
-                    fps=float(self.latest_metrics.get("transmit_written_fps") or 0.0),
-                )
-            )
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} vlc launched")
-        except Exception as exc:
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} vlc launch failed: {exc}")
+        _ = self.open_vlc_low_latency
+        return
 
     def poll_runtime(self) -> tuple[str, np.ndarray | None, np.ndarray | None, np.ndarray | None, str]:
-        legacy = _legacy_cli()
-        if self.runtime_client is None:
-            return self.dashboard_snapshot()
-        while True:
-            event = self.runtime_client.read_event(timeout_sec=0.01)
-            if event is None:
-                break
-            if event.type == "metrics":
-                self.latest_metrics = legacy._decorate_pipeline_metrics(
-                    event.payload,
-                    probe_source=self.probe_source,
-                    probe_target=self.probe_target_for_viewer,
-                    transmit_target=self.transmit_target_for_display,
-                )
-                self.recent_events.appendleft(
-                    f"{time.strftime('%H:%M:%S')} fps={float(self.latest_metrics.get('stitch_actual_fps') or 0.0):.2f} "
-                    f"pair={float(self.latest_metrics.get('pair_skew_ms_mean') or 0.0):.2f}ms"
-                )
-                self._maybe_launch_vlc()
-            elif event.type == "hello":
-                self.hello_payload = dict(event.payload)
-            else:
-                self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} event={event.type}")
+        self.recent_events.appendleft(
+            f"{time.strftime('%H:%M:%S')} runtime polling is handled by the React operator surface"
+        )
         return self.dashboard_snapshot()
 
     def open_external_viewer(self) -> tuple[str, np.ndarray | None, np.ndarray | None, np.ndarray | None, str]:
-        target = str(getattr(self.args, "viewer_target", "") or self.probe_target_for_viewer or "")
-        if not target.strip():
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} external viewer unavailable: probe target missing")
-            return self.dashboard_snapshot()
-        try:
-            self.viewer_proc = launch_final_stream_viewer(
-                FinalStreamViewerSpec(
-                    target=target,
-                    ffmpeg_bin=str(getattr(self.args, "ffmpeg_bin", "") or ""),
-                    backend=str(getattr(self.args, "viewer_backend", "auto") or "auto"),
-                    window_title=str(getattr(self.args, "viewer_title", "Hogak Probe Viewer")),
-                    width=int(self.latest_metrics.get("probe_width") or 0),
-                    height=int(self.latest_metrics.get("probe_height") or 0),
-                    fps=float(self.latest_metrics.get("probe_written_fps") or 0.0),
-                )
-            )
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} external viewer launched")
-        except Exception as exc:
-            self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} external viewer launch failed: {exc}")
+        self.recent_events.appendleft(
+            f"{time.strftime('%H:%M:%S')} external viewer launch is handled by the React operator surface"
+        )
         return self.dashboard_snapshot()
 
     def save_current_distortion(self) -> tuple[str, np.ndarray | None, np.ndarray | None, np.ndarray | None, str]:
@@ -2173,28 +2094,9 @@ class RuntimeUiSession:
 
     def stop_runtime(self) -> tuple[str, np.ndarray | None, np.ndarray | None, np.ndarray | None, str]:
         self.current_step = "dashboard"
-        if self.runtime_preview_worker is not None:
-            self.runtime_preview_worker.stop()
-            self.runtime_preview_worker = None
-        if self.viewer_proc is not None:
-            try:
-                self.viewer_proc.terminate()
-            except Exception:
-                pass
-            self.viewer_proc = None
-        if self.vlc_proc is not None:
-            try:
-                self.vlc_proc.terminate()
-            except Exception:
-                pass
-            self.vlc_proc = None
-        if self.runtime_client is not None:
-            try:
-                self.runtime_client.shutdown()
-            except Exception:
-                pass
-            self.runtime_client = None
-        self.recent_events.appendleft(f"{time.strftime('%H:%M:%S')} runtime stopped")
+        self.recent_events.appendleft(
+            f"{time.strftime('%H:%M:%S')} runtime stop is handled by the React operator surface"
+        )
         return self.dashboard_snapshot()
 
 
@@ -2206,7 +2108,7 @@ def _gradio_v2_tabs_update(gr: Any, selected: str) -> Any:
     return gr.update(selected=selected)
 
 
-def run_native_runtime_gradio(args: argparse.Namespace) -> int:
+def run_native_runtime_gradio(args: argparse.Namespace, *, launch: bool = True) -> int | tuple[Any, str]:
     gr = _import_gradio()
     session = RuntimeUiSession(args)
     css_text = """
@@ -2215,14 +2117,13 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
     .hogak-controls {min-width: 320px;}
     """
     app = gr.Blocks(
-        title="Hogak Native Runtime",
+        title="Hogak Legacy Calibration Bridge",
         analytics_enabled=False,
     )
     with app:
-        gr.Markdown("## Hogak Native Runtime")
+        gr.Markdown("## Hogak Legacy Calibration Bridge")
         gr.Markdown(
-            "Interactive runtime now runs in raw stitch mode only. Use assisted calibration in the web UI, "
-            "review calibration inliers on the stitched preview, and launch runtime only after the active raw homography is ready."
+            "This page now owns calibration and review only. Runtime launch, stop, preview polling, and transmit controls moved to the FastAPI + React operator surface."
         )
         workflow_status = gr.Markdown(value=session.workflow_markdown(), elem_id="hogak-step-header")
         with gr.Tabs(selected="start", elem_id="hogak-runtime-tabs") as workflow_tabs:
@@ -2304,29 +2205,27 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
                     with gr.Column(scale=2, min_width=360, elem_classes=["hogak-controls"]):
                         stitch_review_status = gr.Markdown()
                         stitch_review_show_inliers = gr.Checkbox(value=session.show_calibration_inliers, label="Show calibration inliers")
-                        launch_runtime = gr.Button("Launch runtime", variant="primary", interactive=session.use_current_homography_enabled())
 
-            with gr.Tab("5. Runtime Dashboard", id="dashboard"):
-                with gr.Row():
-                    with gr.Column(scale=2, min_width=320, elem_classes=["hogak-controls"]):
-                        stop_runtime = gr.Button("Stop Runtime", variant="stop")
-                        open_external_viewer = gr.Button("Open External Viewer")
-                        dashboard_show_inliers = gr.Checkbox(value=session.show_calibration_inliers, label="Show calibration inliers")
-                        runtime_events = gr.Textbox(label="Recent events", lines=14)
-                    with gr.Column(scale=3, min_width=420):
-                        runtime_status = gr.Markdown()
-                    with gr.Column(scale=5, min_width=760):
-                        runtime_preview = gr.Image(
-                            type="numpy",
-                            label="Runtime stitched preview",
-                            interactive=False,
-                            height=560,
-                            elem_classes=["hogak-preview"],
+            with gr.Tab("5. Legacy Bridge", id="dashboard"):
+                with gr.Column(elem_classes=["hogak-bridge-panel"]):
+                    gr.Markdown(
+                        "\n".join(
+                            [
+                                "### Runtime operator surface moved",
+                                "- legacy calibration/review stays here during rollout",
+                                "- runtime start/stop, preview polling, and SSE live in the React operator surface",
+                                "- legacy bridge route: `/legacy/calibration`",
+                                "- React routes:",
+                                "  - `/dashboard`",
+                                "  - `/validation`",
+                                "  - `/geometry-compare`",
+                                "  - `/outputs`",
+                                "  - `/artifacts`",
+                            ]
                         )
-                        with gr.Row():
-                            runtime_left_thumb = gr.Image(type="numpy", label="Left raw", interactive=False, height=180)
-                            runtime_right_thumb = gr.Image(type="numpy", label="Right raw", interactive=False, height=180)
-                timer = gr.Timer(1.0)
+                    )
+                    operator_url = gr.Textbox(label="React operator URL", value="http://127.0.0.1:5173/dashboard", interactive=False)
+                    bridge_notes = gr.Markdown(value=session.dashboard_workflow_markdown())
 
         def _start_common(output_standard_value: str, run_calibration_value: bool, open_vlc_value: bool):
             start_md = session.prepare_start(output_standard_value, run_calibration_value, open_vlc_value, False)
@@ -2477,7 +2376,6 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
         def _accept_calibration_action():
             preview, status = session.accept_calibration_review()
             start_md = session.start_markdown()
-            launch_update = gr.update(interactive=session.use_current_homography_enabled())
             use_button = gr.update(interactive=session.use_current_homography_enabled())
             return (
                 _gradio_v2_tabs_update(gr, "stitch-review"),
@@ -2487,7 +2385,6 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
                 preview,
                 status,
                 session.show_calibration_inliers,
-                launch_update,
             )
 
         def _back_to_calibration_action():
@@ -2500,47 +2397,6 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
             session.update_show_calibration_inliers(value)
             preview, status = session.prepare_stitch_review()
             return session.workflow_markdown(), preview, status
-
-        def _runtime_action(action: str):
-            if action == "launch":
-                payload = session.launch_runtime()
-            elif action == "stop":
-                payload = session.stop_runtime()
-            elif action == "viewer":
-                payload = session.open_external_viewer()
-            else:
-                payload = session.poll_runtime()
-            status, preview, left_thumb, right_thumb, events = payload
-            return session.workflow_markdown(), status, preview, left_thumb, right_thumb, events, session.show_calibration_inliers
-
-        def _launch_runtime_action():
-            if not session.use_current_homography_enabled():
-                preview, status = session.prepare_stitch_review()
-                return (
-                    _gradio_v2_tabs_update(gr, "stitch-review"),
-                    session.workflow_markdown(),
-                    status,
-                    preview,
-                    session._corrected_thumbnail("left"),
-                    session._corrected_thumbnail("right"),
-                    "\n".join(session.recent_events),
-                    session.show_calibration_inliers,
-                )
-            return (_gradio_v2_tabs_update(gr, "dashboard"), *_runtime_action("launch"))
-
-        def _stop_runtime_action():
-            return _runtime_action("stop")
-
-        def _open_external_viewer_action():
-            return _runtime_action("viewer")
-
-        def _poll_runtime_action():
-            return _runtime_action("poll")
-
-        def _update_dashboard_inliers(value: bool):
-            session.update_show_calibration_inliers(value)
-            status, preview, left_thumb, right_thumb, events = session.dashboard_snapshot()
-            return session.workflow_markdown(), status, preview, left_thumb, right_thumb, events, session.show_calibration_inliers
 
         start_assisted.click(
             fn=_start_assisted_begin_action,
@@ -2567,7 +2423,7 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
                 use_current_homography,
                 stitch_review_preview,
                 stitch_review_status,
-                launch_runtime,
+                stitch_review_show_inliers,
             ],
         )
         left_calibration_image.select(
@@ -2629,7 +2485,6 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
                 stitch_review_preview,
                 stitch_review_status,
                 stitch_review_show_inliers,
-                launch_runtime,
             ],
         )
         back_to_calibration.click(
@@ -2641,11 +2496,9 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
             inputs=[stitch_review_show_inliers],
             outputs=[workflow_status, stitch_review_preview, stitch_review_status],
         )
-        launch_runtime.click(fn=_launch_runtime_action, outputs=[workflow_tabs, workflow_status, runtime_status, runtime_preview, runtime_left_thumb, runtime_right_thumb, runtime_events, dashboard_show_inliers])
-        stop_runtime.click(fn=_stop_runtime_action, outputs=[workflow_status, runtime_status, runtime_preview, runtime_left_thumb, runtime_right_thumb, runtime_events, dashboard_show_inliers])
-        open_external_viewer.click(fn=_open_external_viewer_action, outputs=[workflow_status, runtime_status, runtime_preview, runtime_left_thumb, runtime_right_thumb, runtime_events, dashboard_show_inliers])
-        dashboard_show_inliers.change(fn=_update_dashboard_inliers, inputs=[dashboard_show_inliers], outputs=[workflow_status, runtime_status, runtime_preview, runtime_left_thumb, runtime_right_thumb, runtime_events, dashboard_show_inliers])
-        timer.tick(fn=_poll_runtime_action, outputs=[workflow_status, runtime_status, runtime_preview, runtime_left_thumb, runtime_right_thumb, runtime_events, dashboard_show_inliers])
+
+    if not launch:
+        return app, css_text
 
     preferred_port = max(1, int(getattr(args, "ui_port", DEFAULT_UI_PORT) or DEFAULT_UI_PORT))
     resolved_port = _pick_available_local_port(preferred_port)
@@ -2669,3 +2522,10 @@ def run_native_runtime_gradio(args: argparse.Namespace) -> int:
     except KeyboardInterrupt:
         session.stop_runtime()
     return 0
+
+
+def build_native_runtime_gradio(args: argparse.Namespace) -> tuple[Any, str]:
+    built = run_native_runtime_gradio(args, launch=False)
+    if not isinstance(built, tuple) or len(built) != 2:
+        raise RuntimeError("Failed to build the Gradio app without launching it.")
+    return built

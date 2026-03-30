@@ -34,6 +34,29 @@ public:
     void tick();
 
 private:
+    struct RuntimeGeometryState {
+        std::string model = "planar-homography";
+        std::string alignment_model = "homography";
+        std::string artifact_path;
+        cv::Size output_size{};
+        cv::Mat alignment_matrix{};
+        cv::Mat cylindrical_left_map_x{};
+        cv::Mat cylindrical_left_map_y{};
+        cv::Mat cylindrical_right_map_x{};
+        cv::Mat cylindrical_right_map_y{};
+        double focal_px = 0.0;
+        double center_x = 0.0;
+        double center_y = 0.0;
+        double residual_alignment_error_px = 0.0;
+        int seam_transition_px = 64;
+        double seam_smoothness_penalty = 4.0;
+        double seam_temporal_penalty = 2.0;
+        bool exposure_enabled = true;
+        double exposure_gain_min = 0.7;
+        double exposure_gain_max = 1.4;
+        double exposure_bias_abs_max = 35.0;
+    };
+
     struct DistortionState {
         bool enabled = false;
         std::string source = "off";
@@ -83,6 +106,47 @@ private:
         double offset_confidence = 0.0;
     };
 
+    bool load_runtime_geometry_locked();
+    bool load_runtime_geometry_from_file(const std::string& path, RuntimeGeometryState* state);
+    bool prepare_runtime_geometry_locked(const cv::Size& left_size, const cv::Size& right_size);
+    void apply_runtime_geometry_to_metrics_locked();
+    bool build_cylindrical_maps_locked(
+        const cv::Size& image_size,
+        double focal_px,
+        double center_x,
+        double center_y,
+        cv::Mat* map_x_out,
+        cv::Mat* map_y_out) const;
+    bool build_affine_output_plan_locked(
+        const cv::Size& left_size,
+        const cv::Size& right_size,
+        const cv::Mat& affine_matrix,
+        cv::Size* output_size_out,
+        cv::Rect* left_roi_out,
+        cv::Rect* overlap_roi_out,
+        cv::Mat* adjusted_affine_out);
+    void update_seam_path_jitter_locked(const std::vector<int>& seam_path);
+    bool compute_exposure_compensation_locked(
+        const cv::Mat& canvas_left,
+        const cv::Mat& warped_right,
+        const cv::Mat& overlap_mask,
+        cv::Mat* compensated_right_out,
+        double* gain_out,
+        double* bias_out) const;
+    bool build_dynamic_seam_path_locked(
+        const cv::Mat& canvas_left,
+        const cv::Mat& warped_right,
+        const cv::Mat& overlap_mask,
+        std::vector<int>* seam_path_out) const;
+    void blend_with_dynamic_seam_locked(
+        const cv::Mat& canvas_left,
+        const cv::Mat& warped_right,
+        const cv::Mat& left_mask,
+        const cv::Mat& right_mask,
+        const std::vector<int>& seam_path,
+        int transition_px,
+        cv::Mat* stitched_out) const;
+
     void clear_calibration_state_locked();
     void update_metrics_locked();
     bool restart_reader_locked(bool left_reader, const char* reason);
@@ -122,6 +186,7 @@ private:
     EngineConfig config_{};
     EngineMetrics metrics_{};
     std::atomic<bool> running_{false};
+    RuntimeGeometryState runtime_geometry_{};
     std::int64_t last_left_seq_ = 0;
     std::int64_t last_right_seq_ = 0;
     std::int64_t last_service_pair_ts_ns_ = 0;
@@ -153,6 +218,7 @@ private:
     bool gpu_available_ = false;
     bool gpu_nv12_input_supported_ = true;
     std::string homography_distortion_reference_ = "raw";
+    std::string runtime_geometry_source_path_{};
     cv::Mat homography_{};
     cv::Mat homography_adjusted_{};
     cv::Mat left_mask_template_{};
@@ -166,6 +232,7 @@ private:
     cv::Mat weight_left_3c_{};
     cv::Mat weight_right_3c_{};
     cv::Mat previous_stitched_probe_gray_{};
+    std::vector<int> previous_seam_path_{};
     cv::Rect left_roi_{};
     cv::Rect overlap_roi_{};
     cv::Size output_size_{};
@@ -210,8 +277,16 @@ private:
     cv::cuda::GpuMat gpu_overlap_u8_{};
     cv::cuda::GpuMat gpu_output_scaled_{};
     cv::cuda::GpuMat gpu_output_canvas_{};
+    cv::Mat cylindrical_left_map_x_{};
+    cv::Mat cylindrical_left_map_y_{};
+    cv::Mat cylindrical_right_map_x_{};
+    cv::Mat cylindrical_right_map_y_{};
     DistortionState left_distortion_{};
     DistortionState right_distortion_{};
+    double last_exposure_gain_ = 1.0;
+    double last_exposure_bias_ = 0.0;
+    double last_residual_alignment_error_px_ = 0.0;
+    double last_seam_path_jitter_px_ = 0.0;
     std::vector<hogak::input::BufferedFrameInfo> left_buffered_infos_cache_{};
     std::vector<hogak::input::BufferedFrameInfo> right_buffered_infos_cache_{};
     std::unique_ptr<hogak::output::OutputWriter> output_writer_{};

@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "platform": "windows-nvidia",
+  "cmake": {
+    "minimum": "3.24"
+  },
+  "node": {
+    "supported": [
+      "24"
+    ]
+  },
+  "npm": {
+    "supported": [
+      "11"
+    ]
+  },
+  "visual_studio": {
+    "generator": "Visual Studio 17 2022"
+  },
+  "python": {
+    "supported": [
+      "3.12"
+    ]
+  },
+  "backend": {
+    "entrypoint": "python -m stitching.cli operator-server",
+    "requires": [
+      "fastapi",
+      "uvicorn"
+    ]
+  },
+  "frontend": {
+    "path": "../frontend",
+    "build_command": "npm run build",
+    "dev_command": "npm run dev"
+  },
+  "cuda": {
+    "required": true,
+    "environment_keys": [
+      "CUDAToolkit_ROOT",
+      "CUDA_PATH",
+      "CUDA_PATH_V13_1"
+    ]
+  },
+  "ffmpeg_dev": {
+    "required": true,
+    "environment_keys": [
+      "HOGAK_FFMPEG_DEV_ROOT",
+      "FFMPEG_DEV_ROOT"
+    ]
+  },
+  "opencv": {
+    "required": true,
+    "environment_keys": [
+      "OpenCV_DIR",
+      "OPENCV_DIR"
+    ],
+    "repo_local_candidate": "../.third_party/opencv-python/_skbuild/win-amd64-3.12/cmake-install/x64/vc17/staticlib"
+  },
+  "notes": [
+    "This manifest documents the pinned native-runtime plus operator-surface toolchain expectations.",
+    "Use native_runtime/CMakePresets.json and native_runtime/CMakeUserPresets.example.json together with this manifest.",
+    "FastAPI + React are part of the supported baseline and are checked by bootstrap_native_runtime.ps1."
+  ]
+}

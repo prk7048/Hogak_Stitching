@@ -452,6 +452,7 @@ bool GpuDirectOutputWriter::start(
         fps_ = fps;
         last_error_ = "gpu-direct dependency not ready: " + gpu_direct_dependency_status();
         command_line_ = "gpu-direct://dependency-missing";
+        runtime_mode_ = "native-nvenc-unavailable";
         return false;
     }
 
@@ -475,6 +476,7 @@ bool GpuDirectOutputWriter::start(
         frames_written_ = 0;
         frames_dropped_ = 0;
         last_error_.clear();
+        runtime_mode_ = "native-nvenc-bridge";
         command_line_ =
             "gpu-direct://provider=" + std::string(gpu_direct_provider()) +
             " codec=" + effective_codec_ +
@@ -571,6 +573,11 @@ std::string GpuDirectOutputWriter::effective_codec() const {
 std::string GpuDirectOutputWriter::command_line() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return command_line_;
+}
+
+std::string GpuDirectOutputWriter::runtime_mode() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return runtime_mode_;
 }
 
 std::string GpuDirectOutputWriter::muxer() const {
@@ -929,6 +936,11 @@ void GpuDirectOutputWriter::run() {
             return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
+        if (std::string(mode) == "cuda-hwframes-bgra-direct-fill") {
+            runtime_mode_ = "native-nvenc-direct";
+        } else {
+            runtime_mode_ = "native-nvenc-bridge";
+        }
         const auto mode_pos = command_line_.find(" mode=");
         if (mode_pos == std::string::npos) {
             command_line_ += " mode=";

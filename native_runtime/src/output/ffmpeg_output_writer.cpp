@@ -397,6 +397,10 @@ std::string FfmpegOutputWriter::command_line() const {
     return command_line_;
 }
 
+std::string FfmpegOutputWriter::runtime_mode() const {
+    return "ffmpeg-process";
+}
+
 std::string FfmpegOutputWriter::muxer() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return muxer_;

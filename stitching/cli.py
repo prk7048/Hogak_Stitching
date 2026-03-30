@@ -9,8 +9,18 @@ from stitching.runtime_site_config import RuntimeSiteConfigError
 
 
 CURRENT_MAIN_PATH_NOTE = (
-    "Current Python entrypoints: native-calibrate -> native-runtime."
+    "Current Python entrypoints: prepare-runtime/native-calibrate -> run-runtime/native-runtime -> validate-runtime/native-validate, plus operator-server for the FastAPI operator surface."
 )
+
+COMMAND_ALIASES = {
+    "prepare-runtime": "native-calibrate",
+    "run-runtime": "native-runtime",
+    "validate-runtime": "native-validate",
+}
+
+
+def _normalize_command_name(command: str) -> str:
+    return COMMAND_ALIASES.get(str(command), str(command))
 
 
 def _bootstrap_runtime_config(argv: list[str]) -> tuple[argparse.ArgumentParser, list[str]]:
@@ -194,12 +204,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     native_calib_cmd = subparsers.add_parser(
         "native-calibrate",
+        aliases=["prepare-runtime"],
         help="Current main path: capture RTSP frame pair and save runtime homography",
     )
     _add_native_calibration_args(native_calib_cmd)
 
     native_cmd = subparsers.add_parser(
         "native-runtime",
+        aliases=["run-runtime"],
         help="Current main path: launch native runtime monitor and optional viewers",
     )
     from stitching.native_runtime_cli import add_native_runtime_args
@@ -208,12 +220,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     native_validate_cmd = subparsers.add_parser(
         "native-validate",
+        aliases=["validate-runtime"],
         help="Run strict fresh 30 validation and write a JSON report",
     )
     from stitching.native_runtime_validation import add_native_validation_args
 
     add_native_validation_args(native_validate_cmd)
-    return parser.parse_args(remaining)
+
+    operator_server_cmd = subparsers.add_parser(
+        "operator-server",
+        help="Run the FastAPI runtime operator backend and optional legacy calibration bridge",
+    )
+    operator_server_cmd.add_argument("--host", default="127.0.0.1", help="FastAPI bind host (default: 127.0.0.1)")
+    operator_server_cmd.add_argument("--port", type=int, default=8088, help="FastAPI bind port (default: 8088)")
+    args = parser.parse_args(remaining)
+    args.command = _normalize_command_name(args.command)
+    return args
 
 
 def main() -> int:
@@ -234,6 +256,13 @@ def main() -> int:
             from stitching.native_runtime_validation import run_native_validation
 
             return int(run_native_validation(args))
+
+        if args.command == "operator-server":
+            from stitching.runtime_backend import main as run_runtime_backend
+
+            os.environ["HOGAK_BACKEND_HOST"] = str(args.host)
+            os.environ["HOGAK_BACKEND_PORT"] = str(int(args.port))
+            return int(run_runtime_backend())
     except RuntimeSiteConfigError as exc:
         print(f"runtime config error: {exc}", file=sys.stderr)
         return 2

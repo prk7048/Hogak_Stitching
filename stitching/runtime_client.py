@@ -8,7 +8,10 @@ import subprocess
 import threading
 from typing import Any
 
-from stitching.runtime_contract import EngineCommand, SUPPORTED_RELOAD_CONFIG_FIELDS
+from stitching.runtime_contract import (
+    EngineCommand,
+    normalize_schema_v2_reload_payload,
+)
 from stitching.runtime_launcher import RuntimeLaunchSpec, launch_native_runtime
 
 
@@ -24,6 +27,20 @@ class RuntimeEventMessage:
     def payload(self) -> dict[str, Any]:
         payload = self.raw.get("payload", {})
         return payload if isinstance(payload, dict) else {}
+
+    @property
+    def seq(self) -> int:
+        try:
+            return int(self.raw.get("seq", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    @property
+    def timestamp_sec(self) -> float:
+        try:
+            return float(self.raw.get("timestamp_sec", 0.0))
+        except (TypeError, ValueError):
+            return 0.0
 
 
 class RuntimeClient:
@@ -128,10 +145,8 @@ class RuntimeClient:
         self.send_command("request_snapshot", {"kind": "metrics"})
 
     def reload_config(self, payload: dict[str, Any]) -> None:
-        unsupported = sorted(set(payload) - set(SUPPORTED_RELOAD_CONFIG_FIELDS))
-        if unsupported:
-            raise ValueError(f"unsupported reload_config fields: {', '.join(unsupported)}")
-        self.send_command("reload_config", payload)
+        normalized = normalize_schema_v2_reload_payload(payload)
+        self.send_command("reload_config", normalized)
 
     def reset_auto_calibration(self, *, homography_file: str = "") -> None:
         payload: dict[str, Any] = {}
