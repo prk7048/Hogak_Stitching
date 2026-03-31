@@ -1,12 +1,10 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 
 import { MetricCard } from "../components/MetricCard";
 import { PageHeader } from "../components/PageHeader";
 import {
   describeRuntimeActionResult,
   outputReceiveUri,
-  prepareRuntime,
   startRuntime,
   stopRuntime,
 } from "../lib/api";
@@ -36,9 +34,9 @@ function text(value: unknown, fallback = "-"): string {
 }
 
 export function DashboardPage() {
-  const { state, events, preview, streamState, refreshPreview, refreshRuntime } = useRuntimeFeed();
+  const { state, events, preview, streamState, refreshRuntime } = useRuntimeFeed();
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [actionStatus, setActionStatus] = useState("Review the active geometry and prepare the runtime when you are ready.");
+  const [actionStatus, setActionStatus] = useState("시작 버튼을 누르면 자동 준비와 실행이 한 번에 진행됩니다.");
 
   const probeReceiveUri = outputReceiveUri(state.output_target);
   const transmitReceiveUri = outputReceiveUri(state.production_output_target);
@@ -56,10 +54,8 @@ export function DashboardPage() {
   const geometryFallbackOnly = Boolean(state.geometry_fallback_only);
 
   const nextAction = state.running
-    ? "Runtime is running. Check transmit from the receive URI, not from the probe preview."
-    : state.prepared
-      ? "Runtime is prepared. Start is unblocked if the current geometry and GPU-only checks look correct."
-      : "Prepare the runtime to lock the active artifact and GPU-only launch plan.";
+    ? "런타임이 실행 중입니다. 외부 플레이어에서 transmit 수신 주소로 확인하세요."
+    : "Start 버튼 한 번으로 자동 캘리브레이션(필요 시), 준비, 실행까지 처리합니다.";
 
   const healthMessage =
     gpuOnlyMode && !gpuOnlyReady
@@ -77,7 +73,6 @@ export function DashboardPage() {
       const result = await action();
       setActionStatus(`${label}: ${describeRuntimeActionResult(result)}`);
       await refreshRuntime();
-      refreshPreview();
     } catch (error) {
       setActionStatus(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -89,8 +84,8 @@ export function DashboardPage() {
     <section className="page">
       <PageHeader
         eyebrow="Operate"
-        title="Prepare and start runtime"
-        description="This branch keeps probe disabled by default and prioritizes transmit throughput. Virtual-center-rectilinear is the default operator geometry. Cylindrical-affine is rollback-only through explicit artifact paths."
+        title="원클릭 실행"
+        description="다른 옵션은 숨기고 시작 버튼 한 번으로 바로 송출하는 흐름으로 단순화했습니다. 준비가 안 된 경우에는 자동 준비를 먼저 수행하고, geometry artifact 가 없으면 자동 캘리브레이션을 시도합니다."
         status={
           <>
             <strong>{nextAction}</strong>
@@ -102,15 +97,7 @@ export function DashboardPage() {
             <button
               className="action-button"
               disabled={busyAction !== null}
-              onClick={() => void runAction("Prepare runtime", () => prepareRuntime())}
-              type="button"
-            >
-              Prepare
-            </button>
-            <button
-              className="action-button"
-              disabled={busyAction !== null}
-              onClick={() => void runAction("Start runtime", () => startRuntime())}
+              onClick={() => void runAction("Start", () => startRuntime())}
               type="button"
             >
               Start
@@ -118,29 +105,21 @@ export function DashboardPage() {
             <button
               className="action-button secondary"
               disabled={busyAction !== null}
-              onClick={() => void runAction("Stop runtime", () => stopRuntime())}
+              onClick={() => void runAction("Stop", () => stopRuntime())}
               type="button"
             >
               Stop
-            </button>
-            <button
-              className="action-button secondary"
-              disabled={busyAction !== null || previewDisabled}
-              onClick={refreshPreview}
-              type="button"
-            >
-              Refresh preview
             </button>
           </>
         }
       />
 
       <section className={`status-strip${outputDropCount > 0 || (gpuOnlyMode && !gpuOnlyReady) ? " warn" : ""}`}>
-        <div className="status-strip-title">Operator summary</div>
+        <div className="status-strip-title">실행 요약</div>
         <div className="status-strip-body">
           {previewDisabled
-            ? "Probe preview is disabled in GPU-only mode. Confirm motion from the transmit receive URI."
-            : "Probe preview is only a convenience path. The transmit receive URI is the real output truth."}
+            ? "GPU-only 모드에서는 probe preview 를 끄고 transmit 만 사용합니다. 외부 플레이어에서는 transmit 수신 주소만 보면 됩니다."
+            : "preview 는 참고용이고, 실제 출력 확인은 transmit 수신 주소 기준으로 하세요."}
         </div>
         <div className="status-strip-footnote">{healthMessage}</div>
       </section>
@@ -200,15 +179,15 @@ export function DashboardPage() {
 
       <div className="panel-grid panel-grid-main">
         <section className="panel panel-preview">
-          <div className="panel-title">Operator preview</div>
+          <div className="panel-title">미리보기</div>
           <div className="panel-subtitle">
             {previewDisabled
-              ? "Probe is intentionally off in this branch. Validate motion from the main transmit path."
-              : "Preview is probe-only and should not be used as the final output truth."}
+              ? "이 브랜치에서는 probe 를 끄고 transmit 경로에 집중합니다."
+              : "preview 는 참고용이며 최종 출력 확인은 transmit 주소로 하세요."}
           </div>
           {previewDisabled ? (
             <div className="muted">
-              Use <code>{transmitReceiveUri || "missing receive URI"}</code> in an external player to inspect the real transmit path.
+              외부 플레이어에서 <code>{transmitReceiveUri || "missing receive URI"}</code> 를 열어 실제 송출 화면을 확인하세요.
             </div>
           ) : (
             <img
@@ -227,7 +206,7 @@ export function DashboardPage() {
         </section>
 
         <section className="panel panel-stack">
-          <div className="panel-title">Geometry truth</div>
+          <div className="panel-title">Geometry 상태</div>
           <div className="definition-list">
             <div className="definition-item">
               <span className="definition-label">Artifact path</span>
@@ -246,36 +225,30 @@ export function DashboardPage() {
               <span className="definition-value">{geometryLaunchReason}</span>
             </div>
           </div>
-          <Link className="inline-link" to="/geometry-compare">
-            Open geometry candidate and rollback view
-          </Link>
         </section>
 
         <section className="panel panel-stack">
-          <div className="panel-title">Output truth</div>
+          <div className="panel-title">출력 확인</div>
           <div className="definition-list">
             <div className="definition-item">
-              <span className="definition-label">Transmit receive URI</span>
+              <span className="definition-label">외부 플레이어 수신 주소</span>
               <span className="definition-value">{transmitReceiveUri || "unavailable"}</span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">Transmit drops</span>
+              <span className="definition-label">프레임 드롭</span>
               <span className="definition-value">{String(outputDropCount)}</span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">Probe path</span>
+              <span className="definition-label">Probe 경로</span>
               <span className="definition-value">
                 {previewDisabled ? "disabled (gpu-only)" : probeReceiveUri || "missing receive URI"}
               </span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">GPU reason</span>
+              <span className="definition-label">GPU 상태 사유</span>
               <span className="definition-value">{text(state.gpu_reason)}</span>
             </div>
           </div>
-          <Link className="inline-link" to="/outputs">
-            Open output details
-          </Link>
         </section>
       </div>
 

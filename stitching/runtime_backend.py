@@ -17,6 +17,12 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
+from stitching.native_calibration import ensure_runtime_raw_homography
+from stitching.project_defaults import (
+    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+    DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
+    DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+)
 from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import geometry_rollout_metadata, normalize_schema_v2_reload_payload
 from stitching.runtime_geometry_artifact import (
@@ -119,7 +125,7 @@ npm run build</pre>
           <li>런타임 API 는 계속 <code>/api/runtime/*</code> 에서 사용할 수 있습니다.</li>
           <li>캘리브레이션 화면은 React 번들이 준비되면 함께 표시됩니다.</li>
           <li>기존 bridge 는 제거되었고, <code>/legacy/calibration</code> 은 <code>/calibration/start</code> 로 이동합니다.</li>
-          <li>UI 가 보이더라도 stitched 출력은 <code>준비 (Prepare)</code> 후 <code>시작 (Start)</code> 을 눌러야 송출됩니다.</li>
+          <li>이 브랜치에서는 대시보드의 <code>시작 (Start)</code> 버튼 한 번으로 자동 준비 후 바로 송출됩니다.</li>
         </ul>
       </div>
     </main>
@@ -242,6 +248,134 @@ class RuntimeService:
         self._events.append(record)
         self._event_condition.notify_all()
         return record
+
+    @staticmethod
+    def _receive_uri_from_target(target: str) -> str:
+        text = str(target or "").strip()
+        if not text.startswith("udp://"):
+            return text
+        endpoint = text.split("?", 1)[0][len("udp://") :]
+        host_port = endpoint[1:] if endpoint.startswith("@") else endpoint
+        separator = host_port.rfind(":")
+        if separator < 0:
+            return text
+        port = host_port[separator + 1 :].strip()
+        if not port:
+            return text
+        return f"udp://@:{port}"
+
+    def _ensure_default_geometry_artifact(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
+        request = request or {}
+        explicit_artifact_path = self._resolve_requested_artifact_path(request)
+        if explicit_artifact_path is not None:
+            if not explicit_artifact_path.exists():
+                raise ValueError(f"requested geometry artifact does not exist: {explicit_artifact_path}")
+            artifact = load_runtime_geometry_artifact(explicit_artifact_path)
+            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            return {
+                "calibrated": False,
+                "artifact_path": str(explicit_artifact_path),
+                "geometry_model": rollout["geometry_model"],
+                "launch_ready": bool(rollout["launch_ready"]),
+                "message": "explicit geometry artifact selected",
+            }
+
+        site_config = load_runtime_site_config()
+        cameras = site_config.get("cameras", {})
+        paths = site_config.get("paths", {})
+        runtime = site_config.get("runtime", {})
+        request_inputs = request.get("inputs") if isinstance(request.get("inputs"), dict) else {}
+        request_runtime = request.get("runtime") if isinstance(request.get("runtime"), dict) else {}
+
+        left_rtsp = str(
+            request.get("left_rtsp")
+            or ((request_inputs.get("left") or {}).get("url") if isinstance(request_inputs.get("left"), dict) else "")
+            or cameras.get("left_rtsp")
+            or ""
+        ).strip()
+        right_rtsp = str(
+            request.get("right_rtsp")
+            or ((request_inputs.get("right") or {}).get("url") if isinstance(request_inputs.get("right"), dict) else "")
+            or cameras.get("right_rtsp")
+            or ""
+        ).strip()
+        require_configured_rtsp_urls(left_rtsp, right_rtsp, context="runtime backend")
+
+        homography_file = Path(
+            str(request.get("homography_file") or paths.get("homography_file") or DEFAULT_NATIVE_HOMOGRAPHY_PATH)
+        ).expanduser()
+        geometry_artifact = runtime_geometry_artifact_path(homography_file)
+
+        if geometry_artifact.exists():
+            artifact = load_runtime_geometry_artifact(geometry_artifact)
+            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            if bool(rollout["launch_ready"]):
+                return {
+                    "calibrated": False,
+                    "artifact_path": str(geometry_artifact),
+                    "geometry_model": rollout["geometry_model"],
+                    "launch_ready": True,
+                    "message": "existing launch-ready geometry artifact reused",
+                }
+
+        debug_dir = Path(str(paths.get("calibration_debug_dir") or DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR)).expanduser()
+        inliers_output_path = Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE).expanduser()
+        rtsp_transport = str(
+            request_runtime.get("rtsp_transport")
+            or runtime.get("rtsp_transport")
+            or (request_inputs.get("left") or {}).get("transport")
+            or "tcp"
+        )
+        rtsp_timeout_sec = float(
+            request_runtime.get("rtsp_timeout_sec")
+            or runtime.get("rtsp_timeout_sec")
+            or (request_inputs.get("left") or {}).get("timeout_sec")
+            or 10.0
+        )
+
+        updated_reference, _backup_path, calibration_result, messages = ensure_runtime_raw_homography(
+            left_rtsp=left_rtsp,
+            right_rtsp=right_rtsp,
+            output_path=homography_file,
+            inliers_output_path=inliers_output_path,
+            debug_dir=debug_dir,
+            rtsp_transport=rtsp_transport,
+            rtsp_timeout_sec=rtsp_timeout_sec,
+            warmup_frames=45,
+            process_scale=1.0,
+            backup_existing=True,
+        )
+        if not geometry_artifact.exists():
+            raise ValueError(f"automatic calibration finished but geometry artifact is missing: {geometry_artifact}")
+
+        artifact = load_runtime_geometry_artifact(geometry_artifact)
+        rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+        if not bool(rollout["launch_ready"]):
+            raise ValueError(str(rollout["launch_ready_reason"] or "calibrated geometry artifact is not launch-ready"))
+        message_parts = [part for part in messages if str(part).strip()]
+        if calibration_result is not None:
+            message_parts.append(
+                "automatic calibration saved "
+                f"{rollout['geometry_model']} (matches={int(calibration_result.get('matches_count') or 0)}, "
+                f"inliers={int(calibration_result.get('inliers_count') or 0)})"
+            )
+        elif updated_reference:
+            message_parts.append(f"geometry prepared with reference={updated_reference}")
+        self._record_event(
+            "status",
+            {
+                "status": "auto_calibrated",
+                "geometry_artifact_path": str(geometry_artifact),
+                "geometry_model": rollout["geometry_model"],
+            },
+        )
+        return {
+            "calibrated": True,
+            "artifact_path": str(geometry_artifact),
+            "geometry_model": rollout["geometry_model"],
+            "launch_ready": True,
+            "message": " / ".join(message_parts) if message_parts else "automatic calibration completed",
+        }
 
     def _build_plan(self, request: dict[str, Any] | None = None) -> RuntimePlan:
         site_config = load_runtime_site_config()
@@ -934,6 +1068,7 @@ class RuntimeService:
     def prepare(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             try:
+                auto_geometry = self._ensure_default_geometry_artifact(request)
                 plan = self._build_plan(request)
                 blockers = self._gpu_only_blockers_for_plan(plan)
                 self._gpu_only_blockers = blockers
@@ -947,7 +1082,13 @@ class RuntimeService:
             self._last_status = "prepared"
             self._last_error = ""
             self._record_event("status", {"status": "prepared", "geometry_artifact_path": str(plan.geometry_artifact_path)})
-            return {"ok": True, "prepared": plan.summary, "state": self._snapshot_locked()}
+            return {
+                "ok": True,
+                "prepared": plan.summary,
+                "auto_calibrated": bool(auto_geometry.get("calibrated")),
+                "message": str(auto_geometry.get("message") or "runtime prepared"),
+                "state": self._snapshot_locked(),
+            }
 
     def _start_event_pump(self) -> None:
         if self._event_pump_thread is not None:
@@ -980,9 +1121,12 @@ class RuntimeService:
             if self._supervisor is not None and self._supervisor.process.poll() is None:
                 self._last_status = "already_running"
                 return {"ok": True, "state": self._snapshot_locked()}
+            auto_prepare_result: dict[str, Any] | None = None
             if self._prepared_plan is None:
-                self._prepared_plan = self._build_plan(request)
+                auto_prepare_result = self.prepare(request)
             plan = self._prepared_plan
+            if plan is None:
+                raise ValueError("runtime plan is unavailable after automatic prepare")
             blockers = self._gpu_only_blockers_for_plan(plan)
             self._gpu_only_blockers = blockers
             if blockers:
@@ -1010,7 +1154,21 @@ class RuntimeService:
             self._last_status = "running"
             self._last_error = ""
             self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid})
-            return {"ok": True, "state": self._snapshot_locked()}
+            transmit_receive_uri = self._receive_uri_from_target(plan.summary.get("transmit_target", ""))
+            start_message = (
+                f"런타임을 시작했습니다. 외부 플레이어에서 {transmit_receive_uri or plan.summary.get('transmit_target', '')} 를 여세요."
+            )
+            if auto_prepare_result is not None:
+                prepare_message = str(auto_prepare_result.get("message") or "").strip()
+                if prepare_message:
+                    start_message = f"{prepare_message} / {start_message}"
+            return {
+                "ok": True,
+                "auto_prepared": auto_prepare_result is not None,
+                "auto_calibrated": bool(auto_prepare_result and auto_prepare_result.get("auto_calibrated")),
+                "message": start_message,
+                "state": self._snapshot_locked(),
+            }
 
     def reload(self, payload: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_schema_v2_reload_payload(payload)
