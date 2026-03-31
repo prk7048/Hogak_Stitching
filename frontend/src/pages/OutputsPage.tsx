@@ -3,6 +3,7 @@ import { useState } from "react";
 import { MetricCard } from "../components/MetricCard";
 import {
   describeRuntimeActionResult,
+  ffplayReceiveExample,
   outputReachabilityHint,
   outputReceiveUri,
   startRuntime,
@@ -18,6 +19,8 @@ export function OutputsPage() {
   const transmitTarget = String(state.production_output_target ?? "");
   const probeReceiveUri = outputReceiveUri(probeTarget);
   const transmitReceiveUri = outputReceiveUri(transmitTarget);
+  const probeReceiveExample = ffplayReceiveExample(probeTarget);
+  const transmitReceiveExample = ffplayReceiveExample(transmitTarget);
   const probeReachability = outputReachabilityHint(probeTarget);
   const transmitReachability = outputReachabilityHint(transmitTarget);
 
@@ -42,7 +45,8 @@ export function OutputsPage() {
           <div className="eyebrow">Outputs</div>
           <h2>Make the active writer path explicit</h2>
           <p>
-            The operator UI should reflect the true transmit mode instead of assuming the fastest-looking path is active.
+            Probe preview and transmit are separate surfaces. The dashboard preview is a probe JPEG view, while transmit
+            is the actual output stream that should be checked with a receiver.
           </p>
         </div>
       </div>
@@ -61,6 +65,12 @@ export function OutputsPage() {
         <MetricCard label="Transmit target" value={transmitTarget || "n/a"} />
         <MetricCard label="Probe receive URI" value={probeReceiveUri || "n/a"} />
         <MetricCard label="Transmit receive URI" value={transmitReceiveUri || "n/a"} />
+        <MetricCard label="Probe drops" value={String(state.output_frames_dropped ?? 0)} />
+        <MetricCard
+          label="Transmit drops"
+          value={String(state.production_output_frames_dropped ?? 0)}
+          tone={Number(state.production_output_frames_dropped ?? 0) > 0 ? "warn" : "accent"}
+        />
       </div>
       <section className="panel">
         <div className="panel-title">External player notes</div>
@@ -68,8 +78,11 @@ export function OutputsPage() {
           {[
             probeReachability ? `Probe: ${probeReachability}` : "Probe: target reachable from current host rules looks normal.",
             transmitReachability ? `Transmit: ${transmitReachability}` : "Transmit: target reachable from current host rules looks normal.",
-            probeReceiveUri ? `Probe receive example: ffplay -fflags nobuffer -flags low_delay -f mpegts -i ${probeReceiveUri}` : "",
-            transmitReceiveUri ? `Transmit receive example: ffplay -fflags nobuffer -flags low_delay -f mpegts -i ${transmitReceiveUri}` : "",
+            probeReceiveUri ? `Probe receive URI: ${probeReceiveUri}` : "",
+            transmitReceiveUri ? `Transmit receive URI: ${transmitReceiveUri}` : "",
+            probeReceiveExample ? `Probe ffplay example: ${probeReceiveExample}` : "",
+            transmitReceiveExample ? `Transmit ffplay example: ${transmitReceiveExample}` : "",
+            "UDP examples include fifo_size and overrun_nonfatal so short bursts do not immediately break playback.",
           ]
             .filter(Boolean)
             .join("\n")}

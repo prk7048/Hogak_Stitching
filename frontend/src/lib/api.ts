@@ -597,9 +597,34 @@ export function outputReceiveUri(target: unknown): string {
       return text;
     }
     const port = hostPort.slice(separator + 1).trim();
-    return port ? `udp://@:${port}` : text;
+    return port ? `udp://@:${port}?fifo_size=${8 * 1024 * 1024}&overrun_nonfatal=1` : text;
   }
   return text;
+}
+
+function withUdpReceiveSafetyOptions(uri: string): string {
+  if (!uri.startsWith("udp://")) {
+    return uri;
+  }
+  let safeUri = uri;
+  if (!safeUri.includes("fifo_size=")) {
+    const separator = safeUri.includes("?") ? "&" : "?";
+    safeUri = `${safeUri}${separator}fifo_size=${8 * 1024 * 1024}`;
+  }
+  if (!safeUri.includes("overrun_nonfatal=")) {
+    const separator = safeUri.includes("?") ? "&" : "?";
+    safeUri = `${safeUri}${separator}overrun_nonfatal=1`;
+  }
+  return safeUri;
+}
+
+export function ffplayReceiveExample(target: unknown): string {
+  const receiveUri = outputReceiveUri(target);
+  if (!receiveUri) {
+    return "";
+  }
+  const safeReceiveUri = withUdpReceiveSafetyOptions(receiveUri);
+  return `ffplay -fflags nobuffer -flags low_delay -framedrop -sync ext -f mpegts "${safeReceiveUri}"`;
 }
 
 export function outputReachabilityHint(target: unknown): string {

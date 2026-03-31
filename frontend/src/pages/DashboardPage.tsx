@@ -3,6 +3,7 @@ import { useState } from "react";
 import { MetricCard } from "../components/MetricCard";
 import {
   describeRuntimeActionResult,
+  outputReceiveUri,
   prepareRuntime,
   startRuntime,
   stopRuntime,
@@ -14,6 +15,8 @@ export function DashboardPage() {
   const { state, events, preview, streamState, refreshPreview, refreshRuntime } = useRuntimeFeed();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState("Ready.");
+  const probeReceiveUri = outputReceiveUri(state.output_target);
+  const transmitReceiveUri = outputReceiveUri(state.production_output_target);
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
@@ -37,7 +40,8 @@ export function DashboardPage() {
           <div className="eyebrow">Dashboard</div>
           <h2>Runtime truth at a glance</h2>
           <p>
-            This surface reads the current runtime state, streams events over SSE, and polls the stitched preview as a JPEG.
+            This surface reads runtime state, streams SSE events, and polls the probe-side preview JPEG. It does not
+            display the live transmit stream.
           </p>
           <div className="action-status">{actionStatus}</div>
         </div>
@@ -66,16 +70,34 @@ export function DashboardPage() {
           detail={String(state.running ? "running" : state.prepared ? "prepared" : "idle")}
         />
         <MetricCard label="Geometry" value={String(state.geometry_mode ?? "planar-homography")} detail={String(state.seam_mode ?? "feather")} tone="accent" />
-        <MetricCard label="Output" value={String(state.output_runtime_mode ?? "unknown")} detail={String(state.production_output_runtime_mode ?? "unknown")} />
+        <MetricCard label="Probe writer" value={String(state.output_runtime_mode ?? "unknown")} detail={probeReceiveUri || "probe receive URI unavailable"} />
+        <MetricCard
+          label="Transmit writer"
+          value={String(state.production_output_runtime_mode ?? "unknown")}
+          detail={transmitReceiveUri || "transmit receive URI unavailable"}
+        />
+        <MetricCard
+          label="Transmit drops"
+          value={String(state.production_output_frames_dropped ?? 0)}
+          detail={`probe drops ${String(state.output_frames_dropped ?? 0)}`}
+          tone={Number(state.production_output_frames_dropped ?? 0) > 0 ? "warn" : "accent"}
+        />
+        <MetricCard
+          label="Freshness"
+          value={`reuse ${String(state.reused_count ?? 0)}`}
+          detail={`fresh waits ${String(state.wait_paired_fresh_count ?? 0)}`}
+          tone={Number(state.reused_count ?? 0) > 0 ? "warn" : "accent"}
+        />
+        <MetricCard label="Preview surface" value="Probe JPEG" detail="Transmit is separate" />
         <MetricCard label="Stream" value={streamState} detail={`${events.length} recent events`} tone={streamState === "connected" ? "accent" : "warn"} />
       </div>
       <div className="panel-grid">
         <section className="panel wide">
-          <div className="panel-title">Preview</div>
+          <div className="panel-title">Probe JPEG Preview</div>
           <img
             className="preview-image"
             src={preview}
-            alt="runtime stitched preview"
+            alt="probe jpeg preview"
             onError={(event) => {
               event.currentTarget.src =
                 "data:image/svg+xml;utf8," +
@@ -84,6 +106,10 @@ export function DashboardPage() {
                 );
             }}
           />
+          <p className="muted">
+            This image comes from the probe preview JPEG endpoint. Use the Outputs page or an external player to inspect
+            the actual transmit stream separately.
+          </p>
         </section>
         <section className="panel">
           <div className="panel-title">Event Log</div>
