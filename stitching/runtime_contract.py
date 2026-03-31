@@ -60,6 +60,14 @@ SCHEMA_V2_INPUT_SIDE_KEYS = (
     "buffer_frames",
 )
 SCHEMA_V2_GEOMETRY_KEYS = ("artifact_path",)
+DEFAULT_OPERATOR_GEOMETRY_MODEL = "virtual-center-rectilinear"
+LEGACY_FALLBACK_GEOMETRY_MODELS = ("cylindrical-affine",)
+LEGACY_COMPAT_GEOMETRY_MODELS = ("planar-homography",)
+SUPPORTED_RUNTIME_GEOMETRY_MODELS = (
+    DEFAULT_OPERATOR_GEOMETRY_MODEL,
+    *LEGACY_FALLBACK_GEOMETRY_MODELS,
+    *LEGACY_COMPAT_GEOMETRY_MODELS,
+)
 SCHEMA_V2_TIMING_KEYS = (
     "pair_mode",
     "allow_frame_reuse",
@@ -212,6 +220,44 @@ def _require_int(value: Any, *, field_name: str) -> int:
     if int(value) != value:
         raise ValueError(f"{field_name} must be an integer")
     return int(value)
+
+
+def geometry_rollout_metadata(geometry_model: Any) -> dict[str, Any]:
+    model = "" if geometry_model is None else str(geometry_model).strip()
+    operator_visible = model == DEFAULT_OPERATOR_GEOMETRY_MODEL
+    fallback_only = model in LEGACY_FALLBACK_GEOMETRY_MODELS
+    compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
+
+    if model == DEFAULT_OPERATOR_GEOMETRY_MODEL:
+        rollout_status = "default"
+        launch_ready = True
+        launch_ready_reason = "default launch-ready geometry model"
+    elif model in LEGACY_FALLBACK_GEOMETRY_MODELS:
+        rollout_status = "fallback"
+        launch_ready = True
+        launch_ready_reason = "legacy fallback geometry artifact; use explicit geometry.artifact_path for rollback only"
+    elif model in LEGACY_COMPAT_GEOMETRY_MODELS:
+        rollout_status = "legacy"
+        launch_ready = True
+        launch_ready_reason = "legacy compatibility geometry artifact; keep only for compatibility or emergency rollback"
+    elif model:
+        rollout_status = "unsupported"
+        launch_ready = False
+        launch_ready_reason = "unsupported runtime geometry model"
+    else:
+        rollout_status = "unknown"
+        launch_ready = False
+        launch_ready_reason = "geometry artifact model is missing"
+
+    return {
+        "geometry_model": model or "-",
+        "geometry_rollout_status": rollout_status,
+        "geometry_operator_visible": operator_visible,
+        "geometry_fallback_only": fallback_only,
+        "geometry_compat_only": compat_only,
+        "launch_ready": launch_ready,
+        "launch_ready_reason": launch_ready_reason,
+    }
 
 
 def normalize_schema_v2_reload_payload(payload: dict[str, Any]) -> dict[str, Any]:

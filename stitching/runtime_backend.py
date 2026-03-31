@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
 from stitching.runtime_calibration_service import CalibrationService
-from stitching.runtime_contract import normalize_schema_v2_reload_payload
+from stitching.runtime_contract import geometry_rollout_metadata, normalize_schema_v2_reload_payload
 from stitching.runtime_geometry_artifact import (
     load_runtime_geometry_artifact,
     runtime_geometry_artifact_path,
@@ -296,6 +296,7 @@ class RuntimeService:
             geometry_artifact = Path(str(geometry_artifact_value)).expanduser()
 
         resolved_homography = str(homography_file)
+        artifact: dict[str, Any] | None = None
         if geometry_artifact.exists():
             artifact = load_runtime_geometry_artifact(geometry_artifact)
             source = artifact.get("source", {})
@@ -656,6 +657,8 @@ class RuntimeService:
                 },
             }
         )
+        geometry_model = runtime_geometry_model(artifact or {})
+        rollout = geometry_rollout_metadata(geometry_model)
         summary = {
             "geometry_artifact_path": str(geometry_artifact),
             "homography_file": str(homography_file),
@@ -668,6 +671,13 @@ class RuntimeService:
             "sync_pair_mode": str(launch_spec.sync_pair_mode),
             "runtime_schema_version": 2,
             "gpu_only_mode": str(launch_spec.gpu_mode).strip().lower() == "only",
+            "geometry_artifact_model": rollout["geometry_model"],
+            "geometry_rollout_status": rollout["geometry_rollout_status"],
+            "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
+            "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
+            "geometry_compat_only": bool(rollout["geometry_compat_only"]),
+            "launch_ready": bool(rollout["launch_ready"]),
+            "launch_ready_reason": str(rollout["launch_ready_reason"]),
         }
         return RuntimePlan(
             geometry_artifact_path=geometry_artifact,
@@ -712,7 +722,18 @@ class RuntimeService:
             snapshot.update(self._latest_validation)
         if self._prepared_plan is not None:
             summary = self._prepared_plan.summary
-            for key in ("geometry_artifact_path", "output_runtime_mode", "production_output_runtime_mode"):
+            for key in (
+                "geometry_artifact_path",
+                "geometry_artifact_model",
+                "geometry_rollout_status",
+                "geometry_operator_visible",
+                "geometry_fallback_only",
+                "geometry_compat_only",
+                "output_runtime_mode",
+                "production_output_runtime_mode",
+                "launch_ready",
+                "launch_ready_reason",
+            ):
                 if not snapshot.get(key):
                     snapshot[key] = summary.get(key, "")
             snapshot["gpu_only_mode"] = bool(summary.get("gpu_only_mode", True))
@@ -768,6 +789,10 @@ class RuntimeService:
             "blend_mode": _string("blend_mode", "-"),
             "geometry_artifact_path": _string("geometry_artifact_path"),
             "geometry_artifact_model": _string("geometry_artifact_model", "-"),
+            "geometry_rollout_status": _string("geometry_rollout_status"),
+            "geometry_operator_visible": _bool("geometry_operator_visible"),
+            "geometry_fallback_only": _bool("geometry_fallback_only"),
+            "geometry_compat_only": _bool("geometry_compat_only"),
             "cylindrical_focal_px": _float("cylindrical_focal_px"),
             "cylindrical_center_x": _float("cylindrical_center_x"),
             "cylindrical_center_y": _float("cylindrical_center_y"),
@@ -810,6 +835,8 @@ class RuntimeService:
             "cpu_warp_count": _int("cpu_warp_count"),
             "gpu_blend_count": _int("gpu_blend_count"),
             "cpu_blend_count": _int("cpu_blend_count"),
+            "launch_ready": _bool("launch_ready"),
+            "launch_ready_reason": _string("launch_ready_reason"),
         }
 
     @staticmethod
@@ -882,18 +909,26 @@ class RuntimeService:
         exposure_mode = "gain-bias" if bool(exposure_enabled) else "off"
         if not geometry_mode:
             geometry_mode = "-"
+        rollout = geometry_rollout_metadata(geometry_mode)
 
         left_projection = projection.get("left", {}) if isinstance(projection.get("left"), dict) else {}
+        should_expose_cylindrical_projection = geometry_mode == "cylindrical-affine"
         return {
             "geometry_mode": geometry_mode,
             "alignment_mode": _string(alignment, "model", "-"),
             "seam_mode": seam_mode,
             "exposure_mode": exposure_mode,
             "blend_mode": seam_mode or _string(geometry, "warp_model", "-"),
-            "geometry_artifact_model": geometry_mode,
-            "cylindrical_focal_px": _float(left_projection, "focal_px"),
-            "cylindrical_center_x": float(left_projection.get("center", [0.0, 0.0])[0]) if isinstance(left_projection.get("center"), list) and left_projection.get("center") else 0.0,
-            "cylindrical_center_y": float(left_projection.get("center", [0.0, 0.0])[1]) if isinstance(left_projection.get("center"), list) and len(left_projection.get("center")) > 1 else 0.0,
+            "geometry_artifact_model": rollout["geometry_model"],
+            "geometry_rollout_status": rollout["geometry_rollout_status"],
+            "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
+            "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
+            "geometry_compat_only": bool(rollout["geometry_compat_only"]),
+            "launch_ready": bool(rollout["launch_ready"]),
+            "launch_ready_reason": str(rollout["launch_ready_reason"]),
+            "cylindrical_focal_px": _float(left_projection, "focal_px") if should_expose_cylindrical_projection else 0.0,
+            "cylindrical_center_x": float(left_projection.get("center", [0.0, 0.0])[0]) if should_expose_cylindrical_projection and isinstance(left_projection.get("center"), list) and left_projection.get("center") else 0.0,
+            "cylindrical_center_y": float(left_projection.get("center", [0.0, 0.0])[1]) if should_expose_cylindrical_projection and isinstance(left_projection.get("center"), list) and len(left_projection.get("center")) > 1 else 0.0,
         }
 
     def prepare(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1038,25 +1073,28 @@ class RuntimeService:
         checksum_after = _compute_sha256(artifact_path)
         geometry_model = runtime_geometry_model(artifact)
         artifact_unchanged = checksum_before == checksum_after
-        launch_ready_reason = ""
-        if not artifact_unchanged:
-            launch_ready_reason = "geometry artifact changed during read-only validation"
-        elif geometry_model in {"planar-homography", "cylindrical-affine"}:
-            launch_ready_reason = "implemented runtime geometry model"
-        elif geometry_model == "virtual-center-rectilinear":
-            launch_ready_reason = "candidate model only; artifact/schema scaffolding is ready but runtime render path is not implemented yet"
-        else:
-            launch_ready_reason = "unsupported runtime geometry model"
+        rollout = geometry_rollout_metadata(geometry_model)
+        launch_ready = bool(artifact_unchanged and rollout["launch_ready"])
+        launch_ready_reason = (
+            "geometry artifact changed during read-only validation"
+            if not artifact_unchanged
+            else str(rollout["launch_ready_reason"])
+        )
         result = {
             "ok": True,
             "validation_mode": "read-only",
             "plan": plan_summary,
             "artifact_type": artifact.get("artifact_type", ""),
             "schema_version": artifact.get("schema_version", 0),
-            "geometry_model": geometry_model,
+            "geometry_model": rollout["geometry_model"],
+            "geometry_artifact_model": rollout["geometry_model"],
+            "geometry_rollout_status": rollout["geometry_rollout_status"],
+            "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
+            "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
+            "geometry_compat_only": bool(rollout["geometry_compat_only"]),
             "geometry_artifact_checksum": checksum_before,
             "artifact_unchanged": artifact_unchanged,
-            "launch_ready": bool(artifact_unchanged and geometry_model in {"planar-homography", "cylindrical-affine"}),
+            "launch_ready": launch_ready,
             "launch_ready_reason": launch_ready_reason,
             "strict_fresh": strict_fresh,
         }
@@ -1088,6 +1126,7 @@ class RuntimeService:
                 artifact = load_runtime_geometry_artifact(path)
             except Exception:
                 continue
+            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
             artifacts.append(
                 {
                     "name": path.name,
@@ -1095,7 +1134,13 @@ class RuntimeService:
                     "artifact_type": artifact.get("artifact_type", ""),
                     "schema_version": artifact.get("schema_version", 0),
                     "saved_at_epoch_sec": artifact.get("saved_at_epoch_sec", 0),
-                    "geometry_model": runtime_geometry_model(artifact),
+                    "geometry_model": rollout["geometry_model"],
+                    "geometry_rollout_status": rollout["geometry_rollout_status"],
+                    "operator_visible": bool(rollout["geometry_operator_visible"]),
+                    "fallback_only": bool(rollout["geometry_fallback_only"]),
+                    "compat_only": bool(rollout["geometry_compat_only"]),
+                    "launch_ready": bool(rollout["launch_ready"]),
+                    "launch_ready_reason": str(rollout["launch_ready_reason"]),
                 }
             )
         return artifacts

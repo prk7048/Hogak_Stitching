@@ -30,10 +30,15 @@ function asBlockers(value: unknown): string[] {
     .filter((item) => item.length > 0);
 }
 
+function text(value: unknown, fallback = "-"): string {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
 export function DashboardPage() {
   const { state, events, preview, streamState, refreshPreview, refreshRuntime } = useRuntimeFeed();
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [actionStatus, setActionStatus] = useState("준비 상태를 확인했습니다.");
+  const [actionStatus, setActionStatus] = useState("Review the active geometry and prepare the runtime when you are ready.");
 
   const probeReceiveUri = outputReceiveUri(state.output_target);
   const transmitReceiveUri = outputReceiveUri(state.production_output_target);
@@ -44,32 +49,37 @@ export function DashboardPage() {
   const gpuOnlyReady = Boolean(state.gpu_only_ready);
   const gpuOnlyBlockers = asBlockers(state.gpu_only_blockers);
   const previewDisabled = String(state.output_runtime_mode ?? "").trim() === "none";
+  const geometryModel = text(state.geometry_artifact_model ?? state.geometry_mode, "unknown");
+  const geometryRolloutStatus = text(state.geometry_rollout_status, "unknown");
+  const geometryArtifactPath = text(state.geometry_artifact_path, "not prepared");
+  const geometryLaunchReason = text(state.launch_ready_reason, "-");
+  const geometryFallbackOnly = Boolean(state.geometry_fallback_only);
 
   const nextAction = state.running
-    ? "메인 출력이 동작 중입니다. 외부 플레이어에서 Transmit 수신 주소를 확인하세요."
+    ? "Runtime is running. Check transmit from the receive URI, not from the probe preview."
     : state.prepared
-      ? "런타임 준비가 끝났습니다. 조건이 맞으면 바로 시작할 수 있습니다."
-      : "캘리브레이션을 마친 뒤 여기에서 런타임을 준비하고 시작하세요.";
+      ? "Runtime is prepared. Start is unblocked if the current geometry and GPU-only checks look correct."
+      : "Prepare the runtime to lock the active artifact and GPU-only launch plan.";
 
   const healthMessage =
     gpuOnlyMode && !gpuOnlyReady
-      ? "GPU-only 조건이 맞지 않아 준비 또는 시작이 차단됩니다."
+      ? "GPU-only launch is blocked. Resolve the blockers before starting."
       : outputDropCount > 0
-        ? `메인 출력에서 ${outputDropCount} 프레임이 드롭됐습니다. Transmit 경로를 점검하세요.`
+        ? `Transmit has dropped ${outputDropCount} frames. Check the output path before blaming geometry.`
         : reuseCount > 0 || freshnessWaits > 0
-          ? `프레임 재사용 ${reuseCount}회, fresh 대기 ${freshnessWaits}회가 기록됐습니다.`
-          : "런타임과 출력 경로가 안정 상태입니다.";
+          ? `Pair reuse=${reuseCount}, fresh waits=${freshnessWaits}. Timing pressure is visible.`
+          : "Runtime, geometry, and output state look stable from the operator surface.";
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
-    setActionStatus(`${label} 작업을 실행하는 중입니다...`);
+    setActionStatus(`${label} in progress...`);
     try {
       const result = await action();
       setActionStatus(`${label}: ${describeRuntimeActionResult(result)}`);
       await refreshRuntime();
       refreshPreview();
     } catch (error) {
-      setActionStatus(`${label} 실패: ${error instanceof Error ? error.message : String(error)}`);
+      setActionStatus(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setBusyAction(null);
     }
@@ -78,9 +88,9 @@ export function DashboardPage() {
   return (
     <section className="page">
       <PageHeader
-        eyebrow="운영"
-        title="스티칭 런타임 준비와 시작"
-        description="Prepare, Start, Stop과 상태 확인을 한 화면에서 처리합니다. GPU-only 브랜치에서는 메인 송출(Transmit)을 우선하고, Probe 미리보기는 기본 비활성입니다."
+        eyebrow="Operate"
+        title="Prepare and start runtime"
+        description="This branch keeps probe disabled by default and prioritizes transmit throughput. Virtual-center-rectilinear is the default operator geometry. Cylindrical-affine is rollback-only through explicit artifact paths."
         status={
           <>
             <strong>{nextAction}</strong>
@@ -92,26 +102,26 @@ export function DashboardPage() {
             <button
               className="action-button"
               disabled={busyAction !== null}
-              onClick={() => void runAction("준비", () => prepareRuntime())}
+              onClick={() => void runAction("Prepare runtime", () => prepareRuntime())}
               type="button"
             >
-              준비
+              Prepare
             </button>
             <button
               className="action-button"
               disabled={busyAction !== null}
-              onClick={() => void runAction("시작", () => startRuntime())}
+              onClick={() => void runAction("Start runtime", () => startRuntime())}
               type="button"
             >
-              시작
+              Start
             </button>
             <button
               className="action-button secondary"
               disabled={busyAction !== null}
-              onClick={() => void runAction("중지", () => stopRuntime())}
+              onClick={() => void runAction("Stop runtime", () => stopRuntime())}
               type="button"
             >
-              중지
+              Stop
             </button>
             <button
               className="action-button secondary"
@@ -119,67 +129,68 @@ export function DashboardPage() {
               onClick={refreshPreview}
               type="button"
             >
-              미리보기 새로고침
+              Refresh preview
             </button>
           </>
         }
       />
 
       <section className={`status-strip${outputDropCount > 0 || (gpuOnlyMode && !gpuOnlyReady) ? " warn" : ""}`}>
-        <div className="status-strip-title">운영 상태 요약</div>
+        <div className="status-strip-title">Operator summary</div>
         <div className="status-strip-body">
           {previewDisabled
-            ? "GPU-only 모드에서는 Probe 미리보기를 기본으로 끄고, 메인 송출 성능을 우선합니다."
-            : "아래 미리보기는 Probe JPEG입니다. 실제 stitched 출력은 Transmit 수신 URI로 확인해야 합니다."}
+            ? "Probe preview is disabled in GPU-only mode. Confirm motion from the transmit receive URI."
+            : "Probe preview is only a convenience path. The transmit receive URI is the real output truth."}
         </div>
         <div className="status-strip-footnote">{healthMessage}</div>
       </section>
 
       <div className="metric-grid metric-grid-compact">
         <MetricCard
-          label="런타임 상태 (Runtime)"
+          label="Runtime"
           value={displayRuntimeStatus(state.status ?? "unknown")}
           detail={displayRuntimeStatus(state.running ? "running" : state.prepared ? "prepared" : "idle")}
           tone="accent"
         />
         <MetricCard
-          label="기하 모드 (Geometry)"
-          value={displayGeometryMode(state.geometry_mode ?? "planar-homography")}
-          detail={`${displaySeamMode(state.seam_mode ?? "feather")} 블렌드`}
+          label="Geometry"
+          value={displayGeometryMode(geometryModel)}
+          detail={`${geometryRolloutStatus} / ${displaySeamMode(state.seam_mode ?? "feather")}`}
+          tone={geometryFallbackOnly ? "warn" : "accent"}
         />
         <MetricCard
-          label="GPU-only 준비 상태"
+          label="GPU-only readiness"
           value={displayGpuOnlyState(state.gpu_only_ready)}
-          detail={gpuOnlyMode ? "하드 GPU-only 모드" : "GPU-only 비활성"}
+          detail={gpuOnlyMode ? "gpu-only enforced" : "gpu-only disabled"}
           tone={gpuOnlyMode && !gpuOnlyReady ? "warn" : "accent"}
         />
         <MetricCard
-          label="메인 출력 (Transmit)"
+          label="Transmit"
           value={displayOutputRuntimeMode(state.production_output_runtime_mode ?? "unknown")}
-          detail={transmitReceiveUri || "수신 URI 없음"}
+          detail={transmitReceiveUri || "missing receive URI"}
           tone={outputDropCount > 0 ? "warn" : "accent"}
         />
         <MetricCard
-          label="프레임 정책"
-          value={`재사용 ${String(reuseCount)}회`}
-          detail={`fresh 대기 ${String(freshnessWaits)}회`}
+          label="Pair pressure"
+          value={`reuse=${String(reuseCount)}`}
+          detail={`fresh waits=${String(freshnessWaits)}`}
           tone={reuseCount > 0 || freshnessWaits > 0 ? "warn" : "calm"}
         />
         <MetricCard
-          label="이벤트 스트림"
+          label="Event stream"
           value={displayStreamState(streamState)}
-          detail={`최근 이벤트 ${events.length}개`}
+          detail={`events=${events.length}`}
           tone={streamState === "connected" ? "accent" : "warn"}
         />
       </div>
 
       {gpuOnlyMode && gpuOnlyBlockers.length > 0 ? (
         <section className="panel">
-          <div className="panel-title">GPU-only 차단 사유</div>
+          <div className="panel-title">GPU-only blockers</div>
           <div className="definition-list">
             {gpuOnlyBlockers.map((blocker, index) => (
               <div className="definition-item" key={`${blocker}-${index}`}>
-                <span className="definition-label">차단 {index + 1}</span>
+                <span className="definition-label">Blocker {index + 1}</span>
                 <span className="definition-value">{blocker}</span>
               </div>
             ))}
@@ -189,26 +200,26 @@ export function DashboardPage() {
 
       <div className="panel-grid panel-grid-main">
         <section className="panel panel-preview">
-          <div className="panel-title">운영 미리보기</div>
+          <div className="panel-title">Operator preview</div>
           <div className="panel-subtitle">
             {previewDisabled
-              ? "이 브랜치에서는 Probe 출력을 비활성화했습니다. 성능 확인은 외부 플레이어에서 메인 출력으로 진행하세요."
-              : "빠른 점검용 Probe JPEG입니다. 실제 송출 품질은 아래 메인 출력 주소로 확인하세요."}
+              ? "Probe is intentionally off in this branch. Validate motion from the main transmit path."
+              : "Preview is probe-only and should not be used as the final output truth."}
           </div>
           {previewDisabled ? (
             <div className="muted">
-              GPU-only 모드에서는 미리보기 경로를 기본으로 끕니다. <code>{transmitReceiveUri || "수신 URI 없음"}</code> 를 외부 플레이어에서 열어 확인하세요.
+              Use <code>{transmitReceiveUri || "missing receive URI"}</code> in an external player to inspect the real transmit path.
             </div>
           ) : (
             <img
               className="preview-image"
               src={preview}
-              alt="운영 미리보기"
+              alt="Operator preview"
               onError={(event) => {
                 event.currentTarget.src =
                   "data:image/svg+xml;utf8," +
                   encodeURIComponent(
-                    "<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'><rect width='100%' height='100%' fill='#0b0f17'/><text x='50%' y='50%' fill='#d9d2c2' font-size='28' text-anchor='middle'>미리보기를 불러올 수 없습니다</text></svg>",
+                    "<svg xmlns='http://www.w3.org/2000/svg' width='1280' height='720'><rect width='100%' height='100%' fill='#0b0f17'/><text x='50%' y='50%' fill='#d9d2c2' font-size='28' text-anchor='middle'>Preview unavailable</text></svg>",
                   );
               }}
             />
@@ -216,37 +227,62 @@ export function DashboardPage() {
         </section>
 
         <section className="panel panel-stack">
-          <div className="panel-title">운영 요약</div>
+          <div className="panel-title">Geometry truth</div>
           <div className="definition-list">
             <div className="definition-item">
-              <span className="definition-label">메인 출력 수신 URI</span>
-              <span className="definition-value">{transmitReceiveUri || "사용 불가"}</span>
+              <span className="definition-label">Artifact path</span>
+              <span className="definition-value">{geometryArtifactPath}</span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">메인 출력 드롭</span>
+              <span className="definition-label">Rollout status</span>
+              <span className="definition-value">{geometryRolloutStatus}</span>
+            </div>
+            <div className="definition-item">
+              <span className="definition-label">Fallback only</span>
+              <span className="definition-value">{geometryFallbackOnly ? "yes" : "no"}</span>
+            </div>
+            <div className="definition-item">
+              <span className="definition-label">Launch reason</span>
+              <span className="definition-value">{geometryLaunchReason}</span>
+            </div>
+          </div>
+          <Link className="inline-link" to="/geometry-compare">
+            Open geometry candidate and rollback view
+          </Link>
+        </section>
+
+        <section className="panel panel-stack">
+          <div className="panel-title">Output truth</div>
+          <div className="definition-list">
+            <div className="definition-item">
+              <span className="definition-label">Transmit receive URI</span>
+              <span className="definition-value">{transmitReceiveUri || "unavailable"}</span>
+            </div>
+            <div className="definition-item">
+              <span className="definition-label">Transmit drops</span>
               <span className="definition-value">{String(outputDropCount)}</span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">Probe 출력</span>
+              <span className="definition-label">Probe path</span>
               <span className="definition-value">
-                {previewDisabled ? "비활성 (GPU-only)" : probeReceiveUri || "수신 URI 없음"}
+                {previewDisabled ? "disabled (gpu-only)" : probeReceiveUri || "missing receive URI"}
               </span>
             </div>
             <div className="definition-item">
-              <span className="definition-label">마지막 GPU 사유</span>
-              <span className="definition-value">{String(state.gpu_reason ?? "-")}</span>
+              <span className="definition-label">GPU reason</span>
+              <span className="definition-value">{text(state.gpu_reason)}</span>
             </div>
           </div>
           <Link className="inline-link" to="/outputs">
-            출력 안내 자세히 보기
+            Open output details
           </Link>
         </section>
       </div>
 
       <details className="details-panel">
-        <summary className="details-summary">상세 이벤트 로그</summary>
+        <summary className="details-summary">Event log</summary>
         <div className="event-list">
-          {events.length === 0 ? <div className="muted">이벤트를 기다리는 중입니다...</div> : null}
+          {events.length === 0 ? <div className="muted">Waiting for runtime events...</div> : null}
           {events.map((event, index) => (
             <div className="event-item" key={`${event.type}-${event.seq ?? index}`}>
               <span className="event-type">{displayEventType(event.type)}</span>

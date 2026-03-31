@@ -15,6 +15,12 @@ export type GeometryArtifactSummary = {
   schema_version?: number;
   model?: string;
   geometry_model?: string;
+  geometry_rollout_status?: string;
+  operator_visible?: boolean;
+  fallback_only?: boolean;
+  compat_only?: boolean;
+  launch_ready?: boolean;
+  launch_ready_reason?: string;
   output_resolution?: number[];
   calibration?: Record<string, unknown>;
   source?: Record<string, unknown>;
@@ -351,6 +357,12 @@ function normalizeGeometryArtifact(item: unknown, index: number): GeometryArtifa
     schema_version: typeof item.schema_version === "number" ? item.schema_version : undefined,
     model: pickString(item.model, geometry?.model),
     geometry_model: pickString(item.geometry_model, geometry?.model),
+    geometry_rollout_status: pickString(item.geometry_rollout_status),
+    operator_visible: typeof item.operator_visible === "boolean" ? item.operator_visible : undefined,
+    fallback_only: typeof item.fallback_only === "boolean" ? item.fallback_only : undefined,
+    compat_only: typeof item.compat_only === "boolean" ? item.compat_only : undefined,
+    launch_ready: typeof item.launch_ready === "boolean" ? item.launch_ready : undefined,
+    launch_ready_reason: pickString(item.launch_ready_reason),
     output_resolution: Array.isArray(item.output_resolution) ? item.output_resolution.map((value) => Number(value)) : undefined,
     calibration,
     source,

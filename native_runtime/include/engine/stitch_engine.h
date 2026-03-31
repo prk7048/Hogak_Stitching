@@ -40,20 +40,38 @@ private:
         std::string artifact_path;
         cv::Size output_size{};
         cv::Mat alignment_matrix{};
+        std::string left_projection_model = "cylindrical";
+        std::string right_projection_model = "cylindrical";
         cv::Mat cylindrical_left_map_x{};
         cv::Mat cylindrical_left_map_y{};
         cv::Mat cylindrical_right_map_x{};
         cv::Mat cylindrical_right_map_y{};
+        cv::Mat rectilinear_left_map_x{};
+        cv::Mat rectilinear_left_map_y{};
+        cv::Mat rectilinear_right_map_x{};
+        cv::Mat rectilinear_right_map_y{};
         cv::cuda::GpuMat cylindrical_left_map_x_gpu{};
         cv::cuda::GpuMat cylindrical_left_map_y_gpu{};
         cv::cuda::GpuMat cylindrical_right_map_x_gpu{};
         cv::cuda::GpuMat cylindrical_right_map_y_gpu{};
+        cv::cuda::GpuMat rectilinear_left_map_x_gpu{};
+        cv::cuda::GpuMat rectilinear_left_map_y_gpu{};
+        cv::cuda::GpuMat rectilinear_right_map_x_gpu{};
+        cv::cuda::GpuMat rectilinear_right_map_y_gpu{};
         double left_focal_px = 0.0;
         double left_center_x = 0.0;
         double left_center_y = 0.0;
         double right_focal_px = 0.0;
         double right_center_x = 0.0;
         double right_center_y = 0.0;
+        double left_virtual_focal_px = 0.0;
+        double left_virtual_center_x = 0.0;
+        double left_virtual_center_y = 0.0;
+        double right_virtual_focal_px = 0.0;
+        double right_virtual_center_x = 0.0;
+        double right_virtual_center_y = 0.0;
+        cv::Mat left_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
+        cv::Mat right_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
         double residual_alignment_error_px = 0.0;
         int seam_transition_px = 64;
         double seam_smoothness_penalty = 4.0;
@@ -122,6 +140,17 @@ private:
         double focal_px,
         double center_x,
         double center_y,
+        cv::Mat* map_x_out,
+        cv::Mat* map_y_out) const;
+    bool build_virtual_center_rectilinear_maps_locked(
+        const cv::Size& image_size,
+        double source_focal_px,
+        double source_center_x,
+        double source_center_y,
+        double virtual_focal_px,
+        double virtual_center_x,
+        double virtual_center_y,
+        const cv::Mat& virtual_to_source_rotation,
         cv::Mat* map_x_out,
         cv::Mat* map_y_out) const;
     bool build_affine_output_plan_locked(
@@ -261,6 +290,7 @@ private:
     cv::cuda::GpuMat gpu_left_input_{};
     cv::cuda::GpuMat gpu_left_corrected_{};
     cv::cuda::GpuMat gpu_left_cylindrical_{};
+    cv::cuda::GpuMat gpu_left_rectilinear_{};
     cv::cuda::GpuMat gpu_left_canvas_{};
     cv::cuda::GpuMat gpu_stitched_{};
     cv::cuda::GpuMat gpu_right_nv12_y_{};
@@ -269,6 +299,7 @@ private:
     cv::cuda::GpuMat gpu_right_input_{};
     cv::cuda::GpuMat gpu_right_corrected_{};
     cv::cuda::GpuMat gpu_right_cylindrical_{};
+    cv::cuda::GpuMat gpu_right_rectilinear_{};
     cv::cuda::GpuMat gpu_right_warped_{};
     cv::cuda::GpuMat gpu_overlap_mask_{};
     cv::cuda::GpuMat gpu_overlap_mask_roi_{};

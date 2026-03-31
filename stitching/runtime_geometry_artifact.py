@@ -54,6 +54,20 @@ def _matrix_2x3(value: np.ndarray | list[list[float]] | None) -> list[list[float
     return array.reshape(2, 3).tolist()
 
 
+def _matrix_3x3_inverse_list(value: np.ndarray | list[list[float]] | None) -> list[list[float]] | None:
+    if value is None:
+        return None
+    array = np.asarray(value, dtype=np.float64)
+    if array.size != 9:
+        return None
+    matrix = array.reshape(3, 3)
+    try:
+        inverse = np.linalg.inv(matrix)
+    except np.linalg.LinAlgError:
+        return None
+    return inverse.tolist()
+
+
 def _default_projection_focal_px(resolution: tuple[int, int]) -> float:
     width = max(1, int(resolution[0]))
     height = max(1, int(resolution[1]))
@@ -352,6 +366,19 @@ def build_runtime_geometry_artifact(
         projection_model
         or ("rectilinear" if geometry_model == "virtual-center-rectilinear" else "cylindrical")
     ).strip()
+    virtual_camera_payload = dict(virtual_camera or {})
+    projection_left_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or left_focal_px)
+    projection_right_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or right_focal_px)
+    projection_virtual_center = _pair(
+        virtual_camera_payload.get("center"),
+        (output_resolution[0] / 2.0, output_resolution[1] / 2.0),
+    )
+    left_virtual_to_source_rotation = _matrix_3x3_inverse_list(
+        virtual_camera_payload.get("left_to_virtual_rotation")
+    )
+    right_virtual_to_source_rotation = _matrix_3x3_inverse_list(
+        virtual_camera_payload.get("right_to_virtual_rotation")
+    )
     seam_mode = "dynamic-path" if geometry_model == "cylindrical-affine" else "feather"
     return {
         "artifact_type": RUNTIME_GEOMETRY_ARTIFACT_TYPE,
@@ -388,6 +415,9 @@ def build_runtime_geometry_artifact(
                 "center": left_center,
                 "input_resolution": [int(left_resolution[0]), int(left_resolution[1])],
                 "output_resolution": [output_resolution[0], output_resolution[1]],
+                "virtual_focal_px": projection_left_virtual_focal_px,
+                "virtual_center": projection_virtual_center,
+                "virtual_to_source_rotation": left_virtual_to_source_rotation or np.eye(3, dtype=np.float64).tolist(),
             },
             "right": {
                 "model": resolved_projection_model,
@@ -395,9 +425,12 @@ def build_runtime_geometry_artifact(
                 "center": right_center,
                 "input_resolution": [int(right_resolution[0]), int(right_resolution[1])],
                 "output_resolution": [output_resolution[0], output_resolution[1]],
+                "virtual_focal_px": projection_right_virtual_focal_px,
+                "virtual_center": projection_virtual_center,
+                "virtual_to_source_rotation": right_virtual_to_source_rotation or np.eye(3, dtype=np.float64).tolist(),
             },
         },
-        "virtual_camera": dict(virtual_camera or {}),
+        "virtual_camera": virtual_camera_payload,
         "alignment": {
             "model": str(alignment_model),
             "matrix": alignment,
