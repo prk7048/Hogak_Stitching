@@ -229,7 +229,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     operator_server_cmd = subparsers.add_parser(
         "operator-server",
-        help="Run the FastAPI runtime operator backend and optional legacy calibration bridge",
+        help="Run the unified FastAPI + React operator surface",
     )
     operator_server_cmd.add_argument("--host", default="127.0.0.1", help="FastAPI bind host (default: 127.0.0.1)")
     operator_server_cmd.add_argument("--port", type=int, default=8088, help="FastAPI bind port (default: 8088)")

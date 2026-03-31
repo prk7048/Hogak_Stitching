@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from collections import deque
 from dataclasses import dataclass
 import hashlib
@@ -15,8 +14,9 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
 
+from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import normalize_schema_v2_reload_payload
 from stitching.runtime_geometry_artifact import load_runtime_geometry_artifact, runtime_geometry_artifact_path
 from stitching.runtime_launcher import RuntimeLaunchSpec
@@ -39,25 +39,6 @@ def _compute_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _build_default_legacy_calibration_app() -> Any | None:
-    try:
-        from stitching.native_runtime_cli import add_native_runtime_args
-        from stitching.runtime_gradio_ui import build_native_runtime_gradio
-    except Exception:
-        return None
-
-    parser = argparse.ArgumentParser(add_help=False)
-    add_native_runtime_args(parser)
-    args = parser.parse_args([])
-    try:
-        built = build_native_runtime_gradio(args)
-    except Exception:
-        return None
-    if isinstance(built, tuple) and built:
-        return built[0]
-    return built
 
 
 class PreviewWorker:
@@ -982,13 +963,15 @@ class RuntimeService:
 
 def create_app(
     *,
-    legacy_calibration_app: Any | None = None,
     service: RuntimeService | None = None,
+    calibration_service: CalibrationService | None = None,
     frontend_dist_dir: str | Path | None = None,
 ) -> FastAPI:
     backend = service or RuntimeService()
+    calibration = calibration_service or CalibrationService()
     app = FastAPI(title="Hogak Runtime API", version="2")
     app.state.runtime_service = backend
+    app.state.calibration_service = calibration
 
     @app.post("/api/runtime/prepare")
     def prepare_runtime(body: dict[str, Any] | None = None):
@@ -1057,19 +1040,112 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    if legacy_calibration_app is not None:
-        app.state.legacy_calibration_app = legacy_calibration_app
-
-        @app.get("/legacy/calibration", include_in_schema=False)
-        def legacy_calibration_redirect():
-            return RedirectResponse(url="/legacy/calibration/")
-
+    @app.post("/api/calibration/session/start")
+    def start_calibration_session(body: dict[str, Any] | None = None):
         try:
-            import gradio as gr
+            return calibration.start_session(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-            app = gr.mount_gradio_app(app, legacy_calibration_app, path="/legacy/calibration")
-        except Exception:
-            pass
+    @app.get("/api/calibration/session/state")
+    def get_calibration_session_state():
+        return calibration.state()
+
+    @app.post("/api/calibration/frames/refresh")
+    def refresh_calibration_frames():
+        try:
+            return calibration.refresh_frames()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/pairs")
+    def add_calibration_pair(body: dict[str, Any]):
+        try:
+            return calibration.add_pair(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/pairs/select")
+    def select_calibration_pair(body: dict[str, Any]):
+        try:
+            return calibration.select_pair(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/pairs/undo")
+    def undo_calibration_pair():
+        try:
+            return calibration.undo_pair()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/pairs/delete")
+    def delete_calibration_pair():
+        try:
+            return calibration.delete_pair()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/pairs/clear")
+    def clear_calibration_pairs():
+        try:
+            return calibration.clear_pairs()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/candidate/compute")
+    def compute_calibration_candidate():
+        try:
+            return calibration.compute_candidate()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/calibration/review")
+    def get_calibration_review():
+        try:
+            return calibration.review()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/review/accept")
+    def accept_calibration_review():
+        try:
+            return calibration.accept_review()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/review/cancel")
+    def cancel_calibration_review():
+        try:
+            return calibration.cancel_review()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/calibration/stitch-review")
+    def get_stitch_review():
+        try:
+            return calibration.stitch_review()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/calibration/use-current")
+    def use_current_homography(body: dict[str, Any] | None = None):
+        try:
+            return calibration.use_current(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/calibration/images/{name}")
+    def get_calibration_image(name: str):
+        jpeg = calibration.image(name)
+        if jpeg is None:
+            raise HTTPException(status_code=404, detail="calibration preview unavailable")
+        return Response(content=jpeg, media_type="image/jpeg")
+
+    @app.get("/legacy/calibration", include_in_schema=False)
+    @app.get("/legacy/calibration/", include_in_schema=False)
+    def legacy_calibration_redirect():
+        return RedirectResponse(url="/calibration/start")
 
     if frontend_dist_dir is None:
         frontend_env = os.environ.get("HOGAK_FRONTEND_DIST_DIR", "").strip()
@@ -1113,7 +1189,7 @@ def create_app(
     return app
 
 
-app = create_app(legacy_calibration_app=_build_default_legacy_calibration_app())
+app = create_app()
 
 
 def main() -> int:
