@@ -1,3 +1,8 @@
+function text(value: unknown, fallback = "알 수 없음"): string {
+  const normalized = String(value ?? "").trim();
+  return normalized || fallback;
+}
+
 export function displayRuntimeStatus(value: unknown): string {
   switch (String(value ?? "").trim()) {
     case "running":
@@ -12,10 +17,18 @@ export function displayRuntimeStatus(value: unknown): string {
       return "다시 불러옴";
     case "backend unavailable":
       return "백엔드 연결 안 됨";
+    case "gpu_only_blocked":
+      return "GPU-only 차단";
+    case "gpu_only_input_unavailable":
+      return "GPU 입력 경로 차단";
+    case "gpu_only_output_blocked":
+      return "GPU 출력 경로 차단";
+    case "gpu_only_path_unavailable":
+      return "GPU stitch 경로 차단";
     case "unknown":
       return "알 수 없음";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -28,7 +41,7 @@ export function displayGeometryMode(value: unknown): string {
     case "unknown":
       return "알 수 없음";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -42,7 +55,7 @@ export function displaySeamMode(value: unknown): string {
     case "unknown":
       return "알 수 없음";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -56,7 +69,7 @@ export function displayExposureMode(value: unknown): string {
     case "unknown":
       return "알 수 없음";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -77,7 +90,7 @@ export function displayOutputRuntimeMode(value: unknown): string {
     case "unknown":
       return "알 수 없음";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -90,7 +103,7 @@ export function displayStreamState(value: unknown): string {
     case "offline":
       return "오프라인";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
 }
 
@@ -119,7 +132,7 @@ export function displayEventType(value: unknown): string {
     case "message":
       return "메시지";
     default:
-      return String(value ?? "이벤트") || "이벤트";
+      return text(value, "이벤트");
   }
 }
 
@@ -133,8 +146,18 @@ export function displayCalibrationStep(value: unknown): string {
     case "calibration-review":
       return "검토";
     case "stitch-review":
-      return "최종 점검";
+      return "최종 확인";
     default:
-      return String(value ?? "알 수 없음") || "알 수 없음";
+      return text(value);
   }
+}
+
+export function displayGpuOnlyState(ready: unknown): string {
+  if (ready === true) {
+    return "준비 완료";
+  }
+  if (ready === false) {
+    return "차단됨";
+  }
+  return "알 수 없음";
 }

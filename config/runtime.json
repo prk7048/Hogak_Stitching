@@ -8,18 +8,19 @@
     "calibration_debug_dir": "output/calibration"
   },
   "runtime": {
-    "output_standard": "realtime_hq_1080p",
+    "output_standard": "realtime_gpu_1080p",
+    "gpu_mode": "only",
     "input_runtime": "ffmpeg-cuda",
     "input_pipe_format": "nv12",
     "rtsp_transport": "tcp",
     "input_buffer_frames": 8,
     "rtsp_timeout_sec": 10.0,
     "reconnect_cooldown_sec": 0.5,
-    "allow_frame_reuse": false,
-    "pair_reuse_max_age_ms": 50.0,
-    "pair_reuse_max_consecutive": 1,
+    "allow_frame_reuse": true,
+    "pair_reuse_max_age_ms": 80.0,
+    "pair_reuse_max_consecutive": 2,
     "sync_time_source": "pts-offset-auto",
-    "sync_match_max_delta_ms": 35.0,
+    "sync_match_max_delta_ms": 60.0,
     "sync_manual_offset_ms": 0.0,
     "sync_auto_offset_window_sec": 4.0,
     "sync_auto_offset_max_search_ms": 500.0,
@@ -41,8 +42,8 @@
     "output_cadence_fps": 30.0,
     "probe": {
       "source": "standalone",
-      "runtime": "ffmpeg",
-      "target": "udp://127.0.0.1:23000?pkt_size=1316"
+      "runtime": "none",
+      "target": ""
     },
     "transmit": {
       "runtime": "gpu-direct",

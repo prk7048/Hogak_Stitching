@@ -429,7 +429,11 @@ bool load_reload_config(
     }
 
     if (!require_string_field(probe, "runtime", &config->output.runtime, "outputs.probe.runtime", false, error_out) ||
-        !require_string_field(probe, "target", &config->output.target, "outputs.probe.target", false, error_out) ||
+        !require_string_field(transmit, "runtime", &config->production_output.runtime, "outputs.transmit.runtime", false, error_out)) {
+        return false;
+    }
+
+    if (!require_string_field(probe, "target", &config->output.target, "outputs.probe.target", config->output.runtime == "none", error_out) ||
         !require_string_field(probe, "codec", &config->output.codec, "outputs.probe.codec", false, error_out) ||
         !require_string_field(probe, "bitrate", &config->output.bitrate, "outputs.probe.bitrate", false, error_out) ||
         !require_string_field(probe, "preset", &config->output.preset, "outputs.probe.preset", false, error_out) ||
@@ -438,8 +442,7 @@ bool load_reload_config(
         !require_int_field(probe, "height", &config->output.height, "outputs.probe.height", error_out) ||
         !require_number_field(probe, "fps", &config->output.fps, "outputs.probe.fps", error_out) ||
         !require_bool_field(probe, "debug_overlay", &config->output.debug_overlay, "outputs.probe.debug_overlay", error_out) ||
-        !require_string_field(transmit, "runtime", &config->production_output.runtime, "outputs.transmit.runtime", false, error_out) ||
-        !require_string_field(transmit, "target", &config->production_output.target, "outputs.transmit.target", false, error_out) ||
+        !require_string_field(transmit, "target", &config->production_output.target, "outputs.transmit.target", config->production_output.runtime == "none", error_out) ||
         !require_string_field(transmit, "codec", &config->production_output.codec, "outputs.transmit.codec", false, error_out) ||
         !require_string_field(transmit, "bitrate", &config->production_output.bitrate, "outputs.transmit.bitrate", false, error_out) ||
         !require_string_field(transmit, "preset", &config->production_output.preset, "outputs.transmit.preset", false, error_out) ||

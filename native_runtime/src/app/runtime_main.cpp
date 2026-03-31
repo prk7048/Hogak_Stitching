@@ -109,7 +109,7 @@ void print_help() {
         << "  --distortion-camera-model S  Optional camera model label\n"
         << "  --stitch-output-scale N      Runtime stitch/output scale\n"
         << "  --stitch-every-n N           Stitch every N selected pairs\n"
-        << "  --gpu-mode M      off/auto/on\n"
+        << "  --gpu-mode M      off/auto/on/only\n"
         << "  --gpu-device N    CUDA device index\n"
         << "  --print-gpu-direct-status  Print gpu-direct dependency status and exit\n"
         << "  --headless-benchmark  Enable benchmark mode metadata\n";
@@ -155,7 +155,7 @@ int main(int argc, char** argv) {
     const int heartbeat_ms = read_int_arg(argc, argv, "--heartbeat-ms", 1000);
 
     hogak::engine::EngineConfig config{};
-    config.gpu_mode = "on";
+    config.gpu_mode = "only";
     config.input_runtime = read_string_arg(argc, argv, "--input-runtime", "ffmpeg-cuda");
     config.ffmpeg_bin = read_string_arg(argc, argv, "--ffmpeg-bin", "");
     config.homography_file = read_string_arg(argc, argv, "--homography-file", "");
@@ -239,7 +239,7 @@ int main(int argc, char** argv) {
     config.sync_auto_offset_confidence_min = read_double_arg(argc, argv, "--sync-auto-offset-confidence-min", 0.85);
     config.stitch_output_scale = read_double_arg(argc, argv, "--stitch-output-scale", 1.0);
     config.stitch_every_n = read_int_arg(argc, argv, "--stitch-every-n", 1);
-    config.gpu_mode = read_string_arg(argc, argv, "--gpu-mode", "on");
+    config.gpu_mode = read_string_arg(argc, argv, "--gpu-mode", "only");
     config.gpu_device = read_int_arg(argc, argv, "--gpu-device", 0);
     config.headless_benchmark = has_flag(argc, argv, "--headless-benchmark");
 

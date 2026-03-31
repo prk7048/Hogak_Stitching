@@ -31,8 +31,8 @@ OUTPUT_PRESETS: dict[str, OutputPreset] = {
         muxer="mpegts",
         output_scale=0.50,
         sync_pair_mode="service",
-        allow_frame_reuse=False,
-        sync_match_max_delta_ms=60.0,
+        allow_frame_reuse=True,
+        sync_match_max_delta_ms=75.0,
     ),
     "realtime_gpu_1080p": OutputPreset(
         key="realtime_gpu_1080p",
@@ -45,8 +45,8 @@ OUTPUT_PRESETS: dict[str, OutputPreset] = {
         muxer="mpegts",
         output_scale=0.75,
         sync_pair_mode="service",
-        allow_frame_reuse=False,
-        sync_match_max_delta_ms=75.0,
+        allow_frame_reuse=True,
+        sync_match_max_delta_ms=90.0,
     ),
 }
 

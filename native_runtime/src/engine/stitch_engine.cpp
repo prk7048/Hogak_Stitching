@@ -101,6 +101,57 @@ bool output_config_enabled(const OutputConfig& config) {
     return config.runtime != "none" && !config.target.empty();
 }
 
+bool input_pipe_format_is_nv12(const StreamConfig& config);
+
+bool gpu_only_mode_enabled(const EngineConfig& config) {
+    return config.gpu_mode == "only";
+}
+
+bool fail_gpu_only_validation(std::string* reason_out, const std::string& reason) {
+    if (reason_out != nullptr) {
+        *reason_out = reason;
+    }
+    return false;
+}
+
+bool validate_gpu_only_config(const EngineConfig& config, std::string* reason_out) {
+    if (!gpu_only_mode_enabled(config)) {
+        return true;
+    }
+    if (config.input_runtime != "ffmpeg-cuda") {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires runtime.input_runtime=ffmpeg-cuda");
+    }
+    if (!input_pipe_format_is_nv12(config.left) || !input_pipe_format_is_nv12(config.right)) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires NV12 input on both cameras");
+    }
+    if (config.output.runtime != "none") {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires outputs.probe.runtime=none");
+    }
+    if (!config.output.target.empty()) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires outputs.probe.target to be empty");
+    }
+    if (config.output.debug_overlay) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode does not allow probe debug overlay");
+    }
+    if (config.production_output.runtime != "gpu-direct") {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires outputs.transmit.runtime=gpu-direct");
+    }
+    if (config.production_output.target.empty()) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires outputs.transmit.target");
+    }
+    if (config.production_output.debug_overlay) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode does not allow transmit debug overlay");
+    }
+    const int gpu_count = cv::cuda::getCudaEnabledDeviceCount();
+    if (gpu_count <= config.gpu_device) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode could not find the requested CUDA device");
+    }
+    if (!hogak::output::output_runtime_available(config.production_output.runtime)) {
+        return fail_gpu_only_validation(reason_out, "gpu-only mode requires a working gpu-direct output runtime");
+    }
+    return true;
+}
+
 bool input_pipe_format_is_nv12(const StreamConfig& config) {
     return config.input_pipe_format == "nv12";
 }
@@ -746,9 +797,12 @@ struct RuntimeGeometryArtifactData {
     cv::Size output_size{};
     cv::Size left_input_size{};
     cv::Size right_input_size{};
-    double focal_px = 0.0;
-    double center_x = 0.0;
-    double center_y = 0.0;
+    double left_focal_px = 0.0;
+    double left_center_x = 0.0;
+    double left_center_y = 0.0;
+    double right_focal_px = 0.0;
+    double right_center_x = 0.0;
+    double right_center_y = 0.0;
     double residual_alignment_error_px = 0.0;
     int seam_transition_px = 64;
     double seam_smoothness_penalty = 4.0;
@@ -765,6 +819,54 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     }
     *artifact_out = RuntimeGeometryArtifactData{};
     artifact_out->artifact_path = path;
+
+    auto sanitize_projection_side = [&](double* focal_px,
+                                        double* center_x,
+                                        double* center_y,
+                                        const cv::Size& input_size) {
+        if (focal_px == nullptr || center_x == nullptr || center_y == nullptr) {
+            return;
+        }
+        const cv::Size reference_size =
+            (input_size.width > 0 && input_size.height > 0)
+                ? input_size
+                : artifact_out->output_size;
+        const int reference_width = std::max(1, reference_size.width);
+        const int reference_height = std::max(1, reference_size.height);
+        const double reference_max_dim =
+            static_cast<double>(std::max(reference_width, reference_height));
+        const bool center_out_of_bounds =
+            *center_x <= 0.0 ||
+            *center_x >= static_cast<double>(reference_width) ||
+            *center_y <= 0.0 ||
+            *center_y >= static_cast<double>(reference_height);
+        const bool center_matches_output_canvas =
+            artifact_out->output_size.width > 0 &&
+            artifact_out->output_size.height > 0 &&
+            (reference_width != artifact_out->output_size.width ||
+             reference_height != artifact_out->output_size.height) &&
+            std::abs(*center_x - static_cast<double>(artifact_out->output_size.width) * 0.5) <= 1.0 &&
+            std::abs(*center_y - static_cast<double>(artifact_out->output_size.height) * 0.5) <= 1.0;
+        const bool should_reset_center = center_out_of_bounds || center_matches_output_canvas;
+        const double output_default_focal_px =
+            static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+        const bool focal_matches_output_canvas =
+            should_reset_center &&
+            artifact_out->output_size.width > 0 &&
+            artifact_out->output_size.height > 0 &&
+            std::abs(*focal_px - output_default_focal_px) <= 1.0;
+        if (*focal_px <= 0.0 ||
+            focal_matches_output_canvas ||
+            (center_out_of_bounds && *focal_px > reference_max_dim * 1.25)) {
+            *focal_px = reference_max_dim * 0.90;
+        }
+        if (should_reset_center || *center_x <= 0.0 || *center_x >= static_cast<double>(reference_width)) {
+            *center_x = static_cast<double>(reference_width) * 0.5;
+        }
+        if (should_reset_center || *center_y <= 0.0 || *center_y >= static_cast<double>(reference_height)) {
+            *center_y = static_cast<double>(reference_height) * 0.5;
+        }
+    };
 
     try {
         cv::FileStorage fs(path, cv::FileStorage::READ | cv::FileStorage::FORMAT_AUTO);
@@ -846,27 +948,24 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             std::vector<double> left_output_resolution;
             std::vector<double> right_output_resolution;
             if (!left_projection.empty()) {
-                left_projection["focal_px"] >> artifact_out->focal_px;
+                left_projection["focal_px"] >> artifact_out->left_focal_px;
                 left_projection["center"] >> left_center;
                 left_projection["input_resolution"] >> left_input_resolution;
                 left_projection["output_resolution"] >> left_output_resolution;
             }
             if (!right_projection.empty()) {
-                double right_focal_px = 0.0;
-                right_projection["focal_px"] >> right_focal_px;
-                if (artifact_out->focal_px <= 0.0) {
-                    artifact_out->focal_px = right_focal_px;
-                }
+                right_projection["focal_px"] >> artifact_out->right_focal_px;
                 right_projection["center"] >> right_center;
                 right_projection["input_resolution"] >> right_input_resolution;
                 right_projection["output_resolution"] >> right_output_resolution;
             }
             if (left_center.size() >= 2) {
-                artifact_out->center_x = left_center[0];
-                artifact_out->center_y = left_center[1];
-            } else if (right_center.size() >= 2) {
-                artifact_out->center_x = right_center[0];
-                artifact_out->center_y = right_center[1];
+                artifact_out->left_center_x = left_center[0];
+                artifact_out->left_center_y = left_center[1];
+            }
+            if (right_center.size() >= 2) {
+                artifact_out->right_center_x = right_center[0];
+                artifact_out->right_center_y = right_center[1];
             }
             if (left_input_resolution.size() >= 2) {
                 artifact_out->left_input_size = cv::Size(
@@ -936,53 +1035,30 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                     artifact_out->right_input_size.height));
             artifact_out->output_size = cv::Size(base_width, base_height);
         }
-
-        cv::Size projection_reference_size = artifact_out->left_input_size;
-        if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
-            projection_reference_size = artifact_out->right_input_size;
+        if (artifact_out->left_focal_px <= 0.0) {
+            artifact_out->left_focal_px = artifact_out->right_focal_px;
         }
-        if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
-            projection_reference_size = artifact_out->output_size;
+        if (artifact_out->right_focal_px <= 0.0) {
+            artifact_out->right_focal_px = artifact_out->left_focal_px;
         }
-        const double projection_reference_max_dim =
-            static_cast<double>(std::max(projection_reference_size.width, projection_reference_size.height));
-        const bool center_out_of_bounds =
-            artifact_out->center_x <= 0.0 ||
-            artifact_out->center_x >= static_cast<double>(projection_reference_size.width) ||
-            artifact_out->center_y <= 0.0 ||
-            artifact_out->center_y >= static_cast<double>(projection_reference_size.height);
-        const bool center_matches_output_canvas =
-            projection_reference_size.width > 0 &&
-            projection_reference_size.height > 0 &&
-            artifact_out->output_size.width > 0 &&
-            artifact_out->output_size.height > 0 &&
-            (projection_reference_size.width != artifact_out->output_size.width ||
-             projection_reference_size.height != artifact_out->output_size.height) &&
-            std::abs(artifact_out->center_x - static_cast<double>(artifact_out->output_size.width) * 0.5) <= 1.0 &&
-            std::abs(artifact_out->center_y - static_cast<double>(artifact_out->output_size.height) * 0.5) <= 1.0;
-        const bool should_reset_center = center_out_of_bounds || center_matches_output_canvas;
-        const double output_default_focal_px =
-            static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
-        const bool focal_matches_output_canvas =
-            should_reset_center &&
-            artifact_out->output_size.width > 0 &&
-            artifact_out->output_size.height > 0 &&
-            std::abs(artifact_out->focal_px - output_default_focal_px) <= 1.0;
-        if (artifact_out->focal_px <= 0.0 ||
-            focal_matches_output_canvas ||
-            (center_out_of_bounds && artifact_out->focal_px > projection_reference_max_dim * 1.25)) {
-            artifact_out->focal_px = projection_reference_max_dim * 0.90;
+        if (artifact_out->left_center_x <= 0.0 && artifact_out->right_center_x > 0.0) {
+            artifact_out->left_center_x = artifact_out->right_center_x;
+            artifact_out->left_center_y = artifact_out->right_center_y;
         }
-        if (should_reset_center ||
-            artifact_out->center_x <= 0.0 ||
-            artifact_out->center_x >= static_cast<double>(projection_reference_size.width)) {
-            artifact_out->center_x = static_cast<double>(projection_reference_size.width) * 0.5;
+        if (artifact_out->right_center_x <= 0.0 && artifact_out->left_center_x > 0.0) {
+            artifact_out->right_center_x = artifact_out->left_center_x;
+            artifact_out->right_center_y = artifact_out->left_center_y;
         }
-        if (should_reset_center ||
-            artifact_out->center_y <= 0.0 ||
-            artifact_out->center_y >= static_cast<double>(projection_reference_size.height)) {
-            artifact_out->center_y = static_cast<double>(projection_reference_size.height) * 0.5;
-        }
+        sanitize_projection_side(
+            &artifact_out->left_focal_px,
+            &artifact_out->left_center_x,
+            &artifact_out->left_center_y,
+            artifact_out->left_input_size);
+        sanitize_projection_side(
+            &artifact_out->right_focal_px,
+            &artifact_out->right_center_x,
+            &artifact_out->right_center_y,
+            artifact_out->right_input_size);
         if (artifact_out->alignment_matrix.empty()) {
             artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
         }
@@ -1035,13 +1111,8 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
 
     double numeric_value = 0.0;
     if (extract_json_number_for_key(text, "\"focal_px\"", &numeric_value)) {
-        artifact_out->focal_px = numeric_value;
-    }
-    if (extract_json_number_for_key(text, "\"center_x\"", &numeric_value)) {
-        artifact_out->center_x = numeric_value;
-    }
-    if (extract_json_number_for_key(text, "\"center_y\"", &numeric_value)) {
-        artifact_out->center_y = numeric_value;
+        artifact_out->left_focal_px = numeric_value;
+        artifact_out->right_focal_px = numeric_value;
     }
     if (extract_json_number_for_key(text, "\"transition_px\"", &numeric_value)) {
         artifact_out->seam_transition_px = static_cast<int>(std::llround(numeric_value));
@@ -1075,52 +1146,58 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
         artifact_out->output_size = cv::Size(artifact_out->left_input_size.width, artifact_out->left_input_size.height);
     }
-    cv::Size projection_reference_size = artifact_out->left_input_size;
-    if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
-        projection_reference_size = artifact_out->right_input_size;
+    std::string left_projection_text;
+    if (extract_json_object_for_key(text, "\"left\"", &left_projection_text)) {
+        if (extract_json_number_for_key(left_projection_text, "\"focal_px\"", &numeric_value)) {
+            artifact_out->left_focal_px = numeric_value;
+        }
+        std::string center_text;
+        if (extract_json_array_for_key(left_projection_text, "\"center\"", &center_text)) {
+            std::vector<double> center_values;
+            if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
+                artifact_out->left_center_x = center_values[0];
+                artifact_out->left_center_y = center_values[1];
+            }
+        }
     }
-    if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
-        projection_reference_size = artifact_out->output_size;
+    std::string right_projection_text;
+    if (extract_json_object_for_key(text, "\"right\"", &right_projection_text)) {
+        if (extract_json_number_for_key(right_projection_text, "\"focal_px\"", &numeric_value)) {
+            artifact_out->right_focal_px = numeric_value;
+        }
+        std::string center_text;
+        if (extract_json_array_for_key(right_projection_text, "\"center\"", &center_text)) {
+            std::vector<double> center_values;
+            if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
+                artifact_out->right_center_x = center_values[0];
+                artifact_out->right_center_y = center_values[1];
+            }
+        }
     }
-    const double projection_reference_max_dim =
-        static_cast<double>(std::max(projection_reference_size.width, projection_reference_size.height));
-    const bool center_out_of_bounds =
-        artifact_out->center_x <= 0.0 ||
-        artifact_out->center_x >= static_cast<double>(projection_reference_size.width) ||
-        artifact_out->center_y <= 0.0 ||
-        artifact_out->center_y >= static_cast<double>(projection_reference_size.height);
-    const bool center_matches_output_canvas =
-        projection_reference_size.width > 0 &&
-        projection_reference_size.height > 0 &&
-        artifact_out->output_size.width > 0 &&
-        artifact_out->output_size.height > 0 &&
-        (projection_reference_size.width != artifact_out->output_size.width ||
-         projection_reference_size.height != artifact_out->output_size.height) &&
-        std::abs(artifact_out->center_x - static_cast<double>(artifact_out->output_size.width) * 0.5) <= 1.0 &&
-        std::abs(artifact_out->center_y - static_cast<double>(artifact_out->output_size.height) * 0.5) <= 1.0;
-    const bool should_reset_center = center_out_of_bounds || center_matches_output_canvas;
-    const double output_default_focal_px =
-        static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
-    const bool focal_matches_output_canvas =
-        should_reset_center &&
-        artifact_out->output_size.width > 0 &&
-        artifact_out->output_size.height > 0 &&
-        std::abs(artifact_out->focal_px - output_default_focal_px) <= 1.0;
-    if (artifact_out->focal_px <= 0.0 ||
-        focal_matches_output_canvas ||
-        (center_out_of_bounds && artifact_out->focal_px > projection_reference_max_dim * 1.25)) {
-        artifact_out->focal_px = projection_reference_max_dim * 0.90;
+    if (artifact_out->left_focal_px <= 0.0) {
+        artifact_out->left_focal_px = artifact_out->right_focal_px;
     }
-    if (should_reset_center ||
-        artifact_out->center_x <= 0.0 ||
-        artifact_out->center_x >= static_cast<double>(projection_reference_size.width)) {
-        artifact_out->center_x = static_cast<double>(projection_reference_size.width) * 0.5;
+    if (artifact_out->right_focal_px <= 0.0) {
+        artifact_out->right_focal_px = artifact_out->left_focal_px;
     }
-    if (should_reset_center ||
-        artifact_out->center_y <= 0.0 ||
-        artifact_out->center_y >= static_cast<double>(projection_reference_size.height)) {
-        artifact_out->center_y = static_cast<double>(projection_reference_size.height) * 0.5;
+    if (artifact_out->left_center_x <= 0.0 && artifact_out->right_center_x > 0.0) {
+        artifact_out->left_center_x = artifact_out->right_center_x;
+        artifact_out->left_center_y = artifact_out->right_center_y;
     }
+    if (artifact_out->right_center_x <= 0.0 && artifact_out->left_center_x > 0.0) {
+        artifact_out->right_center_x = artifact_out->left_center_x;
+        artifact_out->right_center_y = artifact_out->left_center_y;
+    }
+    sanitize_projection_side(
+        &artifact_out->left_focal_px,
+        &artifact_out->left_center_x,
+        &artifact_out->left_center_y,
+        artifact_out->left_input_size);
+    sanitize_projection_side(
+        &artifact_out->right_focal_px,
+        &artifact_out->right_center_x,
+        &artifact_out->right_center_y,
+        artifact_out->right_input_size);
     return true;
 }
 
@@ -2636,6 +2713,15 @@ bool StitchEngine::start(const EngineConfig& config) {
     load_runtime_geometry_locked();
     output_writer_.reset();
     production_output_writer_.reset();
+    std::string gpu_only_reason;
+    if (!validate_gpu_only_config(config, &gpu_only_reason)) {
+        metrics_.status = "gpu_only_blocked";
+        metrics_.gpu_reason = gpu_only_reason;
+        metrics_.gpu_feature_enabled = false;
+        metrics_.gpu_feature_reason = gpu_only_reason;
+        running_.store(false);
+        return false;
+    }
     gpu_available_ = metrics_.gpu_enabled && (cv::cuda::getCudaEnabledDeviceCount() > config.gpu_device);
     gpu_nv12_input_supported_ = true;
     if (metrics_.gpu_enabled && !gpu_available_) {
@@ -2699,6 +2785,14 @@ void StitchEngine::stop() {
 
 bool StitchEngine::reload_config(const EngineConfig& config) {
     std::lock_guard<std::mutex> lock(mutex_);
+    std::string gpu_only_reason;
+    if (!validate_gpu_only_config(config, &gpu_only_reason)) {
+        metrics_.status = "gpu_only_blocked";
+        metrics_.gpu_reason = gpu_only_reason;
+        metrics_.gpu_feature_enabled = false;
+        metrics_.gpu_feature_reason = gpu_only_reason;
+        return false;
+    }
     const bool restart_readers =
         (config.left.url != config_.left.url) ||
         (config.right.url != config_.right.url) ||
@@ -2890,9 +2984,12 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
     state->artifact_path = artifact.artifact_path.empty() ? path : artifact.artifact_path;
     state->output_size = artifact.output_size;
     state->alignment_matrix = artifact.alignment_matrix.empty() ? cv::Mat::eye(3, 3, CV_64F) : artifact.alignment_matrix.clone();
-    state->focal_px = artifact.focal_px;
-    state->center_x = artifact.center_x;
-    state->center_y = artifact.center_y;
+    state->left_focal_px = artifact.left_focal_px;
+    state->left_center_x = artifact.left_center_x;
+    state->left_center_y = artifact.left_center_y;
+    state->right_focal_px = artifact.right_focal_px;
+    state->right_center_x = artifact.right_center_x;
+    state->right_center_y = artifact.right_center_y;
     state->residual_alignment_error_px = artifact.residual_alignment_error_px;
     state->seam_transition_px = std::max(2, artifact.seam_transition_px);
     state->seam_smoothness_penalty = std::max(0.0, artifact.seam_smoothness_penalty);
@@ -2934,21 +3031,33 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
 
     if (!build_cylindrical_maps_locked(
             left_size,
-            runtime_geometry_.focal_px,
-            runtime_geometry_.center_x,
-            runtime_geometry_.center_y,
+            runtime_geometry_.left_focal_px,
+            runtime_geometry_.left_center_x,
+            runtime_geometry_.left_center_y,
             &runtime_geometry_.cylindrical_left_map_x,
             &runtime_geometry_.cylindrical_left_map_y)) {
         return false;
     }
     if (!build_cylindrical_maps_locked(
             right_size,
-            runtime_geometry_.focal_px,
-            runtime_geometry_.center_x,
-            runtime_geometry_.center_y,
+            runtime_geometry_.right_focal_px,
+            runtime_geometry_.right_center_x,
+            runtime_geometry_.right_center_y,
             &runtime_geometry_.cylindrical_right_map_x,
             &runtime_geometry_.cylindrical_right_map_y)) {
         return false;
+    }
+    if (gpu_available_) {
+        try {
+            runtime_geometry_.cylindrical_left_map_x_gpu.upload(runtime_geometry_.cylindrical_left_map_x);
+            runtime_geometry_.cylindrical_left_map_y_gpu.upload(runtime_geometry_.cylindrical_left_map_y);
+            runtime_geometry_.cylindrical_right_map_x_gpu.upload(runtime_geometry_.cylindrical_right_map_x);
+            runtime_geometry_.cylindrical_right_map_y_gpu.upload(runtime_geometry_.cylindrical_right_map_y);
+        } catch (const cv::Exception& e) {
+            gpu_available_ = false;
+            metrics_.gpu_errors += 1;
+            metrics_.gpu_reason = std::string("cuda cylindrical map upload failed: ") + e.what();
+        }
     }
 
     cv::Size output_size;
@@ -3018,7 +3127,7 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         weight_right_3c_ = cv::Mat::zeros(output_size_, CV_32FC3);
     }
 
-    if (gpu_available_ && runtime_geometry_.model != "cylindrical-affine") {
+    if (gpu_available_) {
         try {
             gpu_overlap_mask_.upload(overlap_mask_);
             gpu_only_left_mask_.upload(only_left_mask_);
@@ -3042,9 +3151,9 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
     metrics_.geometry_artifact_model = runtime_geometry_.model;
-    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
-    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
-    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
     metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
     metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
     metrics_.exposure_gain = last_exposure_gain_;
@@ -3061,9 +3170,9 @@ void StitchEngine::apply_runtime_geometry_to_metrics_locked() {
         (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
     metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
-    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
-    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
     metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
     metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
     metrics_.exposure_gain = last_exposure_gain_;
@@ -3148,7 +3257,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         weight_right_3c_ = cv::Mat::zeros(output_size_, CV_32FC3);
     }
 
-    if (gpu_available_ && runtime_geometry_.model != "cylindrical-affine") {
+    if (gpu_available_) {
         try {
             gpu_overlap_mask_.upload(overlap_mask_);
             gpu_only_left_mask_.upload(only_left_mask_);
@@ -3308,9 +3417,9 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
             (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
         metrics_.geometry_artifact_path = runtime_geometry_source_path_;
         metrics_.geometry_artifact_model = runtime_geometry_.model;
-        metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
-        metrics_.cylindrical_center_x = runtime_geometry_.center_x;
-        metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+        metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
+        metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
+        metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
         metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
         metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
         metrics_.exposure_gain = last_exposure_gain_;
@@ -3357,9 +3466,9 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
     metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.cylindrical_focal_px = runtime_geometry_.focal_px;
-    metrics_.cylindrical_center_x = runtime_geometry_.center_x;
-    metrics_.cylindrical_center_y = runtime_geometry_.center_y;
+    metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
+    metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
+    metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
     metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
     metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
     metrics_.exposure_gain = last_exposure_gain_;
@@ -3568,7 +3677,8 @@ bool StitchEngine::stitch_pair_locked(
 
     const std::int64_t next_frame_index = metrics_.frame_index + 1;
     const bool stale_pair = left_reused || right_reused || metrics_.left_content_frozen || metrics_.right_content_frozen;
-    const bool sample_heavy_metrics = should_sample_heavy_metrics(next_frame_index) && !stale_pair;
+    const bool gpu_only_mode = gpu_only_mode_enabled(config_);
+    const bool sample_heavy_metrics = !gpu_only_mode && should_sample_heavy_metrics(next_frame_index) && !stale_pair;
     const bool probe_enabled = output_config_enabled(config_.output);
     const bool production_enabled = output_config_enabled(config_.production_output);
     const auto probe_caps = hogak::output::get_output_runtime_capabilities(config_.output.runtime);
@@ -3585,6 +3695,9 @@ bool StitchEngine::stitch_pair_locked(
     cv::Mat left_corrected_cpu;
     cv::Mat right_corrected_cpu;
     bool used_gpu_blend = false;
+    bool used_dynamic_seam = false;
+    bool used_exposure_compensation = false;
+    const bool cylindrical_runtime = runtime_geometry_.model == "cylindrical-affine";
 
     if (gpu_available_) {
         try {
@@ -3670,6 +3783,14 @@ bool StitchEngine::stitch_pair_locked(
                     }
                     gpu_nv12_input_supported_ = false;
                     metrics_.gpu_reason = std::string("cuda nv12 input unsupported: ") + e.what();
+                    if (gpu_only_mode) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "gpu-only nv12 upload path unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
                     if (!ensure_cpu_frame(cpu_frame, raw_input, stream_config, input_seq, cached_frame, cached_seq)) {
                         throw;
                     }
@@ -3729,6 +3850,26 @@ bool StitchEngine::stitch_pair_locked(
                         cv::BORDER_CONSTANT,
                         cv::Scalar());
                     left_gpu_for_stitch = &gpu_left_corrected_;
+                }
+                if (cylindrical_runtime) {
+                    if (runtime_geometry_.cylindrical_left_map_x_gpu.empty() ||
+                        runtime_geometry_.cylindrical_left_map_y_gpu.empty()) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "left cylindrical gpu map unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    cv::cuda::remap(
+                        *left_gpu_for_stitch,
+                        gpu_left_cylindrical_,
+                        runtime_geometry_.cylindrical_left_map_x_gpu,
+                        runtime_geometry_.cylindrical_left_map_y_gpu,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar());
+                    left_gpu_for_stitch = &gpu_left_cylindrical_;
                 }
                 gpu_left_canvas_.create(output_size_, CV_8UC3);
                 gpu_left_canvas_.setTo(cv::Scalar::all(0));
@@ -3790,6 +3931,26 @@ bool StitchEngine::stitch_pair_locked(
                         cv::Scalar());
                     right_gpu_for_stitch = &gpu_right_corrected_;
                 }
+                if (cylindrical_runtime) {
+                    if (runtime_geometry_.cylindrical_right_map_x_gpu.empty() ||
+                        runtime_geometry_.cylindrical_right_map_y_gpu.empty()) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "right cylindrical gpu map unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    cv::cuda::remap(
+                        *right_gpu_for_stitch,
+                        gpu_right_cylindrical_,
+                        runtime_geometry_.cylindrical_right_map_x_gpu,
+                        runtime_geometry_.cylindrical_right_map_y_gpu,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar());
+                    right_gpu_for_stitch = &gpu_right_cylindrical_;
+                }
                 cv::cuda::warpPerspective(
                     *right_gpu_for_stitch,
                     gpu_right_warped_,
@@ -3850,6 +4011,13 @@ bool StitchEngine::stitch_pair_locked(
     }
 
     if (!used_gpu_blend) {
+        if (gpu_only_mode) {
+            metrics_.status = "gpu_only_path_unavailable";
+            metrics_.stitch_fps = 0.0;
+            metrics_.gpu_feature_enabled = false;
+            metrics_.gpu_feature_reason = "gpu-only mode could not keep the stitch path on GPU";
+            return false;
+        }
         if (runtime_geometry_.model == "cylindrical-affine") {
             if (left_cpu_frame.empty()) {
                 if (selected_pair.left_seq > 0 &&
@@ -3983,6 +4151,8 @@ bool StitchEngine::stitch_pair_locked(
             }
             metrics_.cpu_blend_count += 1;
             metrics_.blend_mode = "dynamic-path";
+            used_dynamic_seam = true;
+            used_exposure_compensation = runtime_geometry_.exposure_enabled;
         } else {
         if (left_cpu_frame.empty()) {
             if (selected_pair.left_seq > 0 &&
@@ -4114,7 +4284,23 @@ bool StitchEngine::stitch_pair_locked(
     metrics_.stitched_count += 1;
     metrics_.frame_index += 1;
     metrics_.status = "stitching";
-    metrics_.blend_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
+    if (!used_dynamic_seam) {
+        last_seam_path_jitter_px_ = 0.0;
+        metrics_.seam_path_jitter_px = 0.0;
+    }
+    if (!used_exposure_compensation) {
+        last_exposure_gain_ = 1.0;
+        last_exposure_bias_ = 0.0;
+        metrics_.exposure_gain = 1.0;
+        metrics_.exposure_bias = 0.0;
+    }
+    metrics_.seam_mode = used_dynamic_seam ? "dynamic-path" : "seam_feather";
+    metrics_.blend_mode = metrics_.seam_mode;
+    metrics_.exposure_mode = used_exposure_compensation ? "gain-bias" : "off";
+    metrics_.gpu_feature_enabled = used_gpu_blend;
+    metrics_.gpu_feature_reason = used_gpu_blend
+        ? "gpu-resident stitch path active"
+        : (gpu_only_mode ? "gpu-only mode blocked CPU fallback" : "cpu stitch fallback active");
     if (last_worker_timestamp_ns_ > 0) {
         metrics_.stitch_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
@@ -4140,6 +4326,12 @@ bool StitchEngine::stitch_pair_locked(
         cv::Mat prepared_frame;
         const cv::cuda::GpuMat* prepared_gpu_frame = nullptr;
         const auto output_caps = hogak::output::get_output_runtime_capabilities(output_config.runtime);
+        if (gpu_only_mode &&
+            (output_config.debug_overlay || output_caps.requires_cpu_input || !output_caps.supports_gpu_input)) {
+            *last_error = "gpu-only mode requires a GPU-capable output path without debug overlay";
+            metrics_.status = "gpu_only_output_blocked";
+            return;
+        }
         const bool needs_cpu_prepared_frame =
             output_config.debug_overlay || output_caps.requires_cpu_input || !output_caps.supports_gpu_input;
         const bool prepared_ok = prepare_output_frame_locked(
@@ -4400,8 +4592,10 @@ void StitchEngine::update_metrics_locked() {
             ? (wait_paired_fresh_right_age_sum_ms_ / static_cast<double>(metrics_.wait_paired_fresh_right_count))
             : 0.0;
     metrics_.sync_pair_mode = config_.sync_pair_mode;
-    metrics_.gpu_feature_enabled = false;
-    metrics_.gpu_feature_reason = "not implemented in native runtime yet";
+    metrics_.gpu_feature_enabled = gpu_only_mode_enabled(config_);
+    metrics_.gpu_feature_reason = gpu_only_mode_enabled(config_)
+        ? "gpu-only mode expects GPU-resident decode, stitch, and transmit"
+        : "gpu stitch path is used opportunistically";
     metrics_.matches = 0;
     metrics_.inliers = 0;
     metrics_.calibrated = calibrated_;
@@ -4642,11 +4836,17 @@ void StitchEngine::update_metrics_locked() {
     }
 
     const double output_scale = clamp_output_scale(config_.stitch_output_scale);
+    const bool gpu_only_mode = gpu_only_mode_enabled(config_);
     const bool use_gpu_nv12_fast_path =
         gpu_available_ &&
         gpu_nv12_input_supported_ &&
         input_pipe_format_is_nv12(config_.left) &&
         input_pipe_format_is_nv12(config_.right);
+    if (gpu_only_mode && !use_gpu_nv12_fast_path) {
+        metrics_.status = "gpu_only_input_unavailable";
+        metrics_.gpu_reason = "gpu-only mode requires NV12 fast-path input without CPU staging";
+        return;
+    }
     cv::Mat left_frame;
     cv::Mat right_frame;
     const cv::Mat* left_raw_input = nullptr;

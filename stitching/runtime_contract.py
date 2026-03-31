@@ -19,7 +19,7 @@ SyncTimeSource = Literal[
     "wallclock",
 ]
 DistortionMode = Literal["off", "runtime-lines"]
-GpuMode = Literal["off", "auto", "on"]
+GpuMode = Literal["off", "auto", "on", "only"]
 CommandType = Literal[
     "start",
     "stop",
@@ -300,9 +300,14 @@ def normalize_schema_v2_reload_payload(payload: dict[str, Any]) -> dict[str, Any
         ),
     }
 
+    normalized_probe_runtime = _require_string(probe.get("runtime"), field_name="outputs.probe.runtime")
     normalized_probe = {
-        "runtime": _require_string(probe.get("runtime"), field_name="outputs.probe.runtime"),
-        "target": _require_string(probe.get("target"), field_name="outputs.probe.target"),
+        "runtime": normalized_probe_runtime,
+        "target": _require_string(
+            probe.get("target"),
+            field_name="outputs.probe.target",
+            allow_empty=normalized_probe_runtime == "none",
+        ),
         "codec": _require_string(probe.get("codec"), field_name="outputs.probe.codec"),
         "bitrate": _require_string(probe.get("bitrate"), field_name="outputs.probe.bitrate"),
         "preset": _require_string(probe.get("preset"), field_name="outputs.probe.preset"),
@@ -312,9 +317,14 @@ def normalize_schema_v2_reload_payload(payload: dict[str, Any]) -> dict[str, Any
         "fps": _require_number(probe.get("fps"), field_name="outputs.probe.fps"),
         "debug_overlay": _require_bool(probe.get("debug_overlay"), field_name="outputs.probe.debug_overlay"),
     }
+    normalized_transmit_runtime = _require_string(transmit.get("runtime"), field_name="outputs.transmit.runtime")
     normalized_transmit = {
-        "runtime": _require_string(transmit.get("runtime"), field_name="outputs.transmit.runtime"),
-        "target": _require_string(transmit.get("target"), field_name="outputs.transmit.target"),
+        "runtime": normalized_transmit_runtime,
+        "target": _require_string(
+            transmit.get("target"),
+            field_name="outputs.transmit.target",
+            allow_empty=normalized_transmit_runtime == "none",
+        ),
         "codec": _require_string(transmit.get("codec"), field_name="outputs.transmit.codec"),
         "bitrate": _require_string(transmit.get("bitrate"), field_name="outputs.transmit.bitrate"),
         "preset": _require_string(transmit.get("preset"), field_name="outputs.transmit.preset"),
@@ -566,7 +576,7 @@ class EngineConfig:
     ransac_thresh: float = 6.0
     max_features: int = 2800
     manual_points: int = 4
-    gpu_mode: GpuMode = "on"
+    gpu_mode: GpuMode = "only"
     gpu_device: int = 0
     cpu_threads: int = 0
     headless_benchmark: bool = False

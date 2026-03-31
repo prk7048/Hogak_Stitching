@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import normalize_schema_v2_reload_payload
 from stitching.runtime_geometry_artifact import load_runtime_geometry_artifact, runtime_geometry_artifact_path
-from stitching.runtime_launcher import RuntimeLaunchSpec
+from stitching.runtime_launcher import RuntimeLaunchSpec, query_gpu_direct_status
 from stitching.runtime_site_config import load_runtime_site_config, repo_root, require_configured_rtsp_urls
 from stitching.runtime_supervisor import RuntimeSupervisor
 
@@ -224,6 +224,7 @@ class RuntimeService:
         self._latest_validation: dict[str, Any] = {}
         self._last_error = ""
         self._last_status = "idle"
+        self._gpu_only_blockers: list[str] = []
 
     def _record_event(self, event_type: str, payload: dict[str, Any] | None = None, *, seq: int = 0) -> dict[str, Any]:
         record = {
@@ -662,6 +663,7 @@ class RuntimeService:
             "production_output_runtime_mode": transmit_runtime,
             "sync_pair_mode": str(launch_spec.sync_pair_mode),
             "runtime_schema_version": 2,
+            "gpu_only_mode": str(launch_spec.gpu_mode).strip().lower() == "only",
         }
         return RuntimePlan(
             geometry_artifact_path=geometry_artifact,
@@ -697,6 +699,9 @@ class RuntimeService:
             "latest_validation": self._latest_validation,
             "preview_status": None if self._preview_worker is None else self._preview_worker.status,
             "event_count": len(self._events),
+            "gpu_only_mode": True,
+            "gpu_only_ready": len(self._gpu_only_blockers) == 0,
+            "gpu_only_blockers": list(self._gpu_only_blockers),
         }
         snapshot.update(self._flatten_truth_metrics(self._latest_metrics))
         if self._latest_validation:
@@ -706,6 +711,9 @@ class RuntimeService:
             for key in ("geometry_artifact_path", "output_runtime_mode", "production_output_runtime_mode"):
                 if not snapshot.get(key):
                     snapshot[key] = summary.get(key, "")
+            snapshot["gpu_only_mode"] = bool(summary.get("gpu_only_mode", True))
+            snapshot["gpu_only_ready"] = len(self._gpu_only_blockers) == 0
+            snapshot["gpu_only_blockers"] = list(self._gpu_only_blockers)
             snapshot.setdefault("validation_mode", "read-only")
             snapshot.setdefault("strict_fresh", summary.get("sync_pair_mode", "") == "service")
             try:
@@ -791,12 +799,56 @@ class RuntimeService:
             "stitch_fps": _float("stitch_fps"),
             "worker_fps": _float("worker_fps"),
             "gpu_enabled": _bool("gpu_enabled"),
+            "gpu_reason": _string("gpu_reason"),
             "gpu_feature_enabled": _bool("gpu_feature_enabled"),
+            "gpu_feature_reason": _string("gpu_feature_reason"),
             "gpu_warp_count": _int("gpu_warp_count"),
             "cpu_warp_count": _int("cpu_warp_count"),
             "gpu_blend_count": _int("gpu_blend_count"),
             "cpu_blend_count": _int("cpu_blend_count"),
         }
+
+    @staticmethod
+    def _gpu_only_blockers_for_plan(plan: RuntimePlan) -> list[str]:
+        spec = plan.launch_spec
+        blockers: list[str] = []
+        if str(spec.gpu_mode).strip().lower() != "only":
+            blockers.append("GPU-only 브랜치에서는 runtime.gpu_mode 가 only 여야 합니다.")
+        if str(spec.input_runtime).strip().lower() != "ffmpeg-cuda":
+            blockers.append("GPU-only 모드에서는 입력 런타임이 ffmpeg-cuda 여야 합니다.")
+        if str(spec.input_pipe_format).strip().lower() != "nv12":
+            blockers.append("GPU-only 모드에서는 입력 파이프 포맷이 nv12 여야 합니다.")
+        if str(spec.output_runtime).strip().lower() != "none":
+            blockers.append("GPU-only 모드에서는 Probe 출력이 비활성화되어야 합니다.")
+        if str(spec.output_target).strip():
+            blockers.append("GPU-only 모드에서는 Probe target 이 비어 있어야 합니다.")
+        if bool(spec.output_debug_overlay):
+            blockers.append("GPU-only 모드에서는 Probe debug overlay 를 사용할 수 없습니다.")
+        if str(spec.production_output_runtime).strip().lower() != "gpu-direct":
+            blockers.append("GPU-only 모드에서는 Transmit runtime 이 gpu-direct 여야 합니다.")
+        if not str(spec.production_output_target).strip():
+            blockers.append("GPU-only 모드에서는 Transmit target 이 필요합니다.")
+        if bool(spec.production_output_debug_overlay):
+            blockers.append("GPU-only 모드에서는 Transmit debug overlay 를 사용할 수 없습니다.")
+        try:
+            gpu_count = int(cv2.cuda.getCudaEnabledDeviceCount())
+        except Exception as exc:
+            blockers.append(f"CUDA 장치 확인에 실패했습니다: {exc}")
+        else:
+            if gpu_count <= int(spec.gpu_device):
+                blockers.append(
+                    f"CUDA 장치 {int(spec.gpu_device)} 를 사용할 수 없습니다. 감지된 장치 수={gpu_count}."
+                )
+        gpu_direct_status = query_gpu_direct_status()
+        if not bool(gpu_direct_status.get("dependency_ready")):
+            status_text = str(
+                gpu_direct_status.get("status")
+                or gpu_direct_status.get("stderr")
+                or gpu_direct_status.get("raw")
+                or "gpu-direct dependency not ready"
+            ).strip()
+            blockers.append(f"gpu-direct 준비 상태가 아닙니다: {status_text}")
+        return blockers
 
     @staticmethod
     def _flatten_artifact_truth(artifact: dict[str, Any]) -> dict[str, Any]:
@@ -844,6 +896,10 @@ class RuntimeService:
         with self._lock:
             try:
                 plan = self._build_plan(request)
+                blockers = self._gpu_only_blockers_for_plan(plan)
+                self._gpu_only_blockers = blockers
+                if blockers:
+                    raise ValueError(" / ".join(blockers))
             except Exception as exc:
                 self._last_error = f"prepare failed: {exc}"
                 self._record_event("error", {"code": "prepare_failed", "message": str(exc)})
@@ -888,6 +944,12 @@ class RuntimeService:
             if self._prepared_plan is None:
                 self._prepared_plan = self._build_plan(request)
             plan = self._prepared_plan
+            blockers = self._gpu_only_blockers_for_plan(plan)
+            self._gpu_only_blockers = blockers
+            if blockers:
+                self._last_error = f"start failed: {' / '.join(blockers)}"
+                self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
+                raise ValueError(" / ".join(blockers))
             self._supervisor = RuntimeSupervisor.launch(plan.launch_spec)
             try:
                 hello = self._supervisor.wait_for_hello(timeout_sec=5.0)
@@ -901,7 +963,8 @@ class RuntimeService:
                 self.stop()
                 raise
             probe_target = plan.summary.get("probe_target", "")
-            if isinstance(probe_target, str) and probe_target.strip():
+            probe_runtime = str(plan.summary.get("output_runtime_mode", "")).strip().lower()
+            if probe_runtime != "none" and isinstance(probe_target, str) and probe_target.strip():
                 self._preview_worker = PreviewWorker(probe_target)
                 self._preview_worker.start()
             self._start_event_pump()

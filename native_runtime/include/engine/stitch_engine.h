@@ -44,9 +44,16 @@ private:
         cv::Mat cylindrical_left_map_y{};
         cv::Mat cylindrical_right_map_x{};
         cv::Mat cylindrical_right_map_y{};
-        double focal_px = 0.0;
-        double center_x = 0.0;
-        double center_y = 0.0;
+        cv::cuda::GpuMat cylindrical_left_map_x_gpu{};
+        cv::cuda::GpuMat cylindrical_left_map_y_gpu{};
+        cv::cuda::GpuMat cylindrical_right_map_x_gpu{};
+        cv::cuda::GpuMat cylindrical_right_map_y_gpu{};
+        double left_focal_px = 0.0;
+        double left_center_x = 0.0;
+        double left_center_y = 0.0;
+        double right_focal_px = 0.0;
+        double right_center_x = 0.0;
+        double right_center_y = 0.0;
         double residual_alignment_error_px = 0.0;
         int seam_transition_px = 64;
         double seam_smoothness_penalty = 4.0;
@@ -253,6 +260,7 @@ private:
     cv::cuda::GpuMat gpu_left_decoded_{};
     cv::cuda::GpuMat gpu_left_input_{};
     cv::cuda::GpuMat gpu_left_corrected_{};
+    cv::cuda::GpuMat gpu_left_cylindrical_{};
     cv::cuda::GpuMat gpu_left_canvas_{};
     cv::cuda::GpuMat gpu_stitched_{};
     cv::cuda::GpuMat gpu_right_nv12_y_{};
@@ -260,6 +268,7 @@ private:
     cv::cuda::GpuMat gpu_right_decoded_{};
     cv::cuda::GpuMat gpu_right_input_{};
     cv::cuda::GpuMat gpu_right_corrected_{};
+    cv::cuda::GpuMat gpu_right_cylindrical_{};
     cv::cuda::GpuMat gpu_right_warped_{};
     cv::cuda::GpuMat gpu_overlap_mask_{};
     cv::cuda::GpuMat gpu_overlap_mask_roi_{};
@@ -277,10 +286,6 @@ private:
     cv::cuda::GpuMat gpu_overlap_u8_{};
     cv::cuda::GpuMat gpu_output_scaled_{};
     cv::cuda::GpuMat gpu_output_canvas_{};
-    cv::Mat cylindrical_left_map_x_{};
-    cv::Mat cylindrical_left_map_y_{};
-    cv::Mat cylindrical_right_map_x_{};
-    cv::Mat cylindrical_right_map_y_{};
     DistortionState left_distortion_{};
     DistortionState right_distortion_{};
     double last_exposure_gain_ = 1.0;

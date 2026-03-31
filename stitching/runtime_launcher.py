@@ -112,7 +112,7 @@ class RuntimeLaunchSpec:
     sync_auto_offset_confidence_min: float = DEFAULT_NATIVE_SYNC_AUTO_OFFSET_CONFIDENCE_MIN
     stitch_output_scale: float = 1.0
     stitch_every_n: int = 1
-    gpu_mode: str = "on"
+    gpu_mode: str = "only"
     gpu_device: int = 0
     headless_benchmark: bool = False
     extra_args: tuple[str, ...] = ()
