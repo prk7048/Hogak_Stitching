@@ -44,6 +44,15 @@ from stitching.distortion_calibration import (
     render_line_hints_preview,
     save_line_hints,
 )
+from stitching.core import (
+    StitchConfig,
+    _blend_feather,
+    _blend_seam_path,
+    _compensate_exposure,
+    _compute_seam_cost_map,
+    _find_seam_path,
+    _prepare_warp_plan,
+)
 from stitching.final_stream_viewer import FinalStreamViewerSpec, launch_final_stream_viewer
 from stitching.native_calibration import (
     NativeCalibrationConfig,
@@ -72,6 +81,12 @@ from stitching.project_defaults import (
     default_output_standard,
 )
 from stitching.runtime_client import RuntimeClient
+from stitching.runtime_geometry_artifact import (
+    load_runtime_geometry_artifact,
+    runtime_geometry_alignment_matrix,
+    runtime_geometry_artifact_path,
+    runtime_geometry_model,
+)
 from stitching.runtime_launcher import RuntimeLaunchSpec
 
 
@@ -537,6 +552,190 @@ def _load_homography_payload(path: str | Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
+def _load_runtime_geometry_preview_artifact(homography_file: str | Path) -> dict[str, Any] | None:
+    try:
+        artifact_path = runtime_geometry_artifact_path(homography_file).expanduser()
+    except Exception:
+        return None
+    if not artifact_path.exists():
+        return None
+    try:
+        artifact = load_runtime_geometry_artifact(artifact_path)
+    except Exception:
+        return None
+    return artifact if isinstance(artifact, dict) else None
+
+
+def _artifact_projection_parameters(
+    artifact: dict[str, Any],
+    side: str,
+    fallback_shape: tuple[int, int],
+) -> tuple[float, float, float]:
+    projection = artifact.get("projection", {}) if isinstance(artifact.get("projection"), dict) else {}
+    side_projection = projection.get(side, {}) if isinstance(projection.get(side), dict) else {}
+    width = max(1, int(fallback_shape[1]))
+    height = max(1, int(fallback_shape[0]))
+    focal = _safe_float(side_projection.get("focal_px"), default=float(max(width, height) * 0.90))
+    center = side_projection.get("center") if isinstance(side_projection.get("center"), list) else None
+    center_x = float(center[0]) if isinstance(center, list) and len(center) >= 1 else (float(width) * 0.5)
+    center_y = float(center[1]) if isinstance(center, list) and len(center) >= 2 else (float(height) * 0.5)
+    return max(1.0, focal), center_x, center_y
+
+
+def _build_cylindrical_maps(
+    image_shape: tuple[int, int],
+    focal_px: float,
+    center_x: float,
+    center_y: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    height = max(1, int(image_shape[0]))
+    width = max(1, int(image_shape[1]))
+    focal = float(max(1.0, focal_px))
+    cx = float(center_x)
+    cy = float(center_y)
+    x_coords = np.arange(width, dtype=np.float32) - np.float32(cx)
+    y_coords = np.arange(height, dtype=np.float32) - np.float32(cy)
+    theta = x_coords / np.float32(focal)
+    source_x = (np.float32(focal) * np.tan(theta)) + np.float32(cx)
+    scale = np.sqrt(((source_x - np.float32(cx)) ** 2) + (np.float32(focal) ** 2)) / np.float32(focal)
+    map_x = np.broadcast_to(source_x[None, :], (height, width)).astype(np.float32).copy()
+    map_y = (y_coords[:, None] * scale[None, :]) + np.float32(cy)
+    return map_x, map_y.astype(np.float32)
+
+
+def _remap_cylindrical_frame(
+    frame: np.ndarray,
+    focal_px: float,
+    center_x: float,
+    center_y: float,
+) -> np.ndarray:
+    import cv2  # type: ignore
+
+    map_x, map_y = _build_cylindrical_maps(frame.shape[:2], focal_px, center_x, center_y)
+    return cv2.remap(frame, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT)
+
+
+def _stitch_config_from_geometry_artifact(artifact: dict[str, Any]) -> StitchConfig:
+    seam = artifact.get("seam", {}) if isinstance(artifact.get("seam"), dict) else {}
+    exposure = artifact.get("exposure", {}) if isinstance(artifact.get("exposure"), dict) else {}
+    return StitchConfig(
+        seam_transition_px=max(2, _safe_int(seam.get("transition_px"), default=64)),
+        seam_smoothness_penalty=max(0.0, _safe_float(seam.get("smoothness_penalty"), default=4.0)),
+        exposure_compensation=bool(exposure.get("enabled", True)),
+        exposure_gain_min=max(0.0, _safe_float(exposure.get("gain_min"), default=0.7)),
+        exposure_gain_max=max(0.0, _safe_float(exposure.get("gain_max"), default=1.4)),
+        exposure_bias_abs_max=max(0.0, _safe_float(exposure.get("bias_abs_max"), default=35.0)),
+    )
+
+
+def _compose_artifact_stitch_preview(
+    *,
+    left_frame: np.ndarray,
+    right_frame: np.ndarray,
+    left_profile: DistortionProfile | None,
+    right_profile: DistortionProfile | None,
+    artifact: dict[str, Any],
+    inlier_payload: dict[str, Any] | None = None,
+) -> np.ndarray | None:
+    try:
+        import cv2  # type: ignore
+    except Exception:
+        return None
+
+    left_corrected = apply_distortion_profile(left_frame, left_profile)
+    right_corrected = apply_distortion_profile(right_frame, right_profile)
+    if left_corrected is None or right_corrected is None:
+        return None
+
+    geometry_model = runtime_geometry_model(artifact)
+    left_prepared = left_corrected
+    right_prepared = right_corrected
+    if geometry_model == "cylindrical-affine":
+        left_focal, left_cx, left_cy = _artifact_projection_parameters(artifact, "left", left_corrected.shape[:2])
+        right_focal, right_cx, right_cy = _artifact_projection_parameters(artifact, "right", right_corrected.shape[:2])
+        left_prepared = _remap_cylindrical_frame(left_corrected, left_focal, left_cx, left_cy)
+        right_prepared = _remap_cylindrical_frame(right_corrected, right_focal, right_cx, right_cy)
+
+    config = _stitch_config_from_geometry_artifact(artifact)
+    transform = runtime_geometry_alignment_matrix(artifact)
+    plan = _prepare_warp_plan(left_prepared.shape[:2], right_prepared.shape[:2], transform, config)
+
+    canvas_left = np.zeros((plan.height, plan.width, 3), dtype=np.uint8)
+    left_mask = np.zeros((plan.height, plan.width), dtype=np.uint8)
+    left_h, left_w = left_prepared.shape[:2]
+    canvas_left[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = left_prepared
+    left_mask[plan.ty : plan.ty + left_h, plan.tx : plan.tx + left_w] = 255
+
+    warped_right = cv2.warpPerspective(
+        right_prepared,
+        plan.homography_adjusted,
+        (plan.width, plan.height),
+    )
+    right_mask = cv2.warpPerspective(
+        np.full(right_prepared.shape[:2], 255, dtype=np.uint8),
+        plan.homography_adjusted,
+        (plan.width, plan.height),
+        flags=cv2.INTER_NEAREST,
+    )
+    overlap = (left_mask > 0) & (right_mask > 0)
+
+    compensated_right = warped_right
+    if config.exposure_compensation and np.any(overlap):
+        compensated_right, _, _ = _compensate_exposure(
+            canvas_left,
+            warped_right,
+            overlap,
+            right_mask,
+            config,
+        )
+
+    seam = artifact.get("seam", {}) if isinstance(artifact.get("seam"), dict) else {}
+    seam_mode = str(seam.get("mode") or ("dynamic-path" if geometry_model == "cylindrical-affine" else "feather")).strip().lower()
+    if seam_mode == "dynamic-path" and np.any(overlap):
+        cost_map = _compute_seam_cost_map(canvas_left, compensated_right, overlap)
+        seam_path = _find_seam_path(
+            overlap,
+            cost_map,
+            smoothness_penalty=float(config.seam_smoothness_penalty),
+            temporal_penalty=max(0.0, _safe_float(seam.get("temporal_penalty"), default=2.0)),
+        )
+        stitched = _blend_seam_path(
+            canvas_left,
+            compensated_right,
+            left_mask,
+            right_mask,
+            seam_path,
+            config.seam_transition_px,
+        )
+    else:
+        stitched = _blend_feather(canvas_left, compensated_right, left_mask, right_mask)
+    return _draw_calibration_inlier_overlay(stitched, inlier_payload=inlier_payload)
+
+
+def _receiver_uri_from_target(target: str) -> str:
+    value = str(target or "").strip()
+    if not value:
+        return ""
+    if value.startswith("udp://"):
+        endpoint = value.split("?", 1)[0][len("udp://") :]
+        host_port = endpoint[1:] if endpoint.startswith("@") else endpoint
+        if ":" not in host_port:
+            return value
+        port = host_port.rsplit(":", 1)[1].strip()
+        return f"udp://@:{port}" if port else value
+    return value
+
+
+def _target_is_loopback_only(target: str) -> bool:
+    value = str(target or "").strip()
+    if value.startswith("udp://"):
+        endpoint = value.split("?", 1)[0][len("udp://") :]
+        host_port = endpoint[1:] if endpoint.startswith("@") else endpoint
+        host = host_port.rsplit(":", 1)[0].strip().lower() if ":" in host_port else host_port.strip().lower()
+        return host in {"127.0.0.1", "localhost", "::1"}
+    return False
+
+
 def _load_calibration_inliers_payload(
     *,
     homography_file: str | Path,
@@ -729,6 +928,22 @@ def _compose_simple_stitch(
         import cv2  # type: ignore
     except Exception:
         return None
+
+    artifact = _load_runtime_geometry_preview_artifact(homography_file)
+    if artifact:
+        try:
+            preview = _compose_artifact_stitch_preview(
+                left_frame=left_frame,
+                right_frame=right_frame,
+                left_profile=left_profile,
+                right_profile=right_profile,
+                artifact=artifact,
+                inlier_payload=inlier_payload,
+            )
+            if preview is not None:
+                return preview
+        except Exception:
+            pass
 
     payload = _load_homography_payload(homography_file)
     if not payload:
@@ -1875,17 +2090,31 @@ class RuntimeUiSession:
     def render_stitch_review_preview(self) -> np.ndarray | None:
         if self.left.frame is None or self.right.frame is None:
             return None
-        return _compose_simple_stitch(
-            left_frame=self.left.frame,
-            right_frame=self.right.frame,
-            left_profile=None,
-            right_profile=None,
-            homography_file=str(getattr(self.args, "homography_file", DEFAULT_NATIVE_HOMOGRAPHY_PATH) or DEFAULT_NATIVE_HOMOGRAPHY_PATH),
-            inlier_payload=self.inlier_overlay_payload() if self.show_calibration_inliers else None,
+        return _bgr_to_rgb(
+            _compose_simple_stitch(
+                left_frame=self.left.frame,
+                right_frame=self.right.frame,
+                left_profile=None,
+                right_profile=None,
+                homography_file=str(getattr(self.args, "homography_file", DEFAULT_NATIVE_HOMOGRAPHY_PATH) or DEFAULT_NATIVE_HOMOGRAPHY_PATH),
+                inlier_payload=self.inlier_overlay_payload() if self.show_calibration_inliers else None,
+            )
         )
 
+    def _refresh_output_display_targets(self) -> None:
+        try:
+            self._build_runtime_launch_spec(
+                left_distortion=ResolvedDistortion(),
+                right_distortion=ResolvedDistortion(),
+            )
+        except Exception:
+            return
+
     def stitch_review_markdown(self) -> str:
+        self._refresh_output_display_targets()
         summary = self.active_homography_summary()
+        probe_receive_uri = _receiver_uri_from_target(self.probe_target_for_viewer)
+        transmit_receive_uri = _receiver_uri_from_target(self.transmit_target_for_display)
         lines = [
             "### Stitch Review",
             f"- homography reference={summary['distortion_reference']}",
@@ -1895,7 +2124,19 @@ class RuntimeUiSession:
             f"- mean_reprojection_error={summary['mean_reprojection_error']:.3f}",
             f"- launch ready={'yes' if summary['launch_ready'] else 'no'}",
             f"- calibration inliers={'on' if self.show_calibration_inliers and summary['inlier_sidecar_ready'] else 'off'}",
+            "- this tab is an offline review preview only; it does not start the runtime or emit UDP output",
+            "- to watch the live stitched stream, open the React operator surface and run `Prepare` then `Start`",
         ]
+        if probe_receive_uri:
+            lines.append(f"- probe receive URI={probe_receive_uri}")
+        if transmit_receive_uri:
+            lines.append(f"- transmit receive URI={transmit_receive_uri}")
+        if self.transmit_target_for_display:
+            lines.append(f"- transmit sender target={self.transmit_target_for_display}")
+        if self.probe_target_for_viewer:
+            lines.append(f"- probe sender target={self.probe_target_for_viewer}")
+        if _target_is_loopback_only(self.probe_target_for_viewer) or _target_is_loopback_only(self.transmit_target_for_display):
+            lines.append("- current output targets use loopback, so VLC/ffplay must run on the same Windows host")
         if not summary["launch_ready"]:
             lines.append("- assisted calibration is required before runtime launch")
         return "\n".join(lines)
