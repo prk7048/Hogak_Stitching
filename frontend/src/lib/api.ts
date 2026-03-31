@@ -256,7 +256,7 @@ function normalizeCalibrationPair(value: unknown): CalibrationPair | null {
   }
   return {
     index,
-    label: pickString(value.label, `Pair ${index + 1}`),
+    label: pickString(value.label, `쌍 ${index + 1}`).replace(/^Pair\s+(\d+)$/i, "쌍 $1"),
     left: Array.isArray(value.left) ? value.left.map((item) => Number(item)) : [],
     right: Array.isArray(value.right) ? value.right.map((item) => Number(item)) : [],
     selected: Boolean(value.selected),
@@ -553,27 +553,27 @@ export function calibrationImageUrl(path: string): string {
 
 export function describeRuntimeActionResult(result: unknown): string {
   if (!isRecord(result)) {
-    return "action completed";
+    return "작업을 완료했습니다.";
   }
   const message = pickString(result.message, result.detail, result.error);
   if (message) {
     return message;
   }
   if (result.ok === false) {
-    return "request failed";
+    return "요청에 실패했습니다.";
   }
   if (result.ok === true) {
     const state = isRecord(result.state) ? result.state : null;
     if (state) {
-      return `ok: ${pickString(state.status, state.state, "state updated")}`;
+      return `정상 처리: ${pickString(state.status, state.state, "상태가 업데이트되었습니다.")}`;
     }
     const plan = isRecord(result.plan) ? result.plan : null;
     if (plan) {
-      return `ok: ${pickString(plan.geometry_artifact_path, plan.output_runtime_mode, "plan updated")}`;
+      return `정상 처리: ${pickString(plan.geometry_artifact_path, plan.output_runtime_mode, "계획이 업데이트되었습니다.")}`;
     }
-    return "ok";
+    return "정상 처리";
   }
-  return "action completed";
+  return "작업을 완료했습니다.";
 }
 
 export function runtimeEventsUrl(): string {
@@ -638,10 +638,10 @@ export function outputReachabilityHint(target: unknown): string {
     const separator = hostPort.lastIndexOf(":");
     const host = (separator >= 0 ? hostPort.slice(0, separator) : hostPort).trim().toLowerCase();
     if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
-      return "loopback only: run VLC/ffplay on the same Windows host";
+      return "루프백 전용: 같은 Windows PC에서 VLC 또는 ffplay로 열어야 합니다.";
     }
     if (host) {
-      return `remote receiver must be reachable at ${host}`;
+      return `원격 수신기는 ${host} 주소로 접근 가능해야 합니다.`;
     }
   }
   return "";

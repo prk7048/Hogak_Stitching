@@ -37,11 +37,11 @@ class RuntimePlan:
 def _frontend_unavailable_html(frontend_path: Path) -> str:
     escaped_path = escape(str(frontend_path))
     return f"""<!doctype html>
-<html lang="en">
+<html lang="ko">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Hogak Operator UI Not Built</title>
+    <title>Hogak 운영 화면 번들이 아직 준비되지 않았습니다</title>
     <style>
       :root {{
         color-scheme: dark;
@@ -97,25 +97,25 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
   </head>
   <body>
     <main>
-      <h1>Hogak Operator UI is not built yet</h1>
+      <h1>Hogak 운영 화면 번들이 아직 준비되지 않았습니다</h1>
       <p>
-        <code>operator-server</code> is running, but the React bundle was not found at
-        <code>{escaped_path}</code>.
+        <code>operator-server</code> 는 실행 중이지만, React 번들을
+        <code>{escaped_path}</code> 에서 찾지 못했습니다.
       </p>
-      <p>Build the frontend once, then restart the server:</p>
+      <p>프런트엔드를 한 번 빌드한 뒤 서버를 다시 시작하세요.</p>
       <pre>cd frontend
 npm install
 npm run build</pre>
-      <p>After the build completes, restart:</p>
+      <p>빌드가 끝나면 아래 명령으로 다시 실행하면 됩니다.</p>
       <pre>python -m stitching.cli operator-server</pre>
-      <p>You can also point the backend at a different built frontend with <code>HOGAK_FRONTEND_DIST_DIR</code>.</p>
+      <p><code>HOGAK_FRONTEND_DIST_DIR</code> 환경변수로 다른 빌드 결과물을 지정할 수도 있습니다.</p>
       <div class="note">
-        <strong>Current backend status</strong>
+        <strong>현재 백엔드 상태</strong>
         <ul>
-          <li>Runtime API is still available at <code>/api/runtime/*</code>.</li>
-          <li>Calibration routes will appear in the React UI after the build.</li>
-          <li>Legacy bridge was removed; <code>/legacy/calibration</code> now redirects to <code>/calibration/start</code>.</li>
-          <li>Even after the UI appears, stitched output only starts after <code>Prepare</code> then <code>Start</code>.</li>
+          <li>런타임 API 는 계속 <code>/api/runtime/*</code> 에서 사용할 수 있습니다.</li>
+          <li>캘리브레이션 화면은 React 번들이 준비되면 함께 표시됩니다.</li>
+          <li>기존 bridge 는 제거되었고, <code>/legacy/calibration</code> 은 <code>/calibration/start</code> 로 이동합니다.</li>
+          <li>UI 가 보이더라도 stitched 출력은 <code>준비 (Prepare)</code> 후 <code>시작 (Start)</code> 을 눌러야 송출됩니다.</li>
         </ul>
       </div>
     </main>
