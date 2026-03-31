@@ -314,6 +314,44 @@ export function previewUrl(version: number): string {
   return joinPath(`/api/runtime/preview.jpg?ts=${version}`);
 }
 
+export function outputReceiveUri(target: unknown): string {
+  const text = pickString(target);
+  if (!text) {
+    return "";
+  }
+  if (text.startsWith("udp://")) {
+    const endpoint = text.split("?", 1)[0].slice("udp://".length);
+    const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
+    const separator = hostPort.lastIndexOf(":");
+    if (separator < 0) {
+      return text;
+    }
+    const port = hostPort.slice(separator + 1).trim();
+    return port ? `udp://@:${port}` : text;
+  }
+  return text;
+}
+
+export function outputReachabilityHint(target: unknown): string {
+  const text = pickString(target);
+  if (!text) {
+    return "";
+  }
+  if (text.startsWith("udp://")) {
+    const endpoint = text.split("?", 1)[0].slice("udp://".length);
+    const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
+    const separator = hostPort.lastIndexOf(":");
+    const host = (separator >= 0 ? hostPort.slice(0, separator) : hostPort).trim().toLowerCase();
+    if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
+      return "loopback only: run VLC/ffplay on the same Windows host";
+    }
+    if (host) {
+      return `remote receiver must be reachable at ${host}`;
+    }
+  }
+  return "";
+}
+
 export function openRuntimeEventStream(onEvent: (event: RuntimeEvent) => void): EventSource | null {
   if (typeof window.EventSource === "undefined") {
     return null;
