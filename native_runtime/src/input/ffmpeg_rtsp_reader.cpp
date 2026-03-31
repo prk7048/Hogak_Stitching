@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -36,6 +37,7 @@ constexpr double kFreezeRestartSec = 5.0;
 constexpr double kLateFrameIntervalMs = 45.0;
 constexpr std::size_t kReaderMetricWindow = 90;
 constexpr std::size_t kPacketWallclockHintWindow = 256;
+constexpr std::int64_t kUdpReceiveFifoBytes = 1 * 1024 * 1024;
 
 bool input_pipe_format_is_nv12(const std::string& format) {
     return format == "nv12";
@@ -527,12 +529,22 @@ bool open_reader_session(
     AVFormatContext* format_context = nullptr;
     AVDictionary* options = nullptr;
     const auto timeout_us = static_cast<std::int64_t>(std::max(1.0, config.timeout_sec) * 1'000'000.0);
+    std::string transport = config.transport;
+    std::transform(
+        transport.begin(),
+        transport.end(),
+        transport.begin(),
+        [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     av_dict_set(&options, "rtsp_transport", config.transport.c_str(), 0);
     av_dict_set(&options, "fflags", "nobuffer", 0);
     av_dict_set(&options, "flags", "low_delay", 0);
     av_dict_set_int(&options, "rw_timeout", timeout_us, 0);
     av_dict_set_int(&options, "stimeout", timeout_us, 0);
     av_dict_set_int(&options, "timeout", timeout_us, 0);
+    if (transport == "udp") {
+        av_dict_set_int(&options, "fifo_size", kUdpReceiveFifoBytes, 0);
+        av_dict_set(&options, "overrun_nonfatal", "1", 0);
+    }
 
     const int open_result = avformat_open_input(&format_context, config.url.c_str(), nullptr, &options);
     av_dict_free(&options);

@@ -12,10 +12,24 @@ import time
 
 _VIEWER_STARTUP_ATTEMPTS = 4
 _VIEWER_STARTUP_RETRY_SEC = 0.75
-_VIEWER_UDP_FIFO_SIZE = 262144
+_VIEWER_UDP_FIFO_SIZE = 8 * 1024 * 1024
 _VIEWER_MAX_WIDTH = 1920
 _VIEWER_MAX_HEIGHT = 1080
 _VIEWER_MAX_FPS = 30.0
+
+
+def _append_url_query_key(url: str, key: str, value: str) -> str:
+    if not key or not value:
+        return url
+    if "?" not in url:
+        return f"{url}?{key}={value}"
+    query = url.split("?", 1)[1]
+    for token in query.split("&"):
+        token_key = token.split("=", 1)[0].strip()
+        if token_key == key:
+            return url
+    separator = "&" if query else ""
+    return f"{url}{separator}{key}={value}"
 
 
 def _wait_for_ready_signal(process: subprocess.Popen[bytes], timeout_sec: float = 8.0) -> bool:
@@ -147,10 +161,13 @@ def resolve_ffmpeg_binary(explicit_path: str = "") -> Path:
 def _build_stream_receive_target(target: str) -> str:
     value = target.strip()
     if value.startswith("udp://"):
-        endpoint = value.split("?", 1)[0][len("udp://") :]
+        endpoint = value[len("udp://") :]
         if endpoint.startswith("@"):
             endpoint = endpoint[1:]
-        return f"udp://{endpoint}?fifo_size={_VIEWER_UDP_FIFO_SIZE}&overrun_nonfatal=1"
+        receive_target = f"udp://{endpoint}"
+        receive_target = _append_url_query_key(receive_target, "fifo_size", str(_VIEWER_UDP_FIFO_SIZE))
+        receive_target = _append_url_query_key(receive_target, "overrun_nonfatal", "1")
+        return receive_target
     if value.startswith("tcp://"):
         endpoint = value.split("?", 1)[0][len("tcp://") :]
         return f"tcp://{endpoint}"
@@ -173,14 +190,14 @@ def _compute_preview_size(width: int, height: int) -> tuple[int, int]:
 def _build_ffplay_command(spec: FinalStreamViewerSpec) -> list[str]:
     if not spec.target.strip():
         raise ValueError("final stream viewer target is required")
-    target = spec.target.strip()
+    target = _build_stream_receive_target(spec.target)
     command = [
         str(resolve_ffplay_binary(spec.ffplay_bin or spec.ffmpeg_bin)),
         "-hide_banner",
         "-loglevel",
         "warning",
         "-fflags",
-        "nobuffer",
+        "nobuffer+discardcorrupt",
         "-flags",
         "low_delay",
     ]
@@ -195,7 +212,6 @@ def _build_ffplay_command(spec: FinalStreamViewerSpec) -> list[str]:
                 "500000",
             ]
         )
-        target = target.split("?", 1)[0]
     command.extend(["-i", target])
     return command
 

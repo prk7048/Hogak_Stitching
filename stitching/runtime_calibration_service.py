@@ -15,6 +15,8 @@ from stitching.output_presets import OUTPUT_PRESETS
 from stitching.project_defaults import DEFAULT_NATIVE_HOMOGRAPHY_PATH, default_output_standard
 from stitching.runtime_gradio_ui import RuntimeUiSession
 
+_CALIBRATION_RECEIVE_UDP_FIFO_SIZE = 8 * 1024 * 1024
+
 
 def _build_runtime_ui_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=False)
@@ -53,7 +55,13 @@ def _receiver_uri_from_target(target: str) -> str:
     if separator < 0:
         return text
     port = host_port[separator + 1 :].strip()
-    return f"udp://@:{port}" if port else text
+    if not port:
+        return text
+    return (
+        f"udp://@:{port}"
+        f"?fifo_size={_CALIBRATION_RECEIVE_UDP_FIFO_SIZE}"
+        f"&overrun_nonfatal=1"
+    )
 
 
 def _target_is_loopback_only(target: str) -> bool:
