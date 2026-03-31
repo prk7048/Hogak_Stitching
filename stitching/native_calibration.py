@@ -464,9 +464,15 @@ class _FfmpegCaptureEnv:
 
     def __enter__(self) -> None:
         timeout_us = max(100_000, int(self._timeout_sec * 1_000_000))
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
-            f"rtsp_transport;{self._transport}|timeout;{timeout_us}"
-        )
+        capture_options = [f"rtsp_transport;{self._transport}", f"timeout;{timeout_us}"]
+        if str(self._transport or "").strip().lower() == "udp":
+            capture_options.extend(
+                [
+                    f"fifo_size;{8 * 1024 * 1024}",
+                    "overrun_nonfatal;1",
+                ]
+            )
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(capture_options)
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._prev is None:
@@ -706,14 +712,65 @@ def _reprojection_error(homography: np.ndarray, right_point: tuple[float, float]
     return float(np.linalg.norm(projected - dst))
 
 
+def _default_runtime_projection_params(frame_shape: tuple[int, int] | tuple[int, int, int]) -> tuple[float, tuple[float, float]]:
+    height = max(1, int(frame_shape[0]))
+    width = max(1, int(frame_shape[1]))
+    return float(max(width, height) * 0.90), (float(width) / 2.0, float(height) / 2.0)
+
+
+def _project_point_to_cylindrical(
+    point: list[float] | tuple[float, float],
+    *,
+    focal_px: float,
+    center_x: float,
+    center_y: float,
+) -> tuple[float, float]:
+    x = float(point[0])
+    y = float(point[1])
+    focal = max(1.0, float(focal_px))
+    cx = float(center_x)
+    cy = float(center_y)
+    dx = x - cx
+    dy = y - cy
+    theta = np.arctan(dx / focal)
+    cylindrical_x = (focal * theta) + cx
+    cylindrical_y = (focal * dy) / np.sqrt((dx * dx) + (focal * focal)) + cy
+    return float(cylindrical_x), float(cylindrical_y)
+
+
 def _estimate_runtime_alignment_affine(
     right_points: list[list[float]] | list[tuple[float, float]],
     left_points: list[list[float]] | list[tuple[float, float]],
     homography: np.ndarray,
+    *,
+    left_projection_focal_px: float,
+    left_projection_center: tuple[float, float],
+    right_projection_focal_px: float,
+    right_projection_center: tuple[float, float],
 ) -> np.ndarray:
     if len(right_points) >= 3 and len(left_points) >= 3:
-        src_points = np.float32(right_points).reshape(-1, 2)
-        dst_points = np.float32(left_points).reshape(-1, 2)
+        src_points = np.float32(
+            [
+                _project_point_to_cylindrical(
+                    point,
+                    focal_px=right_projection_focal_px,
+                    center_x=right_projection_center[0],
+                    center_y=right_projection_center[1],
+                )
+                for point in right_points
+            ]
+        ).reshape(-1, 2)
+        dst_points = np.float32(
+            [
+                _project_point_to_cylindrical(
+                    point,
+                    focal_px=left_projection_focal_px,
+                    center_x=left_projection_center[0],
+                    center_y=left_projection_center[1],
+                )
+                for point in left_points
+            ]
+        ).reshape(-1, 2)
         affine, _ = cv2.estimateAffinePartial2D(
             src_points,
             dst_points,
@@ -1303,6 +1360,8 @@ def save_native_calibration_artifacts(
     metadata["runtime_geometry_model"] = "cylindrical-affine"
     metadata["runtime_geometry_warp_model"] = "warpPerspective"
     metadata["runtime_geometry_file"] = str(geometry_file)
+    left_projection_focal_px, left_projection_center = _default_runtime_projection_params(left.shape)
+    right_projection_focal_px, right_projection_center = _default_runtime_projection_params(right.shape)
 
     _write_debug_outputs(config, left, right, stitched, inlier_preview)
     _save_homography_file(
@@ -1326,8 +1385,19 @@ def save_native_calibration_artifacts(
         right_inlier_points=right_inlier_points,
         geometry_model="cylindrical-affine",
         alignment_model="affine",
-        alignment_matrix=_estimate_runtime_alignment_affine(right_inlier_points, left_inlier_points, homography),
-        projection_focal_px=float(max(int(result["output_resolution"][0]), int(result["output_resolution"][1])) * 0.90),
+        alignment_matrix=_estimate_runtime_alignment_affine(
+            right_inlier_points,
+            left_inlier_points,
+            homography,
+            left_projection_focal_px=left_projection_focal_px,
+            left_projection_center=left_projection_center,
+            right_projection_focal_px=right_projection_focal_px,
+            right_projection_center=right_projection_center,
+        ),
+        projection_left_focal_px=left_projection_focal_px,
+        projection_left_center=left_projection_center,
+        projection_right_focal_px=right_projection_focal_px,
+        projection_right_center=right_projection_center,
         seam_transition_px=max(48, int(round(min(int(result["output_resolution"][0]), int(result["output_resolution"][1])) * 0.04))),
     )
     save_runtime_geometry_artifact(geometry_file, geometry_artifact)

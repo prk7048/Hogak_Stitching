@@ -937,14 +937,51 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             artifact_out->output_size = cv::Size(base_width, base_height);
         }
 
-        if (artifact_out->focal_px <= 0.0) {
-            artifact_out->focal_px = static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+        cv::Size projection_reference_size = artifact_out->left_input_size;
+        if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
+            projection_reference_size = artifact_out->right_input_size;
         }
-        if (artifact_out->center_x <= 0.0 && artifact_out->output_size.width > 0) {
-            artifact_out->center_x = static_cast<double>(artifact_out->output_size.width) * 0.5;
+        if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
+            projection_reference_size = artifact_out->output_size;
         }
-        if (artifact_out->center_y <= 0.0 && artifact_out->output_size.height > 0) {
-            artifact_out->center_y = static_cast<double>(artifact_out->output_size.height) * 0.5;
+        const double projection_reference_max_dim =
+            static_cast<double>(std::max(projection_reference_size.width, projection_reference_size.height));
+        const bool center_out_of_bounds =
+            artifact_out->center_x <= 0.0 ||
+            artifact_out->center_x >= static_cast<double>(projection_reference_size.width) ||
+            artifact_out->center_y <= 0.0 ||
+            artifact_out->center_y >= static_cast<double>(projection_reference_size.height);
+        const bool center_matches_output_canvas =
+            projection_reference_size.width > 0 &&
+            projection_reference_size.height > 0 &&
+            artifact_out->output_size.width > 0 &&
+            artifact_out->output_size.height > 0 &&
+            (projection_reference_size.width != artifact_out->output_size.width ||
+             projection_reference_size.height != artifact_out->output_size.height) &&
+            std::abs(artifact_out->center_x - static_cast<double>(artifact_out->output_size.width) * 0.5) <= 1.0 &&
+            std::abs(artifact_out->center_y - static_cast<double>(artifact_out->output_size.height) * 0.5) <= 1.0;
+        const bool should_reset_center = center_out_of_bounds || center_matches_output_canvas;
+        const double output_default_focal_px =
+            static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+        const bool focal_matches_output_canvas =
+            should_reset_center &&
+            artifact_out->output_size.width > 0 &&
+            artifact_out->output_size.height > 0 &&
+            std::abs(artifact_out->focal_px - output_default_focal_px) <= 1.0;
+        if (artifact_out->focal_px <= 0.0 ||
+            focal_matches_output_canvas ||
+            (center_out_of_bounds && artifact_out->focal_px > projection_reference_max_dim * 1.25)) {
+            artifact_out->focal_px = projection_reference_max_dim * 0.90;
+        }
+        if (should_reset_center ||
+            artifact_out->center_x <= 0.0 ||
+            artifact_out->center_x >= static_cast<double>(projection_reference_size.width)) {
+            artifact_out->center_x = static_cast<double>(projection_reference_size.width) * 0.5;
+        }
+        if (should_reset_center ||
+            artifact_out->center_y <= 0.0 ||
+            artifact_out->center_y >= static_cast<double>(projection_reference_size.height)) {
+            artifact_out->center_y = static_cast<double>(projection_reference_size.height) * 0.5;
         }
         if (artifact_out->alignment_matrix.empty()) {
             artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
@@ -1038,14 +1075,51 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
         artifact_out->output_size = cv::Size(artifact_out->left_input_size.width, artifact_out->left_input_size.height);
     }
-    if (artifact_out->focal_px <= 0.0) {
-        artifact_out->focal_px = static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+    cv::Size projection_reference_size = artifact_out->left_input_size;
+    if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
+        projection_reference_size = artifact_out->right_input_size;
     }
-    if (artifact_out->center_x <= 0.0) {
-        artifact_out->center_x = static_cast<double>(artifact_out->output_size.width) * 0.5;
+    if (projection_reference_size.width <= 0 || projection_reference_size.height <= 0) {
+        projection_reference_size = artifact_out->output_size;
     }
-    if (artifact_out->center_y <= 0.0) {
-        artifact_out->center_y = static_cast<double>(artifact_out->output_size.height) * 0.5;
+    const double projection_reference_max_dim =
+        static_cast<double>(std::max(projection_reference_size.width, projection_reference_size.height));
+    const bool center_out_of_bounds =
+        artifact_out->center_x <= 0.0 ||
+        artifact_out->center_x >= static_cast<double>(projection_reference_size.width) ||
+        artifact_out->center_y <= 0.0 ||
+        artifact_out->center_y >= static_cast<double>(projection_reference_size.height);
+    const bool center_matches_output_canvas =
+        projection_reference_size.width > 0 &&
+        projection_reference_size.height > 0 &&
+        artifact_out->output_size.width > 0 &&
+        artifact_out->output_size.height > 0 &&
+        (projection_reference_size.width != artifact_out->output_size.width ||
+         projection_reference_size.height != artifact_out->output_size.height) &&
+        std::abs(artifact_out->center_x - static_cast<double>(artifact_out->output_size.width) * 0.5) <= 1.0 &&
+        std::abs(artifact_out->center_y - static_cast<double>(artifact_out->output_size.height) * 0.5) <= 1.0;
+    const bool should_reset_center = center_out_of_bounds || center_matches_output_canvas;
+    const double output_default_focal_px =
+        static_cast<double>(std::max(artifact_out->output_size.width, artifact_out->output_size.height)) * 0.90;
+    const bool focal_matches_output_canvas =
+        should_reset_center &&
+        artifact_out->output_size.width > 0 &&
+        artifact_out->output_size.height > 0 &&
+        std::abs(artifact_out->focal_px - output_default_focal_px) <= 1.0;
+    if (artifact_out->focal_px <= 0.0 ||
+        focal_matches_output_canvas ||
+        (center_out_of_bounds && artifact_out->focal_px > projection_reference_max_dim * 1.25)) {
+        artifact_out->focal_px = projection_reference_max_dim * 0.90;
+    }
+    if (should_reset_center ||
+        artifact_out->center_x <= 0.0 ||
+        artifact_out->center_x >= static_cast<double>(projection_reference_size.width)) {
+        artifact_out->center_x = static_cast<double>(projection_reference_size.width) * 0.5;
+    }
+    if (should_reset_center ||
+        artifact_out->center_y <= 0.0 ||
+        artifact_out->center_y >= static_cast<double>(projection_reference_size.height)) {
+        artifact_out->center_y = static_cast<double>(projection_reference_size.height) * 0.5;
     }
     return true;
 }
