@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 import hashlib
+from html import escape
 import json
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
 from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import normalize_schema_v2_reload_payload
@@ -31,6 +32,95 @@ class RuntimePlan:
     launch_spec: RuntimeLaunchSpec
     reload_payload: dict[str, Any]
     summary: dict[str, Any]
+
+
+def _frontend_unavailable_html(frontend_path: Path) -> str:
+    escaped_path = escape(str(frontend_path))
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Hogak Operator UI Not Built</title>
+    <style>
+      :root {{
+        color-scheme: dark;
+        font-family: "Aptos", "Segoe UI", sans-serif;
+        background: linear-gradient(180deg, #0d131d 0%, #090c12 100%);
+        color: #f4f7ff;
+      }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }}
+      main {{
+        width: min(920px, 100%);
+        border-radius: 24px;
+        border: 1px solid rgba(255,255,255,0.08);
+        background: rgba(12,18,28,0.88);
+        box-shadow: 0 26px 90px rgba(0,0,0,0.36);
+        padding: 28px;
+      }}
+      h1 {{
+        margin: 0 0 10px;
+        font-size: clamp(2rem, 4vw, 3rem);
+      }}
+      p, li {{
+        color: #c8d4ea;
+        line-height: 1.65;
+      }}
+      code, pre {{
+        font-family: "Consolas", "Cascadia Code", monospace;
+      }}
+      pre {{
+        margin: 14px 0;
+        padding: 14px 16px;
+        border-radius: 16px;
+        background: rgba(255,255,255,0.05);
+        border: 1px solid rgba(255,255,255,0.06);
+        overflow-x: auto;
+      }}
+      .note {{
+        margin-top: 18px;
+        padding: 14px 16px;
+        border-radius: 16px;
+        background: rgba(89,157,255,0.12);
+        border: 1px solid rgba(89,157,255,0.18);
+      }}
+      a {{
+        color: #a9c8ff;
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Hogak Operator UI is not built yet</h1>
+      <p>
+        <code>operator-server</code> is running, but the React bundle was not found at
+        <code>{escaped_path}</code>.
+      </p>
+      <p>Build the frontend once, then restart the server:</p>
+      <pre>cd frontend
+npm install
+npm run build</pre>
+      <p>After the build completes, restart:</p>
+      <pre>python -m stitching.cli operator-server</pre>
+      <p>You can also point the backend at a different built frontend with <code>HOGAK_FRONTEND_DIST_DIR</code>.</p>
+      <div class="note">
+        <strong>Current backend status</strong>
+        <ul>
+          <li>Runtime API is still available at <code>/api/runtime/*</code>.</li>
+          <li>Calibration routes will appear in the React UI after the build.</li>
+          <li>Legacy bridge was removed; <code>/legacy/calibration</code> now redirects to <code>/calibration/start</code>.</li>
+          <li>Even after the UI appears, stitched output only starts after <code>Prepare</code> then <code>Start</code>.</li>
+        </ul>
+      </div>
+    </main>
+  </body>
+</html>"""
 
 
 def _compute_sha256(path: Path) -> str:
@@ -1178,6 +1268,18 @@ def create_app(
             if index_path.is_file():
                 return FileResponse(index_path)
             raise HTTPException(status_code=404, detail="frontend unavailable")
+    else:
+        app.state.frontend_dist_dir = ""
+        app.state.frontend_dist_missing = True
+        fallback_html = _frontend_unavailable_html(frontend_path.resolve())
+        print(f"[operator-server] React bundle not found at {frontend_path}; serving backend-only fallback page.")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def frontend_unavailable(full_path: str):
+            normalized = str(full_path or "").lstrip("/")
+            if normalized.startswith("api/") or normalized.startswith("legacy/"):
+                raise HTTPException(status_code=404, detail="not found")
+            return HTMLResponse(content=fallback_html)
 
     @app.on_event("shutdown")
     def _shutdown() -> None:
