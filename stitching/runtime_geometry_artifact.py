@@ -10,6 +10,13 @@ import numpy as np
 
 RUNTIME_GEOMETRY_ARTIFACT_TYPE = "runtime_geometry"
 RUNTIME_GEOMETRY_SCHEMA_VERSION = 2
+RUNTIME_GEOMETRY_SUPPORTED_MODELS = frozenset(
+    {
+        "planar-homography",
+        "cylindrical-affine",
+        "virtual-center-rectilinear",
+    }
+)
 
 
 def runtime_geometry_artifact_path(source_path: Path | str) -> Path:
@@ -137,13 +144,19 @@ def _sanitize_projection_side(
     return side_projection
 
 
-def _legacy_geometry_model(geometry: dict[str, Any]) -> str:
-    model = str(geometry.get("model") or geometry.get("warp_model") or "planar-homography")
-    if model in {"planar_homography", "planar-homography"}:
+def _normalize_geometry_model(model: Any) -> str:
+    text = str(model or "planar-homography").strip()
+    if text in {"planar_homography", "planar-homography"}:
         return "planar-homography"
-    if model in {"cylindrical_affine", "cylindrical-affine"}:
+    if text in {"cylindrical_affine", "cylindrical-affine"}:
         return "cylindrical-affine"
-    return model
+    if text in {"virtual_center_rectilinear", "virtual-center-rectilinear"}:
+        return "virtual-center-rectilinear"
+    return text
+
+
+def _legacy_geometry_model(geometry: dict[str, Any]) -> str:
+    return _normalize_geometry_model(geometry.get("model") or geometry.get("warp_model") or "planar-homography")
 
 
 def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
@@ -253,11 +266,13 @@ def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("geometry", {})
     payload.setdefault("lens_correction", {})
     payload.setdefault("projection", {})
+    payload.setdefault("virtual_camera", {})
     payload.setdefault("alignment", {})
     payload.setdefault("canvas", {})
     payload.setdefault("seam", {})
     payload.setdefault("exposure", {})
     payload.setdefault("calibration", {})
+    payload["geometry"]["model"] = _normalize_geometry_model(payload["geometry"].get("model"))
     projection = payload.get("projection")
     if isinstance(projection, dict):
         geometry = payload.get("geometry", {}) if isinstance(payload.get("geometry"), dict) else {}
@@ -302,6 +317,8 @@ def build_runtime_geometry_artifact(
     projection_left_center: tuple[float, float] | list[float] | None = None,
     projection_right_focal_px: float | None = None,
     projection_right_center: tuple[float, float] | list[float] | None = None,
+    projection_model: str | None = None,
+    virtual_camera: dict[str, Any] | None = None,
     seam_transition_px: int = 64,
     seam_smoothness_penalty: float = 4.0,
     seam_temporal_penalty: float = 2.0,
@@ -330,7 +347,11 @@ def build_runtime_geometry_artifact(
         (right_resolution[0] / 2.0, right_resolution[1] / 2.0),
     )
     alignment = _matrix_2x3(alignment_matrix if alignment_matrix is not None else homography)
-    geometry_model = str(geometry_model or "cylindrical-affine")
+    geometry_model = _normalize_geometry_model(geometry_model or "cylindrical-affine")
+    resolved_projection_model = str(
+        projection_model
+        or ("rectilinear" if geometry_model == "virtual-center-rectilinear" else "cylindrical")
+    ).strip()
     seam_mode = "dynamic-path" if geometry_model == "cylindrical-affine" else "feather"
     return {
         "artifact_type": RUNTIME_GEOMETRY_ARTIFACT_TYPE,
@@ -362,20 +383,21 @@ def build_runtime_geometry_artifact(
         },
         "projection": {
             "left": {
-                "model": "cylindrical",
+                "model": resolved_projection_model,
                 "focal_px": left_focal_px,
                 "center": left_center,
                 "input_resolution": [int(left_resolution[0]), int(left_resolution[1])],
                 "output_resolution": [output_resolution[0], output_resolution[1]],
             },
             "right": {
-                "model": "cylindrical",
+                "model": resolved_projection_model,
                 "focal_px": right_focal_px,
                 "center": right_center,
                 "input_resolution": [int(right_resolution[0]), int(right_resolution[1])],
                 "output_resolution": [output_resolution[0], output_resolution[1]],
             },
         },
+        "virtual_camera": dict(virtual_camera or {}),
         "alignment": {
             "model": str(alignment_model),
             "matrix": alignment,
@@ -426,12 +448,7 @@ def runtime_geometry_model(artifact: dict[str, Any]) -> str:
     geometry = artifact.get("geometry", {})
     if not isinstance(geometry, dict):
         return "planar-homography"
-    model = str(geometry.get("model") or "planar-homography")
-    if model in {"planar_homography", "planar-homography"}:
-        return "planar-homography"
-    if model in {"cylindrical_affine", "cylindrical-affine"}:
-        return "cylindrical-affine"
-    return model
+    return _normalize_geometry_model(geometry.get("model") or "planar-homography")
 
 
 def runtime_geometry_alignment_matrix(artifact: dict[str, Any]) -> np.ndarray:

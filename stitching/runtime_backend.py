@@ -19,7 +19,11 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 
 from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import normalize_schema_v2_reload_payload
-from stitching.runtime_geometry_artifact import load_runtime_geometry_artifact, runtime_geometry_artifact_path
+from stitching.runtime_geometry_artifact import (
+    load_runtime_geometry_artifact,
+    runtime_geometry_artifact_path,
+    runtime_geometry_model,
+)
 from stitching.runtime_launcher import RuntimeLaunchSpec, query_gpu_direct_status
 from stitching.runtime_site_config import load_runtime_site_config, repo_root, require_configured_rtsp_urls
 from stitching.runtime_supervisor import RuntimeSupervisor
@@ -1032,8 +1036,17 @@ class RuntimeService:
         checksum_before = _compute_sha256(artifact_path)
         artifact = load_runtime_geometry_artifact(artifact_path)
         checksum_after = _compute_sha256(artifact_path)
-        geometry_model = str(artifact.get("geometry", {}).get("model", ""))
+        geometry_model = runtime_geometry_model(artifact)
         artifact_unchanged = checksum_before == checksum_after
+        launch_ready_reason = ""
+        if not artifact_unchanged:
+            launch_ready_reason = "geometry artifact changed during read-only validation"
+        elif geometry_model in {"planar-homography", "cylindrical-affine"}:
+            launch_ready_reason = "implemented runtime geometry model"
+        elif geometry_model == "virtual-center-rectilinear":
+            launch_ready_reason = "candidate model only; artifact/schema scaffolding is ready but runtime render path is not implemented yet"
+        else:
+            launch_ready_reason = "unsupported runtime geometry model"
         result = {
             "ok": True,
             "validation_mode": "read-only",
@@ -1044,6 +1057,7 @@ class RuntimeService:
             "geometry_artifact_checksum": checksum_before,
             "artifact_unchanged": artifact_unchanged,
             "launch_ready": bool(artifact_unchanged and geometry_model in {"planar-homography", "cylindrical-affine"}),
+            "launch_ready_reason": launch_ready_reason,
             "strict_fresh": strict_fresh,
         }
         with self._lock:
@@ -1081,7 +1095,7 @@ class RuntimeService:
                     "artifact_type": artifact.get("artifact_type", ""),
                     "schema_version": artifact.get("schema_version", 0),
                     "saved_at_epoch_sec": artifact.get("saved_at_epoch_sec", 0),
-                    "geometry_model": artifact.get("geometry", {}).get("model", ""),
+                    "geometry_model": runtime_geometry_model(artifact),
                 }
             )
         return artifacts
