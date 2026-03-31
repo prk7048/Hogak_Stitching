@@ -278,6 +278,53 @@ select {
   border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
+.calibration-image {
+  object-fit: contain;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.01)),
+    #0b0f17;
+}
+
+.calibration-image.clickable {
+  cursor: crosshair;
+}
+
+.calibration-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.pair-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.pair-chip {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 9px 13px;
+  background: rgba(255, 255, 255, 0.04);
+  color: #eef4ff;
+  cursor: pointer;
+}
+
+.pair-chip.active {
+  background: linear-gradient(135deg, rgba(89, 157, 255, 0.28), rgba(246, 179, 70, 0.24));
+}
+
+.toggle-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 48px;
+  padding: 0 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  background: rgba(255, 255, 255, 0.05);
+  color: #eef4ff;
+}
+
 .event-list,
 .artifact-list {
   display: flex;
@@ -315,7 +362,8 @@ select {
 
 @media (max-width: 1080px) {
   .metric-grid,
-  .panel-grid {
+  .panel-grid,
+  .calibration-grid {
     grid-template-columns: 1fr 1fr;
   }
 }
@@ -333,7 +381,8 @@ select {
   }
 
   .metric-grid,
-  .panel-grid {
+  .panel-grid,
+  .calibration-grid {
     grid-template-columns: 1fr;
   }
 

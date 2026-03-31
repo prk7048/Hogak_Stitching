@@ -23,6 +23,59 @@ export type GeometryArtifactSummary = {
 
 export type RuntimeActionResponse = Record<string, unknown>;
 
+export type CalibrationPair = {
+  index: number;
+  label: string;
+  left: number[];
+  right: number[];
+  selected: boolean;
+};
+
+export type CalibrationState = {
+  current_step: string;
+  route: string;
+  workflow: {
+    current_step: string;
+    manual_pair_count: number;
+    homography_reference: string;
+    show_inliers: boolean;
+    bridge_mode: string;
+  };
+  output_standard_options: string[];
+  start: {
+    output_standard: string;
+    run_calibration_first: boolean;
+    open_vlc_low_latency: boolean;
+    use_current_homography_enabled: boolean;
+    homography: Record<string, unknown>;
+  };
+  assisted: {
+    left_image_url: string;
+    right_image_url: string;
+    pair_count: number;
+    pending_side: string;
+    pending_left_point: number[] | null;
+    selected_pair_index: number | null;
+    pairs: CalibrationPair[];
+    compute_enabled: boolean;
+  };
+  review: {
+    preview_image_url: string;
+    inlier_image_url: string;
+    candidate: Record<string, unknown> | null;
+  };
+  stitch_review: {
+    preview_image_url: string;
+    probe_sender_target: string;
+    transmit_sender_target: string;
+    probe_receive_uri: string;
+    transmit_receive_uri: string;
+    probe_loopback_only: boolean;
+    transmit_loopback_only: boolean;
+  };
+  recent_events: string[];
+};
+
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "";
 
 function joinPath(path: string): string {
@@ -144,6 +197,141 @@ function normalizeRuntimeStateShape(value: unknown): RuntimeState {
   }
 
   return flattened;
+}
+
+function emptyCalibrationState(): CalibrationState {
+  return {
+    current_step: "start",
+    route: "/calibration/start",
+    workflow: {
+      current_step: "start",
+      manual_pair_count: 0,
+      homography_reference: "raw",
+      show_inliers: true,
+      bridge_mode: "react-single-surface",
+    },
+    output_standard_options: [],
+    start: {
+      output_standard: "",
+      run_calibration_first: true,
+      open_vlc_low_latency: false,
+      use_current_homography_enabled: false,
+      homography: {},
+    },
+    assisted: {
+      left_image_url: "",
+      right_image_url: "",
+      pair_count: 0,
+      pending_side: "left",
+      pending_left_point: null,
+      selected_pair_index: null,
+      pairs: [],
+      compute_enabled: false,
+    },
+    review: {
+      preview_image_url: "",
+      inlier_image_url: "",
+      candidate: null,
+    },
+    stitch_review: {
+      preview_image_url: "",
+      probe_sender_target: "",
+      transmit_sender_target: "",
+      probe_receive_uri: "",
+      transmit_receive_uri: "",
+      probe_loopback_only: false,
+      transmit_loopback_only: false,
+    },
+    recent_events: [],
+  };
+}
+
+function normalizeCalibrationPair(value: unknown): CalibrationPair | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const index = Number(value.index);
+  if (!Number.isFinite(index)) {
+    return null;
+  }
+  return {
+    index,
+    label: pickString(value.label, `Pair ${index + 1}`),
+    left: Array.isArray(value.left) ? value.left.map((item) => Number(item)) : [],
+    right: Array.isArray(value.right) ? value.right.map((item) => Number(item)) : [],
+    selected: Boolean(value.selected),
+  };
+}
+
+function normalizeCalibrationState(value: unknown): CalibrationState {
+  const fallback = emptyCalibrationState();
+  if (!isRecord(value)) {
+    return fallback;
+  }
+
+  const workflow = isRecord(value.workflow) ? value.workflow : {};
+  const start = isRecord(value.start) ? value.start : {};
+  const assisted = isRecord(value.assisted) ? value.assisted : {};
+  const review = isRecord(value.review) ? value.review : {};
+  const stitchReview = isRecord(value.stitch_review) ? value.stitch_review : {};
+
+  return {
+    current_step: pickString(value.current_step, fallback.current_step),
+    route: pickString(value.route, fallback.route),
+    workflow: {
+      current_step: pickString(workflow.current_step, fallback.workflow.current_step),
+      manual_pair_count: Number(workflow.manual_pair_count ?? fallback.workflow.manual_pair_count),
+      homography_reference: pickString(workflow.homography_reference, fallback.workflow.homography_reference),
+      show_inliers: Boolean(workflow.show_inliers ?? fallback.workflow.show_inliers),
+      bridge_mode: pickString(workflow.bridge_mode, fallback.workflow.bridge_mode),
+    },
+    output_standard_options: Array.isArray(value.output_standard_options)
+      ? value.output_standard_options.map((item) => pickString(item)).filter(Boolean)
+      : fallback.output_standard_options,
+    start: {
+      output_standard: pickString(start.output_standard, fallback.start.output_standard),
+      run_calibration_first: Boolean(start.run_calibration_first ?? fallback.start.run_calibration_first),
+      open_vlc_low_latency: Boolean(start.open_vlc_low_latency ?? fallback.start.open_vlc_low_latency),
+      use_current_homography_enabled: Boolean(
+        start.use_current_homography_enabled ?? fallback.start.use_current_homography_enabled,
+      ),
+      homography: isRecord(start.homography) ? start.homography : fallback.start.homography,
+    },
+    assisted: {
+      left_image_url: pickString(assisted.left_image_url),
+      right_image_url: pickString(assisted.right_image_url),
+      pair_count: Number(assisted.pair_count ?? fallback.assisted.pair_count),
+      pending_side: pickString(assisted.pending_side, fallback.assisted.pending_side),
+      pending_left_point: Array.isArray(assisted.pending_left_point)
+        ? assisted.pending_left_point.map((item) => Number(item))
+        : null,
+      selected_pair_index:
+        assisted.selected_pair_index === null || assisted.selected_pair_index === undefined
+          ? null
+          : Number(assisted.selected_pair_index),
+      pairs: Array.isArray(assisted.pairs)
+        ? assisted.pairs
+            .map((item) => normalizeCalibrationPair(item))
+            .filter((item): item is CalibrationPair => item !== null)
+        : [],
+      compute_enabled: Boolean(assisted.compute_enabled ?? fallback.assisted.compute_enabled),
+    },
+    review: {
+      preview_image_url: pickString(review.preview_image_url),
+      inlier_image_url: pickString(review.inlier_image_url),
+      candidate: isRecord(review.candidate) ? review.candidate : null,
+    },
+    stitch_review: {
+      preview_image_url: pickString(stitchReview.preview_image_url),
+      probe_sender_target: pickString(stitchReview.probe_sender_target),
+      transmit_sender_target: pickString(stitchReview.transmit_sender_target),
+      probe_receive_uri: pickString(stitchReview.probe_receive_uri),
+      transmit_receive_uri: pickString(stitchReview.transmit_receive_uri),
+      probe_loopback_only: Boolean(stitchReview.probe_loopback_only),
+      transmit_loopback_only: Boolean(stitchReview.transmit_loopback_only),
+    },
+    recent_events: Array.isArray(value.recent_events) ? value.recent_events.map((item) => pickString(item)).filter(Boolean) : [],
+  };
 }
 
 function normalizeGeometryArtifact(item: unknown, index: number): GeometryArtifactSummary | null {
@@ -279,6 +467,88 @@ export async function validateRuntime(body?: unknown): Promise<RuntimeActionResp
 
 export async function reloadRuntime(body: unknown): Promise<RuntimeActionResponse> {
   return postJson<RuntimeActionResponse>("/api/runtime/reload", body);
+}
+
+async function calibrationAction(path: string, body?: unknown): Promise<CalibrationState> {
+  const payload = await postJson<Record<string, unknown>>(path, body ?? {});
+  const state = isRecord(payload.state) ? payload.state : payload;
+  return normalizeCalibrationState(state);
+}
+
+export async function fetchCalibrationState(): Promise<CalibrationState> {
+  try {
+    return normalizeCalibrationState(await requestJson<unknown>("/api/calibration/session/state"));
+  } catch {
+    return emptyCalibrationState();
+  }
+}
+
+export async function startCalibrationSession(body: {
+  output_standard?: string;
+  run_calibration_first?: boolean;
+  open_vlc_low_latency?: boolean;
+}): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/session/start", body);
+}
+
+export async function refreshCalibrationFrames(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/frames/refresh");
+}
+
+export async function addCalibrationPair(body: { slot: "left" | "right"; x: number; y: number }): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/pairs", body);
+}
+
+export async function selectCalibrationPair(index: number): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/pairs/select", { index });
+}
+
+export async function undoCalibrationPair(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/pairs/undo");
+}
+
+export async function deleteCalibrationPair(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/pairs/delete");
+}
+
+export async function clearCalibrationPairs(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/pairs/clear");
+}
+
+export async function computeCalibrationCandidate(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/candidate/compute");
+}
+
+export async function fetchCalibrationReview(): Promise<CalibrationState> {
+  const payload = await requestJson<Record<string, unknown>>("/api/calibration/review");
+  const state = isRecord(payload.state) ? payload.state : payload;
+  return normalizeCalibrationState(state);
+}
+
+export async function acceptCalibrationReview(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/review/accept");
+}
+
+export async function cancelCalibrationReview(): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/review/cancel");
+}
+
+export async function fetchStitchReview(): Promise<CalibrationState> {
+  const payload = await requestJson<Record<string, unknown>>("/api/calibration/stitch-review");
+  const state = isRecord(payload.state) ? payload.state : payload;
+  return normalizeCalibrationState(state);
+}
+
+export async function useCurrentHomography(body: {
+  output_standard?: string;
+  run_calibration_first?: boolean;
+  open_vlc_low_latency?: boolean;
+}): Promise<CalibrationState> {
+  return calibrationAction("/api/calibration/use-current", body);
+}
+
+export function calibrationImageUrl(path: string): string {
+  return path ? joinPath(path) : "";
 }
 
 export function describeRuntimeActionResult(result: unknown): string {

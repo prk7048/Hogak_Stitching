@@ -1,13 +1,12 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useLocation } from "react-router-dom";
 import type { ReactNode } from "react";
-
-import { apiUrl } from "../lib/api";
 
 type ShellProps = {
   children: ReactNode;
 };
 
 const navItems = [
+  ["/calibration/start", "Calibration"],
   ["/dashboard", "Dashboard"],
   ["/validation", "Validation"],
   ["/geometry-compare", "Geometry Compare"],
@@ -16,6 +15,8 @@ const navItems = [
 ] as const;
 
 export function Shell({ children }: ShellProps) {
+  const location = useLocation();
+
   return (
     <div className="shell">
       <header className="topbar">
@@ -27,13 +28,17 @@ export function Shell({ children }: ShellProps) {
       </header>
       <nav className="nav">
         {navItems.map(([to, label]) => (
-          <NavLink key={to} to={to} className={({ isActive }) => `nav-link${isActive ? " active" : ""}`}>
+          <NavLink
+            key={to}
+            to={to}
+            className={({ isActive }) => {
+              const calibrationActive = to === "/calibration/start" && location.pathname.startsWith("/calibration/");
+              return `nav-link${isActive || calibrationActive ? " active" : ""}`;
+            }}
+          >
             {label}
           </NavLink>
         ))}
-        <a className="nav-link" href={apiUrl("/legacy/calibration/")}>
-          Legacy Calibration
-        </a>
       </nav>
       <main className="content">{children}</main>
     </div>
