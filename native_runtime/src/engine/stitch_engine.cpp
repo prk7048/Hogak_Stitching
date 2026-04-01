@@ -2101,6 +2101,7 @@ cv::Rect StitchEngine::largest_valid_rect_locked(const cv::Mat& valid_mask) cons
 
 cv::Rect StitchEngine::resolve_runtime_crop_rect_locked(const cv::Mat& valid_mask) const {
     cv::Rect crop_rect = runtime_geometry_.crop_enabled ? runtime_geometry_.crop_rect : cv::Rect();
+    const cv::Rect recomputed_rect = largest_valid_rect_locked(valid_mask);
     const bool crop_rect_valid =
         crop_rect.width > 0 &&
         crop_rect.height > 0 &&
@@ -2108,10 +2109,32 @@ cv::Rect StitchEngine::resolve_runtime_crop_rect_locked(const cv::Mat& valid_mas
         crop_rect.y >= 0 &&
         crop_rect.x + crop_rect.width <= valid_mask.cols &&
         crop_rect.y + crop_rect.height <= valid_mask.rows;
+    const bool recomputed_valid =
+        recomputed_rect.width > 0 &&
+        recomputed_rect.height > 0 &&
+        recomputed_rect.x >= 0 &&
+        recomputed_rect.y >= 0 &&
+        recomputed_rect.x + recomputed_rect.width <= valid_mask.cols &&
+        recomputed_rect.y + recomputed_rect.height <= valid_mask.rows;
+    if (runtime_geometry_.model == "virtual-center-rectilinear") {
+        if (crop_rect_valid && recomputed_valid) {
+            const cv::Rect intersection = crop_rect & recomputed_rect;
+            if (intersection.width > 0 && intersection.height > 0) {
+                return intersection;
+            }
+        }
+        if (recomputed_valid) {
+            return recomputed_rect;
+        }
+        if (crop_rect_valid) {
+            return crop_rect;
+        }
+        return cv::Rect();
+    }
     if (crop_rect_valid) {
         return crop_rect;
     }
-    return largest_valid_rect_locked(valid_mask);
+    return recomputed_rect;
 }
 
 bool StitchEngine::compose_stitched_video_quality_locked(

@@ -1931,6 +1931,18 @@ def run_mesh_refresh(
         right_shape=right_frame.shape,
         output_resolution=output_resolution,
     )
+    calibration_metadata = calibration_result.get("metadata")
+    if isinstance(calibration_metadata, dict):
+        calibration_metadata["virtual_center_mean_error_px"] = float(virtual_solution.mean_error_px)
+        calibration_metadata["virtual_center_p95_error_px"] = float(virtual_solution.p95_error_px)
+        calibration_metadata["virtual_center_scale"] = float(virtual_solution.rigid_scale)
+        calibration_metadata["virtual_center_rotation_deg"] = float(virtual_solution.rigid_rotation_deg)
+        calibration_metadata["virtual_center_translation_px"] = float(virtual_solution.rigid_translation_px)
+        calibration_metadata["virtual_center_candidate_score"] = float(virtual_solution.candidate_score)
+        calibration_metadata["virtual_center_crop_ratio"] = float(virtual_solution.crop_ratio)
+        calibration_metadata["virtual_center_right_edge_scale_drift"] = float(virtual_solution.right_edge_scale_drift)
+        calibration_metadata["virtual_center_roll_correction_deg"] = float(virtual_solution.virtual_roll_correction_deg)
+        calibration_metadata["virtual_center_mask_tilt_deg"] = float(virtual_solution.mask_tilt_deg)
     spec = _prepare_virtual_center_spec(
         candidate_model=INTERNAL_MESH_REFRESH_MODEL,
         left_frame=left_frame,

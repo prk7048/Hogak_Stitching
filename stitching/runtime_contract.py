@@ -262,6 +262,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
     mesh_contract_ready = False
     mesh_fallback_used = False
     crop_ready = False
+    quality_block_reason = ""
     if isinstance(geometry_model, dict):
         artifact = geometry_model
         model = runtime_geometry_model(artifact)
@@ -271,6 +272,28 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         mesh_contract_ready = runtime_geometry_mesh_contract_ready(artifact)
         mesh_fallback_used = runtime_geometry_mesh_fallback_used(artifact)
         crop_ready = runtime_geometry_fixed_crop_ready(artifact)
+        calibration = artifact.get("calibration", {})
+        metrics = calibration.get("metrics", {}) if isinstance(calibration, dict) else {}
+        if isinstance(metrics, dict):
+            try:
+                crop_ratio = float(metrics.get("virtual_center_crop_ratio") or 0.0)
+            except (TypeError, ValueError):
+                crop_ratio = 0.0
+            try:
+                scale_drift = float(metrics.get("virtual_center_right_edge_scale_drift") or 0.0)
+            except (TypeError, ValueError):
+                scale_drift = 0.0
+            try:
+                tilt_deg = float(metrics.get("virtual_center_mask_tilt_deg") or 0.0)
+            except (TypeError, ValueError):
+                tilt_deg = 0.0
+            if requested_residual == "rigid" and effective_residual == "rigid":
+                if crop_ratio > 0.0 and crop_ratio < 0.50:
+                    quality_block_reason = "rigid geometry crop ratio is too low; recompute geometry with a better-aligned scene"
+                elif scale_drift > 0.0 and abs(scale_drift - 1.0) > 0.22:
+                    quality_block_reason = "rigid geometry shows excessive right-edge scale drift; recompute geometry"
+                elif tilt_deg > 6.0:
+                    quality_block_reason = "rigid geometry is excessively tilted; recompute geometry"
     else:
         model = "" if geometry_model is None else str(geometry_model).strip()
         requested_residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
@@ -283,6 +306,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         and requested_residual == "rigid"
         and effective_residual == "rigid"
         and crop_ready
+        and not quality_block_reason
     )
     rigid_missing_crop = (
         model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
@@ -290,8 +314,15 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         and effective_residual == "rigid"
         and not crop_ready
     )
+    rigid_quality_blocked = (
+        model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
+        and requested_residual == "rigid"
+        and effective_residual == "rigid"
+        and crop_ready
+        and bool(quality_block_reason)
+    )
     operator_visible = rigid_default
-    fallback_only = rigid_missing_crop or mesh_non_product or model in LEGACY_FALLBACK_GEOMETRY_MODELS
+    fallback_only = rigid_missing_crop or rigid_quality_blocked or mesh_non_product or model in LEGACY_FALLBACK_GEOMETRY_MODELS
     compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
 
     if rigid_default:
@@ -304,6 +335,11 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         rollout_status = "blocked"
         launch_ready = False
         launch_ready_reason = "rigid geometry artifact is missing a fixed runtime crop; regenerate a valid rigid artifact before launch"
+    elif rigid_quality_blocked:
+        public_model = DEFAULT_OPERATOR_GEOMETRY_MODEL
+        rollout_status = "blocked"
+        launch_ready = False
+        launch_ready_reason = quality_block_reason
     elif mesh_non_product:
         public_model = "virtual-center-rectilinear-mesh"
         rollout_status = "internal-only"

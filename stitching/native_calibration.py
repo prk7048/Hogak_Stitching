@@ -137,6 +137,10 @@ class _VirtualCenterRectilinearSolution:
     rigid_translation_px: float
     rigid_scale: float
     candidate_score: float
+    crop_ratio: float = 0.0
+    right_edge_scale_drift: float = 0.0
+    virtual_roll_correction_deg: float = 0.0
+    mask_tilt_deg: float = 0.0
     midpoint_alpha: float = 0.5
 
 
@@ -801,6 +805,33 @@ def _midpoint_virtual_rotations(right_to_left_rotation: np.ndarray) -> tuple[np.
     )
 
 
+def _lock_virtual_roll(
+    left_to_virtual_rotation: np.ndarray,
+    right_to_virtual_rotation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, float]:
+    left_rotation = np.asarray(left_to_virtual_rotation, dtype=np.float64).reshape(3, 3)
+    right_rotation = np.asarray(right_to_virtual_rotation, dtype=np.float64).reshape(3, 3)
+    projected_right_axis = left_rotation[:, 0]
+    roll_rad = float(np.arctan2(projected_right_axis[1], projected_right_axis[0]))
+    if abs(roll_rad) <= 1e-9:
+        return left_rotation, right_rotation, 0.0
+    cos_value = float(np.cos(-roll_rad))
+    sin_value = float(np.sin(-roll_rad))
+    roll_correction = np.asarray(
+        [
+            [cos_value, -sin_value, 0.0],
+            [sin_value, cos_value, 0.0],
+            [0.0, 0.0, 1.0],
+        ],
+        dtype=np.float64,
+    )
+    return (
+        np.asarray(roll_correction @ left_rotation, dtype=np.float64).reshape(3, 3),
+        np.asarray(roll_correction @ right_rotation, dtype=np.float64).reshape(3, 3),
+        float(np.degrees(roll_rad)),
+    )
+
+
 def _project_ray_to_virtual_rectilinear(
     ray: np.ndarray,
     *,
@@ -818,6 +849,150 @@ def _project_ray_to_virtual_rectilinear(
     if not np.isfinite(x) or not np.isfinite(y):
         return None
     return float(x), float(y)
+
+
+def _build_rectilinear_inverse_map(
+    *,
+    source_shape: tuple[int, int] | tuple[int, int, int],
+    output_resolution: tuple[int, int],
+    focal_px: float,
+    center: tuple[float, float],
+    virtual_focal_px: float,
+    virtual_center: tuple[float, float],
+    virtual_to_source_rotation: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    output_width = max(1, int(output_resolution[0]))
+    output_height = max(1, int(output_resolution[1]))
+    grid_x, grid_y = np.meshgrid(
+        np.arange(output_width, dtype=np.float64),
+        np.arange(output_height, dtype=np.float64),
+    )
+    ray_x = (grid_x - float(virtual_center[0])) / max(1.0, float(virtual_focal_px))
+    ray_y = (grid_y - float(virtual_center[1])) / max(1.0, float(virtual_focal_px))
+    rays = np.stack([ray_x, ray_y, np.ones_like(ray_x)], axis=-1)
+    norms = np.linalg.norm(rays, axis=-1, keepdims=True)
+    norms = np.where(norms <= 1e-9, 1.0, norms)
+    normalized = rays / norms
+    source = np.einsum(
+        "ij,hwj->hwi",
+        np.asarray(virtual_to_source_rotation, dtype=np.float64).reshape(3, 3),
+        normalized,
+    )
+    z = np.where(np.abs(source[..., 2]) < 1e-6, 1e-6, source[..., 2])
+    map_x = ((float(focal_px) * source[..., 0] / z) + float(center[0])).astype(np.float32)
+    map_y = ((float(focal_px) * source[..., 1] / z) + float(center[1])).astype(np.float32)
+    source_height = max(1, int(source_shape[0]))
+    source_width = max(1, int(source_shape[1]))
+    invalid = (
+        ~np.isfinite(map_x)
+        | ~np.isfinite(map_y)
+        | (source[..., 2] <= 1e-6)
+        | (map_x < 0.0)
+        | (map_y < 0.0)
+        | (map_x > float(source_width - 1))
+        | (map_y > float(source_height - 1))
+    )
+    map_x[invalid] = -1.0
+    map_y[invalid] = -1.0
+    return map_x, map_y
+
+
+def _compose_affine_inverse_map(
+    base_map_x: np.ndarray,
+    base_map_y: np.ndarray,
+    alignment_matrix: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    affine = np.asarray(alignment_matrix, dtype=np.float64).reshape(2, 3)
+    inverse = cv2.invertAffineTransform(affine.astype(np.float32))
+    height, width = base_map_x.shape[:2]
+    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+    sample_x = inverse[0, 0] * grid_x + inverse[0, 1] * grid_y + inverse[0, 2]
+    sample_y = inverse[1, 0] * grid_x + inverse[1, 1] * grid_y + inverse[1, 2]
+    remapped_x = cv2.remap(
+        base_map_x,
+        sample_x,
+        sample_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=-1,
+    )
+    remapped_y = cv2.remap(
+        base_map_y,
+        sample_x,
+        sample_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=-1,
+    )
+    return remapped_x, remapped_y
+
+
+def _largest_valid_rect(mask: np.ndarray) -> tuple[int, int, int, int]:
+    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
+    height, width = binary.shape[:2]
+    heights = np.zeros(width, dtype=np.int32)
+    best_area = 0
+    best_rect = (0, 0, width, height)
+    for y in range(height):
+        heights = np.where(binary[y] > 0, heights + 1, 0)
+        stack: list[int] = []
+        for x in range(width + 1):
+            current = heights[x] if x < width else 0
+            while stack and current < heights[stack[-1]]:
+                h = heights[stack.pop()]
+                x0 = stack[-1] + 1 if stack else 0
+                rect_width = x - x0
+                area = int(h * rect_width)
+                if area > best_area and h > 0 and rect_width > 0:
+                    best_area = area
+                    best_rect = (x0, y - h + 1, rect_width, h)
+            stack.append(x)
+    return best_rect
+
+
+def _right_edge_scale_drift(map_x: np.ndarray, map_y: np.ndarray) -> float:
+    valid = np.isfinite(map_x) & np.isfinite(map_y) & (map_x >= 0.0) & (map_y >= 0.0)
+    if not np.any(valid):
+        return 0.0
+    grad_x = cv2.Sobel(np.asarray(map_x, dtype=np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    grad_y = cv2.Sobel(np.asarray(map_y, dtype=np.float32), cv2.CV_32F, 1, 0, ksize=3)
+    local_scale = np.sqrt(grad_x * grad_x + grad_y * grad_y)
+    valid_cols = np.where(np.any(valid, axis=0))[0]
+    if valid_cols.size < 10:
+        return 0.0
+    width = int(valid_cols[-1] - valid_cols[0] + 1)
+    center_start = int(valid_cols[0] + width * 0.40)
+    center_end = int(valid_cols[0] + width * 0.60)
+    right_start = int(valid_cols[-1] - max(2, int(width * 0.15)))
+    center_band = np.zeros_like(valid, dtype=bool)
+    right_band = np.zeros_like(valid, dtype=bool)
+    center_band[:, max(0, center_start) : min(valid.shape[1], center_end)] = True
+    right_band[:, max(0, right_start) : valid.shape[1]] = True
+    center_values = local_scale[valid & center_band]
+    right_values = local_scale[valid & right_band]
+    if center_values.size == 0 or right_values.size == 0:
+        return 0.0
+    center_median = float(np.median(center_values))
+    right_median = float(np.median(right_values))
+    if right_median <= 1e-6:
+        return 0.0
+    return float(center_median / right_median)
+
+
+def _valid_mask_tilt_deg(mask: np.ndarray) -> float:
+    ys, xs = np.where(np.asarray(mask, dtype=np.uint8) > 0)
+    if xs.size < 8:
+        return 0.0
+    centered_x = xs.astype(np.float64) - float(np.mean(xs))
+    centered_y = ys.astype(np.float64) - float(np.mean(ys))
+    covariance = np.cov(np.stack([centered_x, centered_y], axis=0))
+    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
+    principal = eigenvectors[:, int(np.argmax(eigenvalues))]
+    angle_rad = float(np.arctan2(principal[1], principal[0]))
+    angle_deg = abs(float(np.degrees(angle_rad)))
+    if angle_deg > 90.0:
+        angle_deg = 180.0 - angle_deg
+    return float(angle_deg)
 
 
 def _estimate_runtime_alignment_affine(
@@ -1249,6 +1424,9 @@ def _score_virtual_center_candidate(
     p95_error_px: float,
     rigid_rotation_deg: float,
     rigid_translation_px: float,
+    crop_ratio: float,
+    right_edge_scale_drift: float,
+    mask_tilt_deg: float,
     output_resolution: tuple[int, int],
 ) -> float:
     width = max(1, int(output_resolution[0]))
@@ -1258,8 +1436,12 @@ def _score_virtual_center_candidate(
     p95_term = _clamp_unit(1.0 - (float(p95_error_px) / 12.0))
     rotation_term = _clamp_unit(1.0 - (abs(float(rigid_rotation_deg)) / 5.0))
     translation_term = _clamp_unit(1.0 - (float(rigid_translation_px) / translation_limit))
+    crop_term = _clamp_unit((float(crop_ratio) - 0.45) / 0.30)
+    scale_term = _clamp_unit(1.0 - (abs(float(right_edge_scale_drift) - 1.0) / 0.20))
+    tilt_term = _clamp_unit(1.0 - (abs(float(mask_tilt_deg)) / 8.0))
     residual_term = (rotation_term * 0.50) + (translation_term * 0.50)
-    return float((mean_term * 0.70) + (p95_term * 0.20) + (residual_term * 0.10))
+    visual_term = (crop_term * 0.45) + (scale_term * 0.35) + (tilt_term * 0.20)
+    return float((mean_term * 0.50) + (p95_term * 0.15) + (residual_term * 0.10) + (visual_term * 0.25))
 
 
 def _solve_virtual_center_rectilinear(
@@ -1311,6 +1493,10 @@ def _solve_virtual_center_rectilinear(
         ).reshape(-1, 3)
         right_to_left_rotation = _solve_rotation_kabsch(right_rays, left_rays)
         left_to_virtual_rotation, right_to_virtual_rotation = _midpoint_virtual_rotations(right_to_left_rotation)
+        left_to_virtual_rotation, right_to_virtual_rotation, virtual_roll_correction_deg = _lock_virtual_roll(
+            left_to_virtual_rotation,
+            right_to_virtual_rotation,
+        )
 
         left_virtual_points: list[tuple[float, float]] = []
         right_virtual_points: list[tuple[float, float]] = []
@@ -1349,11 +1535,66 @@ def _solve_virtual_center_rectilinear(
         errors = np.linalg.norm(aligned_right_virtual - left_virtual_array, axis=1)
         mean_error_px = float(np.mean(errors)) if errors.size else 9999.0
         p95_error_px = float(np.percentile(errors, 95.0)) if errors.size else 9999.0
+        left_map_x, left_map_y = _build_rectilinear_inverse_map(
+            source_shape=left_shape,
+            output_resolution=(output_width, output_height),
+            focal_px=left_focal_px,
+            center=(float(left_projection_center[0]), float(left_projection_center[1])),
+            virtual_focal_px=virtual_focal_px,
+            virtual_center=(float(virtual_center[0]), float(virtual_center[1])),
+            virtual_to_source_rotation=np.linalg.inv(left_to_virtual_rotation),
+        )
+        right_map_x, right_map_y = _build_rectilinear_inverse_map(
+            source_shape=right_shape,
+            output_resolution=(output_width, output_height),
+            focal_px=right_focal_px,
+            center=(float(right_projection_center[0]), float(right_projection_center[1])),
+            virtual_focal_px=virtual_focal_px,
+            virtual_center=(float(virtual_center[0]), float(virtual_center[1])),
+            virtual_to_source_rotation=np.linalg.inv(right_to_virtual_rotation),
+        )
+        left_mask = cv2.remap(
+            np.full((int(left_shape[0]), int(left_shape[1])), 255, dtype=np.uint8),
+            left_map_x,
+            left_map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        right_mask = cv2.remap(
+            np.full((int(right_shape[0]), int(right_shape[1])), 255, dtype=np.uint8),
+            right_map_x,
+            right_map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        right_mask = cv2.warpAffine(
+            right_mask,
+            np.asarray(rigid_matrix, dtype=np.float32).reshape(2, 3),
+            (output_width, output_height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=0,
+        )
+        final_map_x, final_map_y = _compose_affine_inverse_map(
+            right_map_x,
+            right_map_y,
+            np.asarray(rigid_matrix, dtype=np.float64),
+        )
+        valid_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8)
+        crop_x, crop_y, crop_w, crop_h = _largest_valid_rect(valid_mask)
+        crop_ratio = float((crop_w * crop_h) / max(1, output_width * output_height))
+        right_edge_scale_drift = _right_edge_scale_drift(final_map_x, final_map_y)
+        mask_tilt_deg = _valid_mask_tilt_deg(valid_mask)
         candidate_score = _score_virtual_center_candidate(
             mean_error_px=mean_error_px,
             p95_error_px=p95_error_px,
             rigid_rotation_deg=rigid_rotation_deg,
             rigid_translation_px=rigid_translation_px,
+            crop_ratio=crop_ratio,
+            right_edge_scale_drift=right_edge_scale_drift,
+            mask_tilt_deg=mask_tilt_deg,
             output_resolution=(output_width, output_height),
         )
         candidate = _VirtualCenterRectilinearSolution(
@@ -1372,6 +1613,10 @@ def _solve_virtual_center_rectilinear(
             rigid_translation_px=rigid_translation_px,
             rigid_scale=rigid_scale,
             candidate_score=candidate_score,
+            crop_ratio=crop_ratio,
+            right_edge_scale_drift=right_edge_scale_drift,
+            virtual_roll_correction_deg=virtual_roll_correction_deg,
+            mask_tilt_deg=mask_tilt_deg,
         )
         if (
             best_solution is None
@@ -1688,6 +1933,10 @@ def save_native_calibration_artifacts(
         metadata["virtual_center_rotation_deg"] = float(virtual_center_solution.rigid_rotation_deg)
         metadata["virtual_center_translation_px"] = float(virtual_center_solution.rigid_translation_px)
         metadata["virtual_center_candidate_score"] = float(virtual_center_solution.candidate_score)
+        metadata["virtual_center_crop_ratio"] = float(virtual_center_solution.crop_ratio)
+        metadata["virtual_center_right_edge_scale_drift"] = float(virtual_center_solution.right_edge_scale_drift)
+        metadata["virtual_center_roll_correction_deg"] = float(virtual_center_solution.virtual_roll_correction_deg)
+        metadata["virtual_center_mask_tilt_deg"] = float(virtual_center_solution.mask_tilt_deg)
         geometry_artifact = build_runtime_geometry_artifact(
             source_homography_file=config.output_path,
             geometry_file=geometry_file,
