@@ -64,11 +64,14 @@ SCHEMA_V2_INPUT_SIDE_KEYS = (
     "buffer_frames",
 )
 SCHEMA_V2_GEOMETRY_KEYS = ("artifact_path",)
-DEFAULT_OPERATOR_GEOMETRY_MODEL = "virtual-center-rectilinear"
+DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL = "virtual-center-rectilinear"
+DEFAULT_OPERATOR_GEOMETRY_MODEL = "virtual-center-rectilinear-mesh"
+INTERNAL_FALLBACK_GEOMETRY_MODEL = "virtual-center-rectilinear-rigid"
 LEGACY_FALLBACK_GEOMETRY_MODELS = ("cylindrical-affine",)
 LEGACY_COMPAT_GEOMETRY_MODELS = ("planar-homography",)
 SUPPORTED_RUNTIME_GEOMETRY_MODELS = (
     DEFAULT_OPERATOR_GEOMETRY_MODEL,
+    INTERNAL_FALLBACK_GEOMETRY_MODEL,
     *LEGACY_FALLBACK_GEOMETRY_MODELS,
     *LEGACY_COMPAT_GEOMETRY_MODELS,
 )
@@ -171,6 +174,38 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "headless_benchmark",
 )
 
+PUBLIC_RUNTIME_STATE_FIELDS = (
+    "status",
+    "running",
+    "last_error",
+    "runtime_active_model",
+    "runtime_active_residual_model",
+    "runtime_active_artifact_path",
+    "runtime_artifact_checksum",
+    "runtime_launch_ready",
+    "runtime_launch_ready_reason",
+    "fallback_used",
+    "input_path_mode",
+    "gpu_path_mode",
+    "gpu_path_ready",
+    "output_path_mode",
+    "output_path_direct",
+    "output_path_bridge",
+    "zero_copy_ready",
+    "zero_copy_reason",
+    "zero_copy_blockers",
+    "production_output_runtime_mode",
+    "production_output_target",
+    "production_output_frames_written",
+    "production_output_frames_dropped",
+    "production_output_written_fps",
+    "stitch_actual_fps",
+    "preview_ready",
+    "preview_left_url",
+    "preview_right_url",
+    "preview_stitched_url",
+)
+
 
 def _as_dict(value: Any, *, field_name: str) -> dict[str, Any]:
     if value is None:
@@ -234,37 +269,45 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
     else:
         model = "" if geometry_model is None else str(geometry_model).strip()
         residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
-    operator_visible = model == DEFAULT_OPERATOR_GEOMETRY_MODEL
-    fallback_only = model in LEGACY_FALLBACK_GEOMETRY_MODELS
+    mesh_default = model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL and residual == "mesh"
+    internal_default_fallback = model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL and residual != "mesh"
+    operator_visible = mesh_default
+    fallback_only = internal_default_fallback or model in LEGACY_FALLBACK_GEOMETRY_MODELS
     compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
 
-    if model == DEFAULT_OPERATOR_GEOMETRY_MODEL and residual == "mesh":
-        rollout_status = "candidate"
-        launch_ready = False
-        launch_ready_reason = "mesh residual geometry artifact is compare-ready, but runtime mesh rendering is not wired yet"
-    elif model == DEFAULT_OPERATOR_GEOMETRY_MODEL:
+    if mesh_default:
+        public_model = DEFAULT_OPERATOR_GEOMETRY_MODEL
         rollout_status = "default"
         launch_ready = True
-        launch_ready_reason = "default launch-ready geometry model"
+        launch_ready_reason = "default launch-ready mesh geometry artifact"
+    elif internal_default_fallback:
+        public_model = INTERNAL_FALLBACK_GEOMETRY_MODEL
+        rollout_status = "internal-fallback"
+        launch_ready = True
+        launch_ready_reason = "internal rigid fallback geometry artifact; product surface targets mesh artifacts"
     elif model in LEGACY_FALLBACK_GEOMETRY_MODELS:
+        public_model = model or "-"
         rollout_status = "fallback"
         launch_ready = True
         launch_ready_reason = "legacy fallback geometry artifact; use explicit geometry.artifact_path for rollback only"
     elif model in LEGACY_COMPAT_GEOMETRY_MODELS:
+        public_model = model or "-"
         rollout_status = "legacy"
         launch_ready = True
         launch_ready_reason = "legacy compatibility geometry artifact; keep only for compatibility or emergency rollback"
     elif model:
+        public_model = model
         rollout_status = "unsupported"
         launch_ready = False
         launch_ready_reason = "unsupported runtime geometry model"
     else:
+        public_model = "-"
         rollout_status = "unknown"
         launch_ready = False
         launch_ready_reason = "geometry artifact model is missing"
 
     return {
-        "geometry_model": model or "-",
+        "geometry_model": public_model,
         "geometry_residual_model": residual or "-",
         "geometry_rollout_status": rollout_status,
         "geometry_operator_visible": operator_visible,
@@ -273,6 +316,37 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         "launch_ready": launch_ready,
         "launch_ready_reason": launch_ready_reason,
     }
+
+
+def public_runtime_state_surface(state: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return {}
+
+    surface = {key: state.get(key) for key in PUBLIC_RUNTIME_STATE_FIELDS}
+    surface.setdefault("status", "idle")
+    surface["running"] = bool(surface.get("running"))
+    surface["last_error"] = "" if surface.get("last_error") is None else str(surface.get("last_error") or "")
+    surface["runtime_active_model"] = "" if surface.get("runtime_active_model") is None else str(surface.get("runtime_active_model") or "")
+    surface["runtime_active_residual_model"] = "" if surface.get("runtime_active_residual_model") is None else str(surface.get("runtime_active_residual_model") or "")
+    surface["runtime_active_artifact_path"] = "" if surface.get("runtime_active_artifact_path") is None else str(surface.get("runtime_active_artifact_path") or "")
+    surface["runtime_artifact_checksum"] = "" if surface.get("runtime_artifact_checksum") is None else str(surface.get("runtime_artifact_checksum") or "")
+    surface["runtime_launch_ready"] = bool(surface.get("runtime_launch_ready"))
+    surface["runtime_launch_ready_reason"] = "" if surface.get("runtime_launch_ready_reason") is None else str(surface.get("runtime_launch_ready_reason") or "")
+    surface["fallback_used"] = bool(surface.get("fallback_used"))
+    surface["input_path_mode"] = "" if surface.get("input_path_mode") is None else str(surface.get("input_path_mode") or "")
+    surface["gpu_path_mode"] = "" if surface.get("gpu_path_mode") is None else str(surface.get("gpu_path_mode") or "")
+    surface["gpu_path_ready"] = bool(surface.get("gpu_path_ready"))
+    surface["output_path_mode"] = "" if surface.get("output_path_mode") is None else str(surface.get("output_path_mode") or "")
+    surface["output_path_direct"] = bool(surface.get("output_path_direct"))
+    surface["output_path_bridge"] = bool(surface.get("output_path_bridge"))
+    surface["zero_copy_ready"] = bool(surface.get("zero_copy_ready"))
+    surface["zero_copy_reason"] = "" if surface.get("zero_copy_reason") is None else str(surface.get("zero_copy_reason") or "")
+    surface["zero_copy_blockers"] = list(surface.get("zero_copy_blockers") or [])
+    surface["preview_ready"] = bool(surface.get("preview_ready"))
+    surface["preview_left_url"] = "" if surface.get("preview_left_url") is None else str(surface.get("preview_left_url") or "")
+    surface["preview_right_url"] = "" if surface.get("preview_right_url") is None else str(surface.get("preview_right_url") or "")
+    surface["preview_stitched_url"] = "" if surface.get("preview_stitched_url") is None else str(surface.get("preview_stitched_url") or "")
+    return surface
 
 
 def normalize_schema_v2_reload_payload(payload: dict[str, Any]) -> dict[str, Any]:

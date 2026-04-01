@@ -790,6 +790,7 @@ bool load_distortion_profile_from_file(const std::string& path, DistortionProfil
 struct RuntimeGeometryArtifactData {
     std::string model = "planar-homography";
     std::string alignment_model = "homography";
+    std::string residual_model = "none";
     std::string artifact_path;
     std::string source_homography_file;
     std::string source_geometry_file;
@@ -813,6 +814,14 @@ struct RuntimeGeometryArtifactData {
     double right_virtual_center_y = 0.0;
     cv::Mat left_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
     cv::Mat right_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
+    bool mesh_fallback_used = false;
+    int mesh_grid_cols = 0;
+    int mesh_grid_rows = 0;
+    cv::Mat mesh_control_displacement_x{};
+    cv::Mat mesh_control_displacement_y{};
+    double mesh_max_displacement_px = 0.0;
+    double mesh_max_local_scale_drift = 0.0;
+    double mesh_max_local_rotation_drift = 0.0;
     double residual_alignment_error_px = 0.0;
     int seam_transition_px = 64;
     double seam_smoothness_penalty = 4.0;
@@ -944,6 +953,42 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             *matrix_out = cv::Mat(3, 3, CV_64F, values.data()).clone();
             return true;
         };
+        auto read_float_grid = [](const cv::FileNode& node, cv::Mat* grid_out) {
+            if (grid_out == nullptr || node.empty() || !node.isSeq()) {
+                return false;
+            }
+            const int rows = static_cast<int>(node.size());
+            if (rows <= 0) {
+                return false;
+            }
+            int cols = -1;
+            std::vector<float> values;
+            values.reserve(static_cast<std::size_t>(rows) * 16U);
+            for (const auto& row_node : node) {
+                if (!row_node.isSeq()) {
+                    return false;
+                }
+                const int row_cols = static_cast<int>(row_node.size());
+                if (row_cols <= 0) {
+                    return false;
+                }
+                if (cols < 0) {
+                    cols = row_cols;
+                } else if (cols != row_cols) {
+                    return false;
+                }
+                for (const auto& cell_node : row_node) {
+                    double numeric_value = 0.0;
+                    cell_node >> numeric_value;
+                    values.push_back(static_cast<float>(numeric_value));
+                }
+            }
+            if (cols <= 0 || static_cast<int>(values.size()) != rows * cols) {
+                return false;
+            }
+            *grid_out = cv::Mat(rows, cols, CV_32F, values.data()).clone();
+            return true;
+        };
 
         cv::FileNode source_node = fs["source"];
         if (!source_node.empty()) {
@@ -955,6 +1000,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         if (!geometry_node.empty()) {
             geometry_node["model"] >> artifact_out->model;
             geometry_node["warp_model"] >> artifact_out->alignment_model;
+            geometry_node["residual_model"] >> artifact_out->residual_model;
             cv::FileNode homography_node = geometry_node["homography"];
             if (!homography_node.empty() && homography_node.isSeq()) {
                 std::vector<double> values;
@@ -993,6 +1039,17 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                     artifact_out->alignment_matrix.at<double>(1, 2) = values[5];
                 }
             }
+        }
+        cv::FileNode mesh_node = fs["mesh"];
+        if (!mesh_node.empty()) {
+            mesh_node["grid_cols"] >> artifact_out->mesh_grid_cols;
+            mesh_node["grid_rows"] >> artifact_out->mesh_grid_rows;
+            mesh_node["fallback_used"] >> artifact_out->mesh_fallback_used;
+            mesh_node["max_displacement_px"] >> artifact_out->mesh_max_displacement_px;
+            mesh_node["max_local_scale_drift"] >> artifact_out->mesh_max_local_scale_drift;
+            mesh_node["max_local_rotation_drift"] >> artifact_out->mesh_max_local_rotation_drift;
+            read_float_grid(mesh_node["control_displacement_x"], &artifact_out->mesh_control_displacement_x);
+            read_float_grid(mesh_node["control_displacement_y"], &artifact_out->mesh_control_displacement_y);
         }
 
         cv::FileNode projection_node = fs["projection"];
@@ -1127,6 +1184,15 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         }
         artifact_out->left_projection_model = normalize_projection_model(artifact_out->left_projection_model);
         artifact_out->right_projection_model = normalize_projection_model(artifact_out->right_projection_model);
+        if (artifact_out->residual_model.empty()) {
+            if (artifact_out->model == "virtual-center-rectilinear") {
+                artifact_out->residual_model = "rigid";
+            } else if (artifact_out->model == "cylindrical-affine") {
+                artifact_out->residual_model = "affine";
+            } else {
+                artifact_out->residual_model = artifact_out->alignment_model;
+            }
+        }
         sanitize_virtual_projection_side(
             &artifact_out->left_focal_px,
             &artifact_out->left_center_x,
@@ -1168,6 +1234,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
 
     extract_json_string_for_key(text, "\"model\"", &artifact_out->model);
     extract_json_string_for_key(text, "\"alignment_model\"", &artifact_out->alignment_model);
+    extract_json_string_for_key(text, "\"residual_model\"", &artifact_out->residual_model);
     if (artifact_out->alignment_model.empty()) {
         artifact_out->alignment_model = "affine";
     }
@@ -1197,6 +1264,15 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     }
     if (artifact_out->alignment_matrix.empty()) {
         artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
+    }
+    if (artifact_out->residual_model.empty()) {
+        if (artifact_out->model == "virtual-center-rectilinear") {
+            artifact_out->residual_model = "rigid";
+        } else if (artifact_out->model == "cylindrical-affine") {
+            artifact_out->residual_model = "affine";
+        } else {
+            artifact_out->residual_model = artifact_out->alignment_model;
+        }
     }
 
     double numeric_value = 0.0;
@@ -1232,6 +1308,54 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         artifact_out->residual_alignment_error_px = numeric_value;
     } else if (extract_json_number_for_key(text, "\"reprojection_error_px\"", &numeric_value)) {
         artifact_out->residual_alignment_error_px = numeric_value;
+    }
+    std::string mesh_block_text;
+    if (extract_json_object_for_key(text, "\"mesh\"", &mesh_block_text)) {
+        if (extract_json_number_for_key(mesh_block_text, "\"grid_cols\"", &numeric_value)) {
+            artifact_out->mesh_grid_cols = static_cast<int>(std::llround(numeric_value));
+        }
+        if (extract_json_number_for_key(mesh_block_text, "\"grid_rows\"", &numeric_value)) {
+            artifact_out->mesh_grid_rows = static_cast<int>(std::llround(numeric_value));
+        }
+        extract_json_bool(mesh_block_text, "\"fallback_used\"", &artifact_out->mesh_fallback_used);
+        if (extract_json_number_for_key(mesh_block_text, "\"max_displacement_px\"", &numeric_value)) {
+            artifact_out->mesh_max_displacement_px = numeric_value;
+        }
+        if (extract_json_number_for_key(mesh_block_text, "\"max_local_scale_drift\"", &numeric_value)) {
+            artifact_out->mesh_max_local_scale_drift = numeric_value;
+        }
+        if (extract_json_number_for_key(mesh_block_text, "\"max_local_rotation_drift\"", &numeric_value)) {
+            artifact_out->mesh_max_local_rotation_drift = numeric_value;
+        }
+        auto parse_grid_array = [&](const std::string& key, cv::Mat* grid_out) {
+            if (grid_out == nullptr) {
+                return false;
+            }
+            std::string grid_text;
+            if (!extract_json_array_for_key(mesh_block_text, key, &grid_text)) {
+                return false;
+            }
+            std::vector<double> parsed_values;
+            if (!parse_numeric_vector(grid_text, &parsed_values)) {
+                return false;
+            }
+            const int rows = artifact_out->mesh_grid_rows + 1;
+            const int cols = artifact_out->mesh_grid_cols + 1;
+            if (rows <= 0 || cols <= 0 || static_cast<int>(parsed_values.size()) != rows * cols) {
+                return false;
+            }
+            cv::Mat grid(rows, cols, CV_32F);
+            for (int row = 0; row < rows; ++row) {
+                auto* grid_row = grid.ptr<float>(row);
+                for (int col = 0; col < cols; ++col) {
+                    grid_row[col] = static_cast<float>(parsed_values[static_cast<std::size_t>(row * cols + col)]);
+                }
+            }
+            *grid_out = grid;
+            return true;
+        };
+        parse_grid_array("\"control_displacement_x\"", &artifact_out->mesh_control_displacement_x);
+        parse_grid_array("\"control_displacement_y\"", &artifact_out->mesh_control_displacement_y);
     }
     if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
         artifact_out->output_size = cv::Size(artifact_out->left_input_size.width, artifact_out->left_input_size.height);
@@ -1540,6 +1664,80 @@ bool StitchEngine::build_virtual_center_rectilinear_maps_locked(
             }
             map_x_row[x] = static_cast<float>(source_focal * (ray_source[0] / ray_source[2]) + source_cx);
             map_y_row[x] = static_cast<float>(source_focal * (ray_source[1] / ray_source[2]) + source_cy);
+        }
+    }
+    return true;
+}
+
+bool StitchEngine::build_runtime_mesh_maps_locked(
+    const cv::Size& canvas_size,
+    const cv::Mat& control_displacement_x,
+    const cv::Mat& control_displacement_y,
+    cv::Mat* map_x_out,
+    cv::Mat* map_y_out) const {
+    if (map_x_out == nullptr || map_y_out == nullptr) {
+        return false;
+    }
+    if (canvas_size.width <= 1 || canvas_size.height <= 1) {
+        return false;
+    }
+    if (control_displacement_x.empty() ||
+        control_displacement_y.empty() ||
+        control_displacement_x.type() != CV_32F ||
+        control_displacement_y.type() != CV_32F ||
+        control_displacement_x.size() != control_displacement_y.size() ||
+        control_displacement_x.rows < 2 ||
+        control_displacement_x.cols < 2) {
+        return false;
+    }
+
+    const int node_rows = control_displacement_x.rows;
+    const int node_cols = control_displacement_x.cols;
+    const int grid_rows = node_rows - 1;
+    const int grid_cols = node_cols - 1;
+    if (grid_rows <= 0 || grid_cols <= 0) {
+        return false;
+    }
+    const double cell_w = static_cast<double>(std::max(1, canvas_size.width - 1)) / static_cast<double>(grid_cols);
+    const double cell_h = static_cast<double>(std::max(1, canvas_size.height - 1)) / static_cast<double>(grid_rows);
+    if (cell_w <= 0.0 || cell_h <= 0.0) {
+        return false;
+    }
+
+    map_x_out->create(canvas_size, CV_32FC1);
+    map_y_out->create(canvas_size, CV_32FC1);
+    for (int y = 0; y < canvas_size.height; ++y) {
+        auto* map_x_row = map_x_out->ptr<float>(y);
+        auto* map_y_row = map_y_out->ptr<float>(y);
+        const double gy_raw = static_cast<double>(y) / cell_h;
+        const double gy_clamped = std::clamp(gy_raw, 0.0, static_cast<double>(grid_rows) - 1e-6);
+        const int iy = std::clamp(static_cast<int>(std::floor(gy_clamped)), 0, grid_rows - 1);
+        const float ty = static_cast<float>(gy_clamped - static_cast<double>(iy));
+        const auto* dx_row0 = control_displacement_x.ptr<float>(iy);
+        const auto* dx_row1 = control_displacement_x.ptr<float>(iy + 1);
+        const auto* dy_row0 = control_displacement_y.ptr<float>(iy);
+        const auto* dy_row1 = control_displacement_y.ptr<float>(iy + 1);
+        for (int x = 0; x < canvas_size.width; ++x) {
+            const double gx_raw = static_cast<double>(x) / cell_w;
+            const double gx_clamped = std::clamp(gx_raw, 0.0, static_cast<double>(grid_cols) - 1e-6);
+            const int ix = std::clamp(static_cast<int>(std::floor(gx_clamped)), 0, grid_cols - 1);
+            const float tx = static_cast<float>(gx_clamped - static_cast<double>(ix));
+            const float dx00 = dx_row0[ix];
+            const float dx10 = dx_row0[ix + 1];
+            const float dx01 = dx_row1[ix];
+            const float dx11 = dx_row1[ix + 1];
+            const float dy00 = dy_row0[ix];
+            const float dy10 = dy_row0[ix + 1];
+            const float dy01 = dy_row1[ix];
+            const float dy11 = dy_row1[ix + 1];
+            const float dx_top = dx00 + ((dx10 - dx00) * tx);
+            const float dx_bottom = dx01 + ((dx11 - dx01) * tx);
+            const float dy_top = dy00 + ((dy10 - dy00) * tx);
+            const float dy_bottom = dy01 + ((dy11 - dy01) * tx);
+            const float dx = dx_top + ((dx_bottom - dx_top) * ty);
+            const float dy = dy_top + ((dy_bottom - dy_top) * ty);
+            map_x_row[x] = static_cast<float>(x) - dx;
+            map_y_row[x] = static_cast<float>(y) - dy;
         }
     }
     return true;
@@ -2771,6 +2969,7 @@ void StitchEngine::clear_calibration_state_locked() {
     gpu_right_decoded_.release();
     gpu_right_input_.release();
     gpu_right_corrected_.release();
+    gpu_right_aligned_.release();
     gpu_right_warped_.release();
     gpu_overlap_mask_.release();
     gpu_overlap_mask_roi_.release();
@@ -3181,6 +3380,7 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
 
     state->model = artifact.model.empty() ? "planar-homography" : artifact.model;
     state->alignment_model = artifact.alignment_model.empty() ? "homography" : artifact.alignment_model;
+    state->residual_model = artifact.residual_model.empty() ? state->alignment_model : artifact.residual_model;
     if (state->model == "cylindrical_affine") {
         state->model = "cylindrical-affine";
     } else if (state->model == "virtual_center_rectilinear") {
@@ -3205,6 +3405,17 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
     state->right_virtual_center_y = artifact.right_virtual_center_y;
     state->left_virtual_to_source_rotation = artifact.left_virtual_to_source_rotation.clone();
     state->right_virtual_to_source_rotation = artifact.right_virtual_to_source_rotation.clone();
+    state->mesh_fallback_used = artifact.mesh_fallback_used;
+    state->mesh_grid_cols = artifact.mesh_grid_cols;
+    state->mesh_grid_rows = artifact.mesh_grid_rows;
+    state->mesh_control_displacement_x = artifact.mesh_control_displacement_x.clone();
+    state->mesh_control_displacement_y = artifact.mesh_control_displacement_y.clone();
+    state->mesh_max_displacement_px = artifact.mesh_max_displacement_px;
+    state->mesh_max_local_scale_drift = artifact.mesh_max_local_scale_drift;
+    state->mesh_max_local_rotation_drift = artifact.mesh_max_local_rotation_drift;
+    state->mesh_enabled =
+        state->model == "virtual-center-rectilinear" &&
+        state->residual_model == "mesh";
     state->residual_alignment_error_px = artifact.residual_alignment_error_px;
     state->seam_transition_px = std::max(2, artifact.seam_transition_px);
     state->seam_smoothness_penalty = std::max(0.0, artifact.seam_smoothness_penalty);
@@ -3249,6 +3460,10 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         metrics_.gpu_reason = "virtual-center-rectilinear requires GPU path";
         return false;
     }
+    cv::Size rectilinear_output_size = runtime_geometry_.output_size;
+    if (rectilinear_runtime && (rectilinear_output_size.width <= 0 || rectilinear_output_size.height <= 0)) {
+        rectilinear_output_size = left_size;
+    }
     if (cylindrical_runtime) {
         if (!build_cylindrical_maps_locked(
                 left_size,
@@ -3270,7 +3485,7 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         }
     } else {
         if (!build_virtual_center_rectilinear_maps_locked(
-                left_size,
+                rectilinear_output_size,
                 runtime_geometry_.left_focal_px,
                 runtime_geometry_.left_center_x,
                 runtime_geometry_.left_center_y,
@@ -3283,7 +3498,7 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
             return false;
         }
         if (!build_virtual_center_rectilinear_maps_locked(
-                right_size,
+                rectilinear_output_size,
                 runtime_geometry_.right_focal_px,
                 runtime_geometry_.right_center_x,
                 runtime_geometry_.right_center_y,
@@ -3294,6 +3509,21 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
                 &runtime_geometry_.rectilinear_right_map_x,
                 &runtime_geometry_.rectilinear_right_map_y)) {
             return false;
+        }
+        if (runtime_geometry_.mesh_enabled) {
+            if (runtime_geometry_.mesh_fallback_used) {
+                metrics_.gpu_reason = "virtual-center mesh artifact is marked degraded-to-rigid and cannot be launched as mesh";
+                return false;
+            }
+            if (!build_runtime_mesh_maps_locked(
+                    rectilinear_output_size,
+                    runtime_geometry_.mesh_control_displacement_x,
+                    runtime_geometry_.mesh_control_displacement_y,
+                    &runtime_geometry_.mesh_map_x,
+                    &runtime_geometry_.mesh_map_y)) {
+                metrics_.gpu_reason = "virtual-center mesh artifact is missing a valid runtime mesh map";
+                return false;
+            }
         }
     }
     if (gpu_available_) {
@@ -3308,6 +3538,10 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
                 runtime_geometry_.rectilinear_left_map_y_gpu.upload(runtime_geometry_.rectilinear_left_map_y);
                 runtime_geometry_.rectilinear_right_map_x_gpu.upload(runtime_geometry_.rectilinear_right_map_x);
                 runtime_geometry_.rectilinear_right_map_y_gpu.upload(runtime_geometry_.rectilinear_right_map_y);
+                if (runtime_geometry_.mesh_enabled) {
+                    runtime_geometry_.mesh_map_x_gpu.upload(runtime_geometry_.mesh_map_x);
+                    runtime_geometry_.mesh_map_y_gpu.upload(runtime_geometry_.mesh_map_y);
+                }
             }
         } catch (const cv::Exception& e) {
             if (rectilinear_runtime) {
@@ -3325,14 +3559,21 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
     cv::Rect left_roi;
     cv::Rect overlap_roi_unused;
     cv::Mat adjusted_affine;
-    if (!build_affine_output_plan_locked(
-            left_size,
-            right_size,
-            runtime_geometry_.alignment_matrix,
-            &output_size,
-            &left_roi,
-            &overlap_roi_unused,
-            &adjusted_affine)) {
+    if (rectilinear_runtime) {
+        output_size = rectilinear_output_size;
+        left_roi = cv::Rect(0, 0, output_size.width, output_size.height);
+        overlap_roi_unused = cv::Rect();
+        adjusted_affine = runtime_geometry_.alignment_matrix.empty()
+            ? cv::Mat::eye(3, 3, CV_64F)
+            : runtime_geometry_.alignment_matrix.clone();
+    } else if (!build_affine_output_plan_locked(
+                   left_size,
+                   right_size,
+                   runtime_geometry_.alignment_matrix,
+                   &output_size,
+                   &left_roi,
+                   &overlap_roi_unused,
+                   &adjusted_affine)) {
         return false;
     }
 
@@ -3344,18 +3585,59 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
     homography_ = runtime_geometry_.alignment_matrix.clone();
     homography_adjusted_ = runtime_geometry_.alignment_matrix.clone();
 
-    left_mask_template_ = cv::Mat::zeros(output_size_, CV_8UC1);
-    if (left_roi_.area() > 0) {
-        left_mask_template_(left_roi_).setTo(cv::Scalar(255));
+    if (rectilinear_runtime) {
+        cv::Mat left_mask_source(left_size, CV_8UC1, cv::Scalar(255));
+        cv::remap(
+            left_mask_source,
+            left_mask_template_,
+            runtime_geometry_.rectilinear_left_map_x,
+            runtime_geometry_.rectilinear_left_map_y,
+            cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT,
+            cv::Scalar());
+        cv::Mat right_mask_source(right_size, CV_8UC1, cv::Scalar(255));
+        cv::Mat right_projected_mask;
+        cv::remap(
+            right_mask_source,
+            right_projected_mask,
+            runtime_geometry_.rectilinear_right_map_x,
+            runtime_geometry_.rectilinear_right_map_y,
+            cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT,
+            cv::Scalar());
+        cv::warpPerspective(
+            right_projected_mask,
+            right_mask_template_,
+            runtime_geometry_.alignment_matrix,
+            output_size_,
+            cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT);
+        if (runtime_geometry_.mesh_enabled) {
+            cv::Mat right_mask_meshed;
+            cv::remap(
+                right_mask_template_,
+                right_mask_meshed,
+                runtime_geometry_.mesh_map_x,
+                runtime_geometry_.mesh_map_y,
+                cv::INTER_NEAREST,
+                cv::BORDER_CONSTANT,
+                cv::Scalar());
+            right_mask_template_ = right_mask_meshed;
+        }
+    } else {
+        left_mask_template_ = cv::Mat::zeros(output_size_, CV_8UC1);
+        if (left_roi_.area() > 0) {
+            left_mask_template_(left_roi_).setTo(cv::Scalar(255));
+        }
+        cv::Mat right_mask_source(right_size, CV_8UC1, cv::Scalar(255));
+        cv::warpPerspective(
+            right_mask_source,
+            right_mask_template_,
+            runtime_geometry_.alignment_matrix,
+            output_size_,
+            cv::INTER_NEAREST,
+            cv::BORDER_CONSTANT);
     }
-    cv::Mat right_mask_source(right_size, CV_8UC1, cv::Scalar(255));
-    cv::warpPerspective(
-        right_mask_source,
-        right_mask_template_,
-        runtime_geometry_.alignment_matrix,
-        output_size_,
-        cv::INTER_NEAREST,
-        cv::BORDER_CONSTANT);
 
     cv::Mat right_mask_not;
     cv::Mat left_mask_not;
@@ -3406,8 +3688,8 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
     }
 
     metrics_.geometry_mode = runtime_geometry_.model;
-    metrics_.alignment_mode = runtime_geometry_.alignment_model;
-    metrics_.seam_mode = "dynamic-path";
+    metrics_.alignment_mode = runtime_geometry_.mesh_enabled ? "mesh" : runtime_geometry_.alignment_model;
+    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
     metrics_.exposure_mode =
         (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
@@ -3425,7 +3707,9 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
 
 void StitchEngine::apply_runtime_geometry_to_metrics_locked() {
     metrics_.geometry_mode = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.alignment_mode = runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model;
+    metrics_.alignment_mode = runtime_geometry_.mesh_enabled
+        ? "mesh"
+        : (runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model);
     metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
     metrics_.exposure_mode =
         (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
@@ -4172,10 +4456,22 @@ bool StitchEngine::stitch_pair_locked(
                         cv::Scalar());
                     left_gpu_for_stitch = &gpu_left_rectilinear_;
                 }
-                gpu_left_canvas_.create(output_size_, CV_8UC3);
-                gpu_left_canvas_.setTo(cv::Scalar::all(0));
-                cv::cuda::GpuMat left_roi_gpu(gpu_left_canvas_, left_roi_);
-                left_gpu_for_stitch->copyTo(left_roi_gpu);
+                if (rectilinear_runtime) {
+                    if (left_gpu_for_stitch->size() != output_size_) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "left virtual-center projection size does not match output canvas",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    left_gpu_for_stitch->copyTo(gpu_left_canvas_);
+                } else {
+                    gpu_left_canvas_.create(output_size_, CV_8UC3);
+                    gpu_left_canvas_.setTo(cv::Scalar::all(0));
+                    cv::cuda::GpuMat left_roi_gpu(gpu_left_canvas_, left_roi_);
+                    left_gpu_for_stitch->copyTo(left_roi_gpu);
+                }
                 cached_left_canvas_seq_ = selected_pair.left_seq;
             }
 
@@ -4271,11 +4567,39 @@ bool StitchEngine::stitch_pair_locked(
                         cv::Scalar());
                     right_gpu_for_stitch = &gpu_right_rectilinear_;
                 }
-                cv::cuda::warpPerspective(
-                    *right_gpu_for_stitch,
-                    gpu_right_warped_,
-                    homography_adjusted_,
-                    output_size_);
+                if (rectilinear_runtime) {
+                    cv::cuda::warpPerspective(
+                        *right_gpu_for_stitch,
+                        gpu_right_aligned_,
+                        homography_adjusted_,
+                        output_size_);
+                } else {
+                    cv::cuda::warpPerspective(
+                        *right_gpu_for_stitch,
+                        gpu_right_warped_,
+                        homography_adjusted_,
+                        output_size_);
+                }
+                if (rectilinear_runtime && runtime_geometry_.mesh_enabled) {
+                    if (runtime_geometry_.mesh_map_x_gpu.empty() || runtime_geometry_.mesh_map_y_gpu.empty()) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "right virtual-center mesh gpu map unavailable",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
+                    cv::cuda::remap(
+                        gpu_right_aligned_,
+                        gpu_right_warped_,
+                        runtime_geometry_.mesh_map_x_gpu,
+                        runtime_geometry_.mesh_map_y_gpu,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT,
+                        cv::Scalar());
+                } else if (rectilinear_runtime) {
+                    gpu_right_aligned_.copyTo(gpu_right_warped_);
+                }
                 metrics_.gpu_warp_count += 1;
                 cached_right_warped_seq_ = selected_pair.right_seq;
             }

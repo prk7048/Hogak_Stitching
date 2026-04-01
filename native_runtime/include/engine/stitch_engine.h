@@ -37,6 +37,7 @@ private:
     struct RuntimeGeometryState {
         std::string model = "planar-homography";
         std::string alignment_model = "homography";
+        std::string residual_model = "none";
         std::string artifact_path;
         cv::Size output_size{};
         cv::Mat alignment_matrix{};
@@ -72,6 +73,19 @@ private:
         double right_virtual_center_y = 0.0;
         cv::Mat left_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
         cv::Mat right_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
+        bool mesh_enabled = false;
+        bool mesh_fallback_used = false;
+        int mesh_grid_cols = 0;
+        int mesh_grid_rows = 0;
+        cv::Mat mesh_control_displacement_x{};
+        cv::Mat mesh_control_displacement_y{};
+        cv::Mat mesh_map_x{};
+        cv::Mat mesh_map_y{};
+        cv::cuda::GpuMat mesh_map_x_gpu{};
+        cv::cuda::GpuMat mesh_map_y_gpu{};
+        double mesh_max_displacement_px = 0.0;
+        double mesh_max_local_scale_drift = 0.0;
+        double mesh_max_local_rotation_drift = 0.0;
         double residual_alignment_error_px = 0.0;
         int seam_transition_px = 64;
         double seam_smoothness_penalty = 4.0;
@@ -151,6 +165,12 @@ private:
         double virtual_center_x,
         double virtual_center_y,
         const cv::Mat& virtual_to_source_rotation,
+        cv::Mat* map_x_out,
+        cv::Mat* map_y_out) const;
+    bool build_runtime_mesh_maps_locked(
+        const cv::Size& canvas_size,
+        const cv::Mat& control_displacement_x,
+        const cv::Mat& control_displacement_y,
         cv::Mat* map_x_out,
         cv::Mat* map_y_out) const;
     bool build_affine_output_plan_locked(
@@ -300,6 +320,7 @@ private:
     cv::cuda::GpuMat gpu_right_corrected_{};
     cv::cuda::GpuMat gpu_right_cylindrical_{};
     cv::cuda::GpuMat gpu_right_rectilinear_{};
+    cv::cuda::GpuMat gpu_right_aligned_{};
     cv::cuda::GpuMat gpu_right_warped_{};
     cv::cuda::GpuMat gpu_overlap_mask_{};
     cv::cuda::GpuMat gpu_overlap_mask_roi_{};

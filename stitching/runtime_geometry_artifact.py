@@ -183,6 +183,67 @@ def _normalize_residual_model(model: Any, *, geometry_model: str = "") -> str:
     return "none"
 
 
+def _normalize_mesh_payload(
+    mesh: dict[str, Any] | None,
+    *,
+    canvas_resolution: tuple[int, int] | list[int] | None = None,
+) -> dict[str, Any]:
+    mesh_payload = dict(mesh or {})
+    if not mesh_payload:
+        return {}
+
+    grid_cols = max(0, int(mesh_payload.get("grid_cols") or 0))
+    grid_rows = max(0, int(mesh_payload.get("grid_rows") or 0))
+    displacement_x = mesh_payload.get("control_displacement_x")
+    displacement_y = mesh_payload.get("control_displacement_y")
+    expected_rows = grid_rows + 1 if grid_rows > 0 else 0
+    expected_cols = grid_cols + 1 if grid_cols > 0 else 0
+
+    def _normalize_control_grid(value: Any) -> list[list[float]]:
+        rows = value if isinstance(value, list) else []
+        if expected_rows <= 0 or expected_cols <= 0:
+            return []
+        normalized_rows: list[list[float]] = []
+        for row_index in range(expected_rows):
+            source_row = rows[row_index] if row_index < len(rows) and isinstance(rows[row_index], list) else []
+            normalized_row: list[float] = []
+            for col_index in range(expected_cols):
+                cell = source_row[col_index] if col_index < len(source_row) else 0.0
+                try:
+                    normalized_row.append(float(cell))
+                except (TypeError, ValueError):
+                    normalized_row.append(0.0)
+            normalized_rows.append(normalized_row)
+        return normalized_rows
+
+    mesh_payload["grid_cols"] = grid_cols
+    mesh_payload["grid_rows"] = grid_rows
+    mesh_payload["control_displacement_x"] = _normalize_control_grid(displacement_x)
+    mesh_payload["control_displacement_y"] = _normalize_control_grid(displacement_y)
+    mesh_payload["model"] = str(mesh_payload.get("model") or "regular-grid-displacement")
+    mesh_payload["space"] = str(mesh_payload.get("space") or "output-canvas")
+    mesh_payload["apply_stage"] = str(mesh_payload.get("apply_stage") or "post-rigid-right")
+    if isinstance(canvas_resolution, (tuple, list)) and len(canvas_resolution) >= 2:
+        mesh_payload["canvas_resolution"] = [int(canvas_resolution[0]), int(canvas_resolution[1])]
+    elif "canvas_resolution" in mesh_payload and isinstance(mesh_payload.get("canvas_resolution"), list):
+        resolution = mesh_payload.get("canvas_resolution") or [0, 0]
+        mesh_payload["canvas_resolution"] = [
+            int(resolution[0]) if len(resolution) > 0 else 0,
+            int(resolution[1]) if len(resolution) > 1 else 0,
+        ]
+    for key in (
+        "max_displacement_px",
+        "max_local_scale_drift",
+        "max_local_rotation_drift",
+    ):
+        try:
+            mesh_payload[key] = float(mesh_payload.get(key) or 0.0)
+        except (TypeError, ValueError):
+            mesh_payload[key] = 0.0
+    mesh_payload["fallback_used"] = bool(mesh_payload.get("fallback_used"))
+    return mesh_payload
+
+
 def _legacy_geometry_model(geometry: dict[str, Any]) -> str:
     return _normalize_geometry_model(geometry.get("model") or geometry.get("warp_model") or "planar-homography")
 
@@ -306,12 +367,12 @@ def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
         payload["geometry"].get("residual_model"),
         geometry_model=payload["geometry"].get("model"),
     )
-    payload["mesh"] = dict(payload.get("mesh") or {})
+    geometry = payload.get("geometry", {}) if isinstance(payload.get("geometry"), dict) else {}
+    calibration = payload.get("calibration", {}) if isinstance(payload.get("calibration"), dict) else {}
+    output_resolution = geometry.get("output_resolution") or calibration.get("output_resolution") or [0, 0]
+    payload["mesh"] = _normalize_mesh_payload(payload.get("mesh"), canvas_resolution=output_resolution)
     projection = payload.get("projection")
     if isinstance(projection, dict):
-        geometry = payload.get("geometry", {}) if isinstance(payload.get("geometry"), dict) else {}
-        calibration = payload.get("calibration", {}) if isinstance(payload.get("calibration"), dict) else {}
-        output_resolution = geometry.get("output_resolution") or calibration.get("output_resolution") or [0, 0]
         left_resolution = calibration.get("left_resolution") or [0, 0]
         right_resolution = calibration.get("right_resolution") or [0, 0]
         projection["left"] = _sanitize_projection_side(
@@ -390,7 +451,7 @@ def build_runtime_geometry_artifact(
         or ("rectilinear" if geometry_model == "virtual-center-rectilinear" else "cylindrical")
     ).strip()
     virtual_camera_payload = dict(virtual_camera or {})
-    mesh_payload = dict(mesh or {})
+    mesh_payload = _normalize_mesh_payload(mesh, canvas_resolution=output_resolution)
     projection_left_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or left_focal_px)
     projection_right_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or right_focal_px)
     projection_virtual_center = _pair(
