@@ -38,6 +38,8 @@ namespace hogak::output {
 
 namespace {
 
+constexpr std::size_t kMaxPendingFrames = 3;
+
 std::string trim_copy(const std::string& text) {
     std::size_t begin = 0;
     std::size_t end = text.size();
@@ -469,10 +471,7 @@ bool GpuDirectOutputWriter::start(
         effective_codec_ = resolve_output_codec(config.codec, width, height);
         muxer_ = resolved_muxer;
         output_target_ = build_output_target(config, fps_, muxer_);
-        latest_frame_.release();
-        latest_gpu_frame_.release();
-        latest_frame_on_gpu_ = false;
-        frame_pending_ = false;
+        pending_frames_.clear();
         frames_written_ = 0;
         frames_dropped_ = 0;
         last_error_.clear();
@@ -522,19 +521,19 @@ void GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*time
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (frame_pending_) {
+    if (pending_frames_.size() >= kMaxPendingFrames) {
         frames_dropped_ += 1;
+        pending_frames_.pop_front();
     }
+    PendingFrame pending_frame{};
     if (frame_on_gpu) {
-        latest_frame_.release();
-        latest_gpu_frame_ = std::move(gpu_frame);
-        latest_frame_on_gpu_ = true;
+        pending_frame.gpu_frame = std::move(gpu_frame);
+        pending_frame.frame_on_gpu = true;
     } else {
-        latest_gpu_frame_.release();
-        latest_frame_ = std::move(cpu_frame);
-        latest_frame_on_gpu_ = false;
+        pending_frame.cpu_frame = std::move(cpu_frame);
+        pending_frame.frame_on_gpu = false;
     }
-    frame_pending_ = true;
+    pending_frames_.push_back(std::move(pending_frame));
     condition_.notify_one();
 }
 
@@ -956,24 +955,25 @@ void GpuDirectOutputWriter::run() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!has_current_frame) {
-                condition_.wait(lock, [this]() { return !active_.load() || frame_pending_; });
+                condition_.wait(lock, [this]() { return !active_.load() || !pending_frames_.empty(); });
             } else {
-                condition_.wait_until(lock, next_write_time, [this]() { return !active_.load() || frame_pending_; });
+                condition_.wait_until(lock, next_write_time, [this]() { return !active_.load() || !pending_frames_.empty(); });
             }
             if (!active_.load()) {
                 break;
             }
-            if (frame_pending_) {
-                if (latest_frame_on_gpu_) {
+            if (!pending_frames_.empty()) {
+                PendingFrame pending_frame = std::move(pending_frames_.front());
+                pending_frames_.pop_front();
+                if (pending_frame.frame_on_gpu) {
                     current_frame.release();
-                    std::swap(current_gpu_frame, latest_gpu_frame_);
+                    current_gpu_frame = std::move(pending_frame.gpu_frame);
                     current_frame_on_gpu = !current_gpu_frame.empty();
                 } else {
                     current_gpu_frame.release();
-                    std::swap(current_frame, latest_frame_);
+                    current_frame = std::move(pending_frame.cpu_frame);
                     current_frame_on_gpu = false;
                 }
-                frame_pending_ = false;
                 has_current_frame = current_frame_on_gpu ? !current_gpu_frame.empty() : !current_frame.empty();
                 frame_content_dirty = has_current_frame;
             }

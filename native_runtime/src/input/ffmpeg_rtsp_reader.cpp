@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <cstring>
 #include <cstdlib>
 #include <deque>
 #include <filesystem>
@@ -293,6 +294,75 @@ bool ensure_reusable_input_frame(cv::Mat* frame, int width, int height, const st
     return !frame->empty() && frame->isContinuous();
 }
 
+bool copy_frame_rows(
+    const std::uint8_t* source,
+    int source_stride,
+    std::uint8_t* destination,
+    int destination_stride,
+    int row_bytes,
+    int row_count) {
+    if (source == nullptr || destination == nullptr || source_stride <= 0 || destination_stride <= 0 || row_bytes <= 0 || row_count <= 0) {
+        return false;
+    }
+    if (source_stride == destination_stride && destination_stride == row_bytes) {
+        std::memcpy(destination, source, static_cast<std::size_t>(row_bytes) * static_cast<std::size_t>(row_count));
+        return true;
+    }
+    for (int row = 0; row < row_count; ++row) {
+        std::memcpy(
+            destination + (static_cast<std::ptrdiff_t>(row) * destination_stride),
+            source + (static_cast<std::ptrdiff_t>(row) * source_stride),
+            static_cast<std::size_t>(row_bytes));
+    }
+    return true;
+}
+
+bool copy_decoded_frame_without_conversion(
+    const AVFrame* source_frame,
+    const hogak::engine::StreamConfig& config,
+    cv::Mat* output_frame) {
+    if (source_frame == nullptr || output_frame == nullptr) {
+        return false;
+    }
+    if (source_frame->width != config.width || source_frame->height != config.height) {
+        return false;
+    }
+    const auto source_format = static_cast<AVPixelFormat>(source_frame->format);
+    if (input_pipe_format_is_nv12(config.input_pipe_format)) {
+        if (source_format != AV_PIX_FMT_NV12) {
+            return false;
+        }
+        const int luma_stride = static_cast<int>(output_frame->step[0]);
+        std::uint8_t* destination_luma = output_frame->data;
+        std::uint8_t* destination_chroma =
+            output_frame->data + (static_cast<std::ptrdiff_t>(output_frame->step[0]) * config.height);
+        return copy_frame_rows(
+                   source_frame->data[0],
+                   source_frame->linesize[0],
+                   destination_luma,
+                   luma_stride,
+                   config.width,
+                   config.height) &&
+            copy_frame_rows(
+                   source_frame->data[1],
+                   source_frame->linesize[1],
+                   destination_chroma,
+                   luma_stride,
+                   config.width,
+                   config.height / 2);
+    }
+    if (source_format != AV_PIX_FMT_BGR24) {
+        return false;
+    }
+    return copy_frame_rows(
+        source_frame->data[0],
+        source_frame->linesize[0],
+        output_frame->data,
+        static_cast<int>(output_frame->step[0]),
+        config.width * 3,
+        config.height);
+}
+
 bool convert_decoded_frame_to_input_format(
     const AVFrame* source_frame,
     const hogak::engine::StreamConfig& config,
@@ -313,6 +383,9 @@ bool convert_decoded_frame_to_input_format(
             *error_out = "failed to allocate reader frame buffer";
         }
         return false;
+    }
+    if (copy_decoded_frame_without_conversion(source_frame, config, output_frame)) {
+        return true;
     }
 
     const auto destination_format = input_pipe_av_pix_fmt(config.input_pipe_format);

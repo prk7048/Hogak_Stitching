@@ -3,6 +3,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -44,6 +45,11 @@ public:
 
 private:
     struct Impl;
+    struct PendingFrame {
+        cv::Mat cpu_frame{};
+        cv::cuda::GpuMat gpu_frame{};
+        bool frame_on_gpu = false;
+    };
 
     void run();
 
@@ -61,10 +67,7 @@ private:
     int width_ = 0;
     int height_ = 0;
     double fps_ = 0.0;
-    cv::Mat latest_frame_{};
-    cv::cuda::GpuMat latest_gpu_frame_{};
-    bool latest_frame_on_gpu_ = false;
-    bool frame_pending_ = false;
+    std::deque<PendingFrame> pending_frames_{};
     std::int64_t frames_written_ = 0;
     std::int64_t frames_dropped_ = 0;
     std::unique_ptr<Impl> impl_{};
