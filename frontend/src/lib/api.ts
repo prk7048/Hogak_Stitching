@@ -6,6 +6,14 @@ export type ProjectLogEntry = {
   message?: string;
 };
 
+export type ProjectDebugStep = {
+  id?: string;
+  label?: string;
+  state?: string;
+  message?: string;
+  timestamp_sec?: number;
+};
+
 export type ProjectState = {
   status?: string;
   start_phase?: string;
@@ -35,6 +43,9 @@ export type ProjectState = {
   zero_copy_reason?: string;
   zero_copy_blockers?: string[];
   project_log?: ProjectLogEntry[];
+  debug_mode?: boolean;
+  debug_current_stage?: string;
+  debug_steps?: ProjectDebugStep[];
 };
 
 export type ProjectActionResponse = {
@@ -42,7 +53,6 @@ export type ProjectActionResponse = {
   message?: string;
   detail?: string;
   error?: string;
-  state?: ProjectState;
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "";
@@ -131,6 +141,31 @@ function asProjectLog(value: unknown): ProjectLogEntry[] {
   return value.map((item) => asProjectLogEntry(item)).filter((item): item is ProjectLogEntry => item !== null);
 }
 
+function asProjectDebugStep(value: unknown): ProjectDebugStep | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const id = asString(value.id);
+  const label = asString(value.label);
+  if (!id && !label) {
+    return null;
+  }
+  return {
+    id,
+    label,
+    state: asString(value.state, "pending"),
+    message: asString(value.message),
+    timestamp_sec: asNumber(value.timestamp_sec, 0),
+  };
+}
+
+function asProjectDebugSteps(value: unknown): ProjectDebugStep[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => asProjectDebugStep(item)).filter((item): item is ProjectDebugStep => item !== null);
+}
+
 function normalizeProjectState(value: unknown): ProjectState {
   if (!isRecord(value)) {
     return {};
@@ -164,6 +199,9 @@ function normalizeProjectState(value: unknown): ProjectState {
     zero_copy_reason: asString(value.zero_copy_reason),
     zero_copy_blockers: asStringArray(value.zero_copy_blockers),
     project_log: asProjectLog(value.project_log),
+    debug_mode: asBoolean(value.debug_mode, false),
+    debug_current_stage: asString(value.debug_current_stage),
+    debug_steps: asProjectDebugSteps(value.debug_steps),
   };
 }
 
@@ -228,6 +266,9 @@ export async function fetchProjectState(): Promise<ProjectState> {
       zero_copy_reason: "Backend unavailable",
       zero_copy_blockers: [],
       project_log: [],
+      debug_mode: false,
+      debug_current_stage: "",
+      debug_steps: [],
     };
   }
 }

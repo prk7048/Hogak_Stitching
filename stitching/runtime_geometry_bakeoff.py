@@ -6,20 +6,18 @@ import math
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import cv2
 import numpy as np
 
 from stitching.core import (
-    StitchConfig,
     StitchingFailure,
     _blend_seam_path,
     _compensate_exposure,
     _compute_overlap_diff_mean,
     _compute_seam_cost_map,
     _find_seam_path,
-    _prepare_warp_plan,
 )
 from stitching.native_calibration import (
     NativeCalibrationConfig,
@@ -43,21 +41,12 @@ from stitching.runtime_geometry_artifact import (
 from stitching.runtime_site_config import load_runtime_site_config
 
 
-BAKEOFF_CANDIDATE_MODELS = (
-    "left-anchor-homography",
-    "left-anchor-homography-mesh",
-    "virtual-center-rectilinear-rigid",
-    "virtual-center-rectilinear-mesh",
-)
-DEFAULT_BAKEOFF_WINNER_MODEL = "virtual-center-rectilinear-rigid"
-DEFAULT_BAKEOFF_ROOT = Path("data/geometry_bakeoff")
 DEFAULT_MESH_REFRESH_ROOT = Path("data/mesh_refresh")
 DEFAULT_CLIP_FRAMES = 12
-DEFAULT_VIDEO_DURATION_SEC = 60
-DEFAULT_VIDEO_FPS = 15
 DEFAULT_GRID_COLS = 16
 DEFAULT_GRID_ROWS = 8
 INTERNAL_MESH_REFRESH_MODEL = "virtual-center-rectilinear-rigid"
+ProgressCallback = Callable[[str, str], None]
 
 
 @dataclass(slots=True)
@@ -77,53 +66,6 @@ class MeshField:
 
 def _session_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S", time.localtime())
-
-
-def _preferred_bakeoff_winner(candidates: list[dict[str, Any]]) -> str:
-    available = {
-        str(candidate.get("model") or "").strip()
-        for candidate in candidates
-        if isinstance(candidate, dict)
-    }
-    preferred_order = (
-        DEFAULT_BAKEOFF_WINNER_MODEL,
-        "left-anchor-homography-mesh",
-        "virtual-center-rectilinear-mesh",
-        "left-anchor-homography",
-    )
-    for model in preferred_order:
-        if model in available:
-            return model
-    return ""
-
-
-def _ensure_uint8(frame: np.ndarray) -> np.ndarray:
-    return np.clip(np.asarray(frame), 0, 255).astype(np.uint8)
-
-
-def _write_png(path: Path, frame: np.ndarray) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    ok = cv2.imwrite(str(path), _ensure_uint8(frame))
-    if not ok:
-        raise ValueError(f"failed to write preview image: {path}")
-
-
-def _create_video_writer(path: Path, *, frame_size: tuple[int, int], fps: int) -> cv2.VideoWriter:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(path), fourcc, float(max(1, fps)), frame_size)
-    if not writer.isOpened():
-        raise ValueError(f"failed to open video writer: {path}")
-    return writer
-
-
-def _crop_frame(frame: np.ndarray, crop_rect: tuple[int, int, int, int]) -> np.ndarray:
-    x, y, width, height = crop_rect
-    x = max(0, int(x))
-    y = max(0, int(y))
-    width = max(1, int(width))
-    height = max(1, int(height))
-    return frame[y : y + height, x : x + width].copy()
 
 
 def _capture_clip(config: NativeCalibrationConfig, *, clip_frames: int) -> list[tuple[np.ndarray, np.ndarray]]:
@@ -236,40 +178,6 @@ def _select_best_clip_calibration(
 
     detail = " | ".join(aggregate_failures[:2]) if aggregate_failures else "unknown"
     raise ValueError(f"mesh-refresh calibration failed for all captured frames ({detail})")
-
-
-def _warp_right_to_left_canvas(
-    left_frame: np.ndarray,
-    right_frame: np.ndarray,
-    homography: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, tuple[int, int], np.ndarray]:
-    plan = _prepare_warp_plan(left_frame.shape[:2], right_frame.shape[:2], np.asarray(homography, dtype=np.float64), StitchConfig())
-    canvas_left = np.zeros((plan.height, plan.width, 3), dtype=np.uint8)
-    left_mask = np.zeros((plan.height, plan.width), dtype=np.uint8)
-    tx = int(plan.tx)
-    ty = int(plan.ty)
-    h, w = left_frame.shape[:2]
-    canvas_left[ty : ty + h, tx : tx + w] = left_frame
-    left_mask[ty : ty + h, tx : tx + w] = 255
-    adjusted_h = np.asarray(plan.homography_adjusted, dtype=np.float64).reshape(3, 3)
-    warped_right = cv2.warpPerspective(
-        right_frame,
-        adjusted_h.astype(np.float32),
-        (plan.width, plan.height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    right_mask = cv2.warpPerspective(
-        np.full(right_frame.shape[:2], 255, dtype=np.uint8),
-        adjusted_h.astype(np.float32),
-        (plan.width, plan.height),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
-    inverse_h = np.linalg.inv(adjusted_h)
-    return canvas_left, warped_right, left_mask, right_mask, inverse_h, (tx, ty), adjusted_h
 
 
 def _build_rectilinear_remap(side_projection: dict[str, Any], *, output_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
@@ -745,16 +653,6 @@ def _stamp_runtime_artifact_metadata(
     save_runtime_geometry_artifact(path, artifact)
 
 
-def _build_homography_inverse_maps(width: int, height: int, inverse_homography: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float64), np.arange(height, dtype=np.float64))
-    homogeneous = np.stack([grid_x, grid_y, np.ones((height, width), dtype=np.float64)], axis=-1)
-    source = np.einsum("ij,hwj->hwi", inverse_homography, homogeneous)
-    z = np.where(np.abs(source[..., 2]) < 1e-6, 1e-6, source[..., 2])
-    map_x = (source[..., 0] / z).astype(np.float32)
-    map_y = (source[..., 1] / z).astype(np.float32)
-    return map_x, map_y
-
-
 def _compose_candidate_outputs(
     left_canvas: np.ndarray,
     right_canvas: np.ndarray,
@@ -877,153 +775,6 @@ def _residual_metrics(left_points: np.ndarray, right_points: np.ndarray) -> tupl
 
 def _save_candidate_metadata(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _prepare_left_anchor_spec(
-    *,
-    candidate_model: str,
-    left_frame: np.ndarray,
-    right_frame: np.ndarray,
-    homography: np.ndarray,
-    left_inlier_points: np.ndarray,
-    right_inlier_points: np.ndarray,
-) -> dict[str, Any]:
-    canvas_left, warped_right, left_mask, right_mask, inverse_h, offset, adjusted_h = _warp_right_to_left_canvas(
-        left_frame,
-        right_frame,
-        homography,
-    )
-    tx, ty = offset
-    left_canvas_points = left_inlier_points.copy()
-    if left_canvas_points.size:
-        left_canvas_points[:, 0] += float(tx)
-        left_canvas_points[:, 1] += float(ty)
-    right_warped = cv2.perspectiveTransform(
-        right_inlier_points.reshape(-1, 1, 2).astype(np.float32),
-        adjusted_h.astype(np.float32),
-    ).reshape(-1, 2).astype(np.float64)
-    base_map_x, base_map_y = _build_homography_inverse_maps(warped_right.shape[1], warped_right.shape[0], inverse_h)
-    mesh_field = None
-    mesh_remap_x = None
-    mesh_remap_y = None
-    final_map_x = base_map_x
-    final_map_y = base_map_y
-    status = "ready"
-    fallback_used = False
-    if candidate_model.endswith("-mesh"):
-        try:
-            mesh_field = _fit_mesh_field(
-                left_canvas_points,
-                left_canvas_points - right_warped,
-                canvas_shape=warped_right.shape[:2],
-                overlap_mask=((left_mask > 0) & (right_mask > 0)).astype(np.uint8),
-            )
-            _, _, mesh_remap_x, mesh_remap_y = _apply_mesh_to_canvas(warped_right, right_mask, mesh_field)
-            final_map_x = cv2.remap(
-                base_map_x,
-                mesh_remap_x,
-                mesh_remap_y,
-                interpolation=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=-1,
-            )
-            final_map_y = cv2.remap(
-                base_map_y,
-                mesh_remap_x,
-                mesh_remap_y,
-                interpolation=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=-1,
-            )
-            fallback_used = bool(mesh_field.fallback_used)
-            if fallback_used:
-                status = "degraded-to-rigid"
-        except Exception:
-            mesh_field = None
-            mesh_remap_x = None
-            mesh_remap_y = None
-            fallback_used = True
-            status = "degraded-to-rigid"
-
-    return {
-        "kind": "left-anchor",
-        "candidate_model": candidate_model,
-        "adjusted_h": adjusted_h,
-        "canvas_shape": canvas_left.shape[:2],
-        "left_input_shape": left_frame.shape[:2],
-        "right_input_shape": right_frame.shape[:2],
-        "offset": (int(tx), int(ty)),
-        "left_mask_template": left_mask,
-        "right_mask_template": right_mask,
-        "left_canvas_points": left_canvas_points,
-        "right_aligned_points": right_warped,
-        "mesh_field": mesh_field,
-        "mesh_remap_x": mesh_remap_x,
-        "mesh_remap_y": mesh_remap_y,
-        "right_edge_scale_drift": _right_edge_scale_drift(final_map_x, final_map_y),
-        "status": status,
-        "fallback_used": fallback_used,
-        "mesh_max_displacement_px": 0.0 if mesh_field is None else float(mesh_field.max_displacement_px),
-        "mesh_max_local_scale_drift": 0.0 if mesh_field is None else float(mesh_field.max_local_scale_drift),
-        "mesh_max_local_rotation_drift": 0.0 if mesh_field is None else float(mesh_field.max_local_rotation_drift),
-    }
-
-
-def _render_left_anchor_from_spec(spec: dict[str, Any], left_frame: np.ndarray, right_frame: np.ndarray) -> dict[str, Any]:
-    canvas_height, canvas_width = spec["canvas_shape"]
-    tx, ty = spec["offset"]
-    adjusted_h = np.asarray(spec["adjusted_h"], dtype=np.float64).reshape(3, 3)
-    canvas_left = np.zeros((canvas_height, canvas_width, 3), dtype=np.uint8)
-    left_mask = np.zeros((canvas_height, canvas_width), dtype=np.uint8)
-    input_height, input_width = left_frame.shape[:2]
-    canvas_left[ty : ty + input_height, tx : tx + input_width] = left_frame
-    left_mask[ty : ty + input_height, tx : tx + input_width] = 255
-    warped_right = cv2.warpPerspective(
-        right_frame,
-        adjusted_h.astype(np.float32),
-        (canvas_width, canvas_height),
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    right_mask = cv2.warpPerspective(
-        np.full(right_frame.shape[:2], 255, dtype=np.uint8),
-        adjusted_h.astype(np.float32),
-        (canvas_width, canvas_height),
-        flags=cv2.INTER_NEAREST,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=0,
-    )
-    final_right = warped_right
-    final_mask = right_mask
-    mesh_field = spec.get("mesh_field")
-    mesh_remap_x = spec.get("mesh_remap_x")
-    mesh_remap_y = spec.get("mesh_remap_y")
-    if mesh_field is not None and mesh_remap_x is not None and mesh_remap_y is not None:
-        final_right = cv2.remap(
-            warped_right,
-            mesh_remap_x,
-            mesh_remap_y,
-            interpolation=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-        final_mask = cv2.remap(
-            right_mask,
-            mesh_remap_x,
-            mesh_remap_y,
-            interpolation=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-    outputs = _compose_candidate_outputs(
-        canvas_left,
-        final_right,
-        left_mask,
-        final_mask,
-        instability=None if mesh_field is None else mesh_field.instability,
-    )
-    return outputs
 
 
 def _prepare_virtual_center_spec(
@@ -1236,514 +987,6 @@ def _render_virtual_center_from_spec(spec: dict[str, Any], left_frame: np.ndarra
     return outputs
 
 
-def _build_shared_homography_path(bundle_dir: Path) -> Path:
-    return bundle_dir / "shared_runtime_homography.json"
-
-
-def _build_candidate_runtime_artifact(
-    *,
-    candidate_model: str,
-    bundle_dir: Path,
-    metadata: dict[str, Any],
-    homography: np.ndarray,
-    calibration_result: dict[str, Any],
-    output_resolution: tuple[int, int],
-    virtual_solution: Any | None,
-    mesh_field: MeshField | None = None,
-    fallback_used: bool = False,
-    status_detail: str = "",
-) -> Path | None:
-    homography_file = _build_shared_homography_path(bundle_dir)
-    geometry_path = bundle_dir / candidate_model / "runtime_geometry.json"
-    artifact_metadata = _build_artifact_metadata(
-        metadata,
-        candidate_model=candidate_model,
-        fallback_used=fallback_used,
-        status_detail=status_detail,
-    )
-    _save_homography_file(
-        homography_file,
-        np.asarray(homography, dtype=np.float64),
-        dict(calibration_result.get("metadata") or {}),
-        distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
-    )
-    if candidate_model == "left-anchor-homography":
-        artifact = build_runtime_geometry_artifact(
-            source_homography_file=homography_file,
-            geometry_file=geometry_path,
-            homography=np.asarray(homography, dtype=np.float64),
-            metadata=artifact_metadata,
-            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
-            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
-            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(calibration_result.get("inliers_count") or 0),
-            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
-            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
-            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
-            geometry_model="planar-homography",
-            warp_model="warpPerspective",
-            alignment_model="homography",
-            alignment_matrix=np.asarray(homography, dtype=np.float64),
-            residual_model="homography",
-            projection_model="rectilinear",
-        )
-        save_runtime_geometry_artifact(geometry_path, artifact)
-        return geometry_path
-    if candidate_model == "left-anchor-homography-mesh":
-        artifact = build_runtime_geometry_artifact(
-            source_homography_file=homography_file,
-            geometry_file=geometry_path,
-            homography=np.asarray(homography, dtype=np.float64),
-            metadata=artifact_metadata,
-            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
-            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
-            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(calibration_result.get("inliers_count") or 0),
-            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
-            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
-            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
-            geometry_model="planar-homography",
-            warp_model="warpPerspective",
-            alignment_model="homography",
-            alignment_matrix=np.asarray(homography, dtype=np.float64),
-            residual_model="mesh",
-            mesh=_mesh_payload(mesh_field),
-            projection_model="rectilinear",
-        )
-        save_runtime_geometry_artifact(geometry_path, artifact)
-        return geometry_path
-    if candidate_model == "virtual-center-rectilinear-rigid" and virtual_solution is not None:
-        artifact = build_runtime_geometry_artifact(
-            source_homography_file=homography_file,
-            geometry_file=geometry_path,
-            homography=np.asarray(homography, dtype=np.float64),
-            metadata=artifact_metadata,
-            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
-            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
-            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(calibration_result.get("inliers_count") or 0),
-            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
-            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
-            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
-            geometry_model="virtual-center-rectilinear",
-            warp_model="virtual-center-remap",
-            alignment_model="rigid",
-            alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
-            residual_model="rigid",
-            projection_model="rectilinear",
-            projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
-            projection_left_center=tuple(virtual_solution.left_projection_center),
-            projection_right_focal_px=float(virtual_solution.right_projection_focal_px),
-            projection_right_center=tuple(virtual_solution.right_projection_center),
-            virtual_camera={
-                "model": "rectilinear",
-                "focal_px": float(virtual_solution.virtual_focal_px),
-                "center": [float(virtual_solution.virtual_center[0]), float(virtual_solution.virtual_center[1])],
-                "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
-                "midpoint_alpha": float(virtual_solution.midpoint_alpha),
-                "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
-                "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
-            },
-        )
-        save_runtime_geometry_artifact(geometry_path, artifact)
-        return geometry_path
-    if candidate_model == "virtual-center-rectilinear-mesh" and virtual_solution is not None:
-        artifact = build_runtime_geometry_artifact(
-            source_homography_file=homography_file,
-            geometry_file=geometry_path,
-            homography=np.asarray(homography, dtype=np.float64),
-            metadata=artifact_metadata,
-            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
-            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
-            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(calibration_result.get("inliers_count") or 0),
-            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
-            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
-            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
-            geometry_model="virtual-center-rectilinear",
-            warp_model="virtual-center-remap",
-            alignment_model="rigid",
-            alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
-            residual_model="mesh",
-            mesh=_mesh_payload(mesh_field),
-            projection_model="rectilinear",
-            projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
-            projection_left_center=tuple(virtual_solution.left_projection_center),
-            projection_right_focal_px=float(virtual_solution.right_projection_focal_px),
-            projection_right_center=tuple(virtual_solution.right_projection_center),
-            virtual_camera={
-                "model": "rectilinear",
-                "focal_px": float(virtual_solution.virtual_focal_px),
-                "center": [float(virtual_solution.virtual_center[0]), float(virtual_solution.virtual_center[1])],
-                "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
-                "midpoint_alpha": float(virtual_solution.midpoint_alpha),
-                "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
-                "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
-            },
-        )
-        save_runtime_geometry_artifact(geometry_path, artifact)
-        return geometry_path
-    return None
-
-
-def _render_left_anchor_candidate(
-    *,
-    candidate_model: str,
-    left_frame: np.ndarray,
-    right_frame: np.ndarray,
-    homography: np.ndarray,
-    left_inlier_points: np.ndarray,
-    right_inlier_points: np.ndarray,
-) -> dict[str, Any]:
-    spec = _prepare_left_anchor_spec(
-        candidate_model=candidate_model,
-        left_frame=left_frame,
-        right_frame=right_frame,
-        homography=homography,
-        left_inlier_points=left_inlier_points,
-        right_inlier_points=right_inlier_points,
-    )
-    outputs = _render_left_anchor_from_spec(spec, left_frame, right_frame)
-    mean_error_px, vertical_p90 = _residual_metrics(
-        np.asarray(spec["left_canvas_points"], dtype=np.float64),
-        np.asarray(spec["right_aligned_points"], dtype=np.float64),
-    )
-    residual_truth = _residual_truth_fields(
-        candidate_model=candidate_model,
-        fallback_used=bool(spec["fallback_used"]),
-        status_detail=str(spec["status"] or ""),
-    )
-    return {
-        "model": candidate_model,
-        "global_model": "H_right_to_left",
-        "residual_model": "mesh" if candidate_model.endswith("-mesh") else "none",
-        **residual_truth,
-        "projection_model": "left-image-plane",
-        "exposure_model": "gain-bias-luma",
-        "seam_model": "min-cost-seam",
-        "blend_model": "narrow-seam-feather",
-        "crop_model": "largest-valid-interior-rectangle",
-        "render_pipeline": "stitched-video-quality",
-        "mean_reprojection_error_px": mean_error_px,
-        "vertical_misalignment_p90_px": vertical_p90,
-        "overlap_luma_diff": float(outputs["overlap_luma_diff"]),
-        "seam_visibility_score": float(outputs["seam_visibility_score"]),
-        "right_edge_scale_drift": float(spec["right_edge_scale_drift"]),
-        "crop_ratio": float(outputs["crop_ratio"]),
-        "mesh_max_displacement_px": float(spec["mesh_max_displacement_px"]),
-        "mesh_max_local_scale_drift": float(spec["mesh_max_local_scale_drift"]),
-        "mesh_max_local_rotation_drift": float(spec["mesh_max_local_rotation_drift"]),
-        "status": str(spec["status"]),
-        "crop_rect": list(outputs["crop_rect"]),
-        "stitched_uncropped": outputs["stitched_uncropped"],
-        "stitched_preview": outputs["stitched_cropped"],
-        "overlap_crop": outputs["overlap_crop"],
-        "seam_debug": outputs["seam_debug"],
-        "_spec": spec,
-    }
-
-
-def _render_virtual_center_candidate(
-    *,
-    candidate_model: str,
-    left_frame: np.ndarray,
-    right_frame: np.ndarray,
-    left_inlier_points: np.ndarray,
-    right_inlier_points: np.ndarray,
-    output_resolution: tuple[int, int],
-    virtual_solution: Any,
-) -> dict[str, Any]:
-    spec = _prepare_virtual_center_spec(
-        candidate_model=candidate_model,
-        left_frame=left_frame,
-        right_frame=right_frame,
-        left_inlier_points=left_inlier_points,
-        right_inlier_points=right_inlier_points,
-        output_resolution=output_resolution,
-        virtual_solution=virtual_solution,
-    )
-    outputs = _render_virtual_center_from_spec(spec, left_frame, right_frame)
-    mean_error_px, vertical_p90 = _residual_metrics(
-        np.asarray(spec["left_virtual_points"], dtype=np.float64),
-        np.asarray(spec["right_aligned_points"], dtype=np.float64),
-    )
-    residual_truth = _residual_truth_fields(
-        candidate_model=candidate_model,
-        fallback_used=bool(spec["fallback_used"]),
-        status_detail=str(spec["status"] or ""),
-    )
-    return {
-        "model": candidate_model,
-        "global_model": "common-virtual-plane-reprojection",
-        "residual_model": "mesh" if candidate_model.endswith("-mesh") else "rigid",
-        **residual_truth,
-        "projection_model": "virtual-center-rectilinear",
-        "exposure_model": "gain-bias-luma",
-        "seam_model": "min-cost-seam",
-        "blend_model": "narrow-seam-feather",
-        "crop_model": "largest-valid-interior-rectangle",
-        "render_pipeline": "stitched-video-quality",
-        "mean_reprojection_error_px": mean_error_px,
-        "vertical_misalignment_p90_px": vertical_p90,
-        "overlap_luma_diff": float(outputs["overlap_luma_diff"]),
-        "seam_visibility_score": float(outputs["seam_visibility_score"]),
-        "right_edge_scale_drift": float(spec["right_edge_scale_drift"]),
-        "crop_ratio": float(outputs["crop_ratio"]),
-        "mesh_max_displacement_px": float(spec["mesh_max_displacement_px"]),
-        "mesh_max_local_scale_drift": float(spec["mesh_max_local_scale_drift"]),
-        "mesh_max_local_rotation_drift": float(spec["mesh_max_local_rotation_drift"]),
-        "status": str(spec["status"]),
-        "crop_rect": list(outputs["crop_rect"]),
-        "stitched_uncropped": outputs["stitched_uncropped"],
-        "stitched_preview": outputs["stitched_cropped"],
-        "overlap_crop": outputs["overlap_crop"],
-        "seam_debug": outputs["seam_debug"],
-        "_spec": spec,
-    }
-
-
-def _render_candidate_frame(spec: dict[str, Any], left_frame: np.ndarray, right_frame: np.ndarray) -> dict[str, Any]:
-    kind = str(spec.get("kind") or "").strip()
-    if kind == "left-anchor":
-        return _render_left_anchor_from_spec(spec, left_frame, right_frame)
-    if kind == "virtual-center":
-        return _render_virtual_center_from_spec(spec, left_frame, right_frame)
-    raise ValueError(f"unsupported candidate spec kind: {kind}")
-
-
-def _write_candidate_videos(
-    *,
-    config: NativeCalibrationConfig,
-    candidate_specs: dict[str, dict[str, Any]],
-    bundle_dir: Path,
-    video_duration_sec: int,
-    video_fps: int,
-) -> dict[str, dict[str, Any]]:
-    total_frames = max(1, int(video_duration_sec)) * max(1, int(video_fps))
-    writers: dict[str, cv2.VideoWriter] = {}
-    video_info: dict[str, dict[str, Any]] = {}
-    for model, spec in candidate_specs.items():
-        candidate_dir = bundle_dir / model
-        crop_rect = tuple(int(value) for value in spec["video_crop_rect"])
-        frame_size = (max(1, int(crop_rect[2])), max(1, int(crop_rect[3])))
-        video_path = candidate_dir / "stitched_video.mp4"
-        writer = _create_video_writer(video_path, frame_size=frame_size, fps=video_fps)
-        writers[model] = writer
-        video_info[model] = {
-            "video_path": str(video_path),
-            "video_filename": video_path.name,
-            "video_duration_sec": int(video_duration_sec),
-            "video_fps": int(video_fps),
-            "video_frame_count": int(total_frames),
-        }
-
-    left_cap = _open_capture(config.left_rtsp, config.rtsp_transport, config.rtsp_timeout_sec)
-    right_cap = _open_capture(config.right_rtsp, config.rtsp_transport, config.rtsp_timeout_sec)
-    frames_written = 0
-    deadline = time.time() + max(20.0, float(video_duration_sec) * 10.0)
-    warmup_remaining = max(1, int(config.warmup_frames))
-    try:
-        while time.time() < deadline and warmup_remaining > 0:
-            ok_left, frame_left = left_cap.read()
-            ok_right, frame_right = right_cap.read()
-            if ok_left and frame_left is not None and ok_right and frame_right is not None:
-                warmup_remaining -= 1
-        while time.time() < deadline and frames_written < total_frames:
-            ok_left, frame_left = left_cap.read()
-            ok_right, frame_right = right_cap.read()
-            if not ok_left or frame_left is None or not ok_right or frame_right is None:
-                continue
-            left_processed = _resize_frame(frame_left, config.process_scale)
-            right_processed = _resize_frame(frame_right, config.process_scale)
-            right_processed = _resize_to_match(right_processed, left_processed.shape[:2])
-            for model, spec in candidate_specs.items():
-                outputs = _render_candidate_frame(spec, left_processed, right_processed)
-                cropped = _crop_frame(outputs["stitched_uncropped"], spec["video_crop_rect"])
-                writers[model].write(cropped)
-            frames_written += 1
-    finally:
-        left_cap.release()
-        right_cap.release()
-        for writer in writers.values():
-            writer.release()
-    if frames_written <= 0:
-        raise ValueError("failed to render bakeoff videos from the current RTSP inputs")
-    for payload in video_info.values():
-        payload["video_frame_count"] = int(frames_written)
-        payload["video_duration_sec"] = float(frames_written) / float(max(1, video_fps))
-    return video_info
-
-
-def run_geometry_bakeoff(
-    config: NativeCalibrationConfig,
-    *,
-    bundle_dir: Path | None = None,
-    clip_frames: int = DEFAULT_CLIP_FRAMES,
-    video_duration_sec: int = DEFAULT_VIDEO_DURATION_SEC,
-    video_fps: int = DEFAULT_VIDEO_FPS,
-) -> dict[str, Any]:
-    clip = _capture_clip(config, clip_frames=clip_frames)
-    representative_index, left_frame, right_frame, calibration_result = _select_best_clip_calibration(config, clip)
-    homography = np.asarray(calibration_result["homography_matrix"], dtype=np.float64).reshape(3, 3)
-    left_inlier_points = np.asarray(calibration_result.get("left_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
-    right_inlier_points = np.asarray(calibration_result.get("right_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
-    output_resolution = (int(calibration_result["output_resolution"][0]), int(calibration_result["output_resolution"][1]))
-    virtual_solution = _solve_virtual_center_rectilinear(
-        left_points=list(calibration_result.get("left_inlier_points") or []),
-        right_points=list(calibration_result.get("right_inlier_points") or []),
-        left_shape=left_frame.shape,
-        right_shape=right_frame.shape,
-        output_resolution=output_resolution,
-    )
-
-    bakeoff_root = Path(bundle_dir) if bundle_dir is not None else DEFAULT_BAKEOFF_ROOT / _session_id()
-    bakeoff_root = bakeoff_root.expanduser()
-    bakeoff_root.mkdir(parents=True, exist_ok=True)
-
-    candidate_results: list[dict[str, Any]] = []
-    candidate_specs: dict[str, dict[str, Any]] = {}
-    for candidate_model in BAKEOFF_CANDIDATE_MODELS:
-        if candidate_model.startswith("left-anchor"):
-            metadata = _render_left_anchor_candidate(
-                candidate_model=candidate_model,
-                left_frame=left_frame,
-                right_frame=right_frame,
-                homography=homography,
-                left_inlier_points=left_inlier_points,
-                right_inlier_points=right_inlier_points,
-            )
-        else:
-            metadata = _render_virtual_center_candidate(
-                candidate_model=candidate_model,
-                left_frame=left_frame,
-                right_frame=right_frame,
-                left_inlier_points=left_inlier_points,
-                right_inlier_points=right_inlier_points,
-                output_resolution=output_resolution,
-                virtual_solution=virtual_solution,
-            )
-        spec = metadata.pop("_spec")
-        runtime_artifact_path = _build_candidate_runtime_artifact(
-            candidate_model=candidate_model,
-            bundle_dir=bakeoff_root,
-            metadata=dict(calibration_result.get("metadata") or {}),
-            homography=homography,
-            calibration_result=calibration_result,
-            output_resolution=output_resolution,
-            virtual_solution=virtual_solution,
-            mesh_field=spec.get("mesh_field"),
-            fallback_used=bool(spec.get("fallback_used")),
-            status_detail=str(spec.get("status") or ""),
-        )
-        rollout = {}
-        if runtime_artifact_path is not None and runtime_artifact_path.exists():
-            try:
-                rollout = geometry_rollout_metadata(load_runtime_geometry_artifact(runtime_artifact_path))
-            except Exception:
-                rollout = {}
-            _stamp_runtime_artifact_metadata(
-                runtime_artifact_path,
-                candidate_model=candidate_model,
-                fallback_used=bool(spec.get("fallback_used")),
-                status_detail=str(spec.get("status") or ""),
-                rollout=rollout,
-            )
-        candidate_dir = bakeoff_root / candidate_model
-        candidate_dir.mkdir(parents=True, exist_ok=True)
-        _write_png(candidate_dir / "stitched_preview.png", metadata.pop("stitched_preview"))
-        _write_png(candidate_dir / "stitched_uncropped.png", metadata.pop("stitched_uncropped"))
-        _write_png(candidate_dir / "overlap_crop.png", metadata.pop("overlap_crop"))
-        _write_png(candidate_dir / "seam_debug.png", metadata.pop("seam_debug"))
-        spec["video_crop_rect"] = tuple(int(value) for value in metadata.get("crop_rect") or [0, 0, output_resolution[0], output_resolution[1]])
-        candidate_specs[candidate_model] = spec
-        metadata.update(
-            _rollout_truth_fields(
-                candidate_model=candidate_model,
-                fallback_used=bool(spec.get("fallback_used")),
-                status_detail=str(spec.get("status") or ""),
-                rollout=rollout,
-            )
-        )
-        metadata.update(
-            {
-                "good_match_count": int(calibration_result.get("matches_count") or 0),
-                "inlier_count": int(calibration_result.get("inliers_count") or 0),
-                "bakeoff_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
-                "bakeoff_effective_min_matches": int(calibration_result.get("bakeoff_effective_min_matches") or config.min_matches),
-                "bakeoff_effective_min_inliers": int(calibration_result.get("bakeoff_effective_min_inliers") or config.min_inliers),
-                "bakeoff_effective_min_affine_inliers": int(
-                    calibration_result.get("bakeoff_effective_min_affine_inliers")
-                    or max(
-                        int(getattr(config, "min_affine_inliers_floor", 12)),
-                        int(config.min_inliers * 0.6),
-                    )
-                ),
-                "candidate_dir": str(candidate_dir),
-                "runtime_artifact_path": str(runtime_artifact_path) if runtime_artifact_path is not None else "",
-                "stitched_preview_path": str(candidate_dir / "stitched_preview.png"),
-                "stitched_uncropped_path": str(candidate_dir / "stitched_uncropped.png"),
-                "overlap_crop_path": str(candidate_dir / "overlap_crop.png"),
-                "seam_debug_path": str(candidate_dir / "seam_debug.png"),
-                "selected": False,
-            }
-        )
-        _save_candidate_metadata(candidate_dir / "metadata.json", metadata)
-        candidate_results.append(metadata)
-
-    video_info = _write_candidate_videos(
-        config=config,
-        candidate_specs=candidate_specs,
-        bundle_dir=bakeoff_root,
-        video_duration_sec=max(1, int(video_duration_sec)),
-        video_fps=max(1, int(video_fps)),
-    )
-    for candidate in candidate_results:
-        model = str(candidate.get("model") or "").strip()
-        payload = video_info.get(model, {})
-        candidate.update(payload)
-        candidate_dir = bakeoff_root / model
-        _save_candidate_metadata(candidate_dir / "metadata.json", candidate)
-
-    selected_candidate_model = _preferred_bakeoff_winner(candidate_results)
-    for candidate in candidate_results:
-        if not isinstance(candidate, dict):
-            continue
-        candidate["selected"] = str(candidate.get("model") or "").strip() == selected_candidate_model
-        candidate_dir = bakeoff_root / str(candidate.get("model") or "").strip()
-        if candidate_dir.name:
-            _save_candidate_metadata(candidate_dir / "metadata.json", candidate)
-
-    bundle_manifest = {
-        "session_id": bakeoff_root.name,
-        "created_at_epoch_sec": int(time.time()),
-        "status": "ready",
-        "representative_frame_index": int(representative_index),
-        "bakeoff_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
-        "bakeoff_effective_min_matches": int(calibration_result.get("bakeoff_effective_min_matches") or config.min_matches),
-        "bakeoff_effective_min_inliers": int(calibration_result.get("bakeoff_effective_min_inliers") or config.min_inliers),
-        "bakeoff_effective_min_affine_inliers": int(
-            calibration_result.get("bakeoff_effective_min_affine_inliers")
-            or max(
-                int(getattr(config, "min_affine_inliers_floor", 12)),
-                int(config.min_inliers * 0.6),
-            )
-        ),
-        "clip_frame_count": int(len(clip)),
-        "video_duration_sec": int(video_duration_sec),
-        "video_fps": int(video_fps),
-        "bundle_dir": str(bakeoff_root),
-        "recommended_model": selected_candidate_model,
-        "runtime_active_artifact_path": "",
-        "candidates": candidate_results,
-    }
-    (bakeoff_root / "bundle.json").write_text(json.dumps(bundle_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
-    return bundle_manifest
-
-
 def _resolve_active_runtime_paths() -> tuple[Path, Path]:
     site_config = load_runtime_site_config()
     paths = site_config.get("paths", {}) if isinstance(site_config.get("paths"), dict) else {}
@@ -1914,8 +1157,14 @@ def run_mesh_refresh(
     *,
     session_dir: Path | None = None,
     clip_frames: int = DEFAULT_CLIP_FRAMES,
+    progress: ProgressCallback | None = None,
 ) -> dict[str, Any]:
+    if progress is not None:
+        progress("connect_inputs", "Connecting to the camera streams.")
+        progress("capture_frames", "Capturing synchronized frames.")
     clip = _capture_clip(config, clip_frames=max(3, int(clip_frames)))
+    if progress is not None:
+        progress("match_features", "Matching features across the captured frames.")
     representative_index, left_frame, right_frame, calibration_result = _select_best_clip_calibration(config, clip)
     homography = np.asarray(calibration_result["homography_matrix"], dtype=np.float64).reshape(3, 3)
     left_inlier_points = np.asarray(calibration_result.get("left_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
@@ -1924,6 +1173,8 @@ def run_mesh_refresh(
         int(calibration_result["output_resolution"][0]),
         int(calibration_result["output_resolution"][1]),
     )
+    if progress is not None:
+        progress("solve_geometry", "Solving rigid virtual-center geometry.")
     virtual_solution = _solve_virtual_center_rectilinear(
         left_points=list(calibration_result.get("left_inlier_points") or []),
         right_points=list(calibration_result.get("right_inlier_points") or []),
@@ -1953,6 +1204,8 @@ def run_mesh_refresh(
         virtual_solution=virtual_solution,
     )
     outputs = _render_virtual_center_from_spec(spec, left_frame, right_frame)
+    if progress is not None:
+        progress("build_artifact", "Writing the active runtime artifact.")
 
     refresh_dir = Path(session_dir).expanduser() if session_dir is not None else _mesh_refresh_session_dir()
     refresh_dir.mkdir(parents=True, exist_ok=True)
@@ -2005,6 +1258,8 @@ def run_mesh_refresh(
         "created_at_epoch_sec": int(time.time()),
     }
     (refresh_dir / "mesh_refresh.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    if progress is not None:
+        progress("artifact_ready", "Rigid runtime artifact is ready.")
     return manifest
 
 
@@ -2098,22 +1353,15 @@ class MeshRefreshService:
         return manifest
 
     def run(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.run_with_progress(body)
+
+    def run_with_progress(
+        self,
+        body: dict[str, Any] | None = None,
+        *,
+        progress: ProgressCallback | None = None,
+    ) -> dict[str, Any]:
         config = _mesh_refresh_config_from_body(body)
         refresh_dir = _resolve_mesh_refresh_dir(body)
         clip_frames = max(3, int((body or {}).get("clip_frames") or DEFAULT_CLIP_FRAMES))
-        return run_mesh_refresh(config, session_dir=refresh_dir, clip_frames=clip_frames)
-
-    def select(self, body: dict[str, Any]) -> dict[str, Any]:
-        _validate_mesh_refresh_request(body)
-        return self.run(body)
-
-    def promote(self, body: dict[str, Any]) -> dict[str, Any]:
-        _validate_mesh_refresh_request(body)
-        return self.run(body)
-
-    def use_winner(self, body: dict[str, Any]) -> dict[str, Any]:
-        _validate_mesh_refresh_request(body)
-        return self.run(body)
-
-    def read_asset(self, session_id: str, candidate_model: str, filename: str) -> bytes:
-        raise FileNotFoundError("mesh-refresh does not publish public bakeoff assets")
+        return run_mesh_refresh(config, session_dir=refresh_dir, clip_frames=clip_frames, progress=progress)

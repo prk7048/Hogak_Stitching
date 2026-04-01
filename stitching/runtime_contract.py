@@ -33,10 +33,8 @@ CommandType = Literal[
     "stop",
     "shutdown",
     "reload_config",
-    "reload_homography",
     "set_manual_mode",
     "add_manual_point",
-    "reset_auto_calibration",
     "request_snapshot",
 ]
 EventType = Literal[
@@ -179,27 +177,6 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
     "benchmark_log_interval_sec",
     "headless_benchmark",
 )
-
-PUBLIC_RUNTIME_STATE_FIELDS = (
-    "status",
-    "start_phase",
-    "status_message",
-    "running",
-    "can_start",
-    "can_stop",
-    "blocker_reason",
-    "output_receive_uri",
-    "runtime_active_model",
-    "geometry_residual_model",
-    "runtime_active_artifact_path",
-    "runtime_artifact_checksum",
-    "runtime_launch_ready",
-    "runtime_launch_ready_reason",
-    "fallback_used",
-    "gpu_path_mode",
-    "gpu_path_ready",
-)
-
 
 def _as_dict(value: Any, *, field_name: str) -> dict[str, Any]:
     if value is None:
@@ -385,31 +362,6 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         "launch_ready": launch_ready,
         "launch_ready_reason": launch_ready_reason,
     }
-
-
-def public_runtime_state_surface(state: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(state, dict):
-        return {}
-
-    surface = {key: state.get(key) for key in PUBLIC_RUNTIME_STATE_FIELDS}
-    surface.setdefault("status", "idle")
-    surface["start_phase"] = "" if surface.get("start_phase") is None else str(surface.get("start_phase") or "")
-    surface["status_message"] = "" if surface.get("status_message") is None else str(surface.get("status_message") or "")
-    surface["running"] = bool(surface.get("running"))
-    surface["can_start"] = bool(surface.get("can_start"))
-    surface["can_stop"] = bool(surface.get("can_stop"))
-    surface["blocker_reason"] = "" if surface.get("blocker_reason") is None else str(surface.get("blocker_reason") or "")
-    surface["output_receive_uri"] = "" if surface.get("output_receive_uri") is None else str(surface.get("output_receive_uri") or "")
-    surface["runtime_active_model"] = "" if surface.get("runtime_active_model") is None else str(surface.get("runtime_active_model") or "")
-    surface["geometry_residual_model"] = "" if surface.get("geometry_residual_model") is None else str(surface.get("geometry_residual_model") or "")
-    surface["runtime_active_artifact_path"] = "" if surface.get("runtime_active_artifact_path") is None else str(surface.get("runtime_active_artifact_path") or "")
-    surface["runtime_artifact_checksum"] = "" if surface.get("runtime_artifact_checksum") is None else str(surface.get("runtime_artifact_checksum") or "")
-    surface["runtime_launch_ready"] = bool(surface.get("runtime_launch_ready"))
-    surface["runtime_launch_ready_reason"] = "" if surface.get("runtime_launch_ready_reason") is None else str(surface.get("runtime_launch_ready_reason") or "")
-    surface["fallback_used"] = bool(surface.get("fallback_used"))
-    surface["gpu_path_mode"] = "" if surface.get("gpu_path_mode") is None else str(surface.get("gpu_path_mode") or "")
-    surface["gpu_path_ready"] = bool(surface.get("gpu_path_ready"))
-    return surface
 
 
 def normalize_schema_v2_reload_payload(payload: dict[str, Any]) -> dict[str, Any]:

@@ -4,7 +4,6 @@ from collections import deque
 from dataclasses import dataclass
 import hashlib
 from html import escape
-import json
 import os
 from pathlib import Path
 import threading
@@ -12,10 +11,9 @@ import time
 from typing import Any, Iterable
 
 import cv2
-import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from stitching.project_defaults import (
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
@@ -23,7 +21,6 @@ from stitching.project_defaults import (
 from stitching.runtime_contract import (
     geometry_rollout_metadata,
     normalize_schema_v2_reload_payload,
-    public_runtime_state_surface,
 )
 from stitching.runtime_geometry_artifact import (
     load_runtime_geometry_artifact,
@@ -125,10 +122,10 @@ npm run build</pre>
       <div class="note">
         <strong>현재 백엔드 상태</strong>
         <ul>
-          <li>제품용 public API 는 <code>/api/runtime/*</code> 와 <code>/api/artifacts/geometry*</code> 만 유지됩니다.</li>
-          <li>Bakeoff, calibration, debug 경로는 public surface에서 제거되었고 내부 경로로만 유지됩니다.</li>
+          <li>제품용 public API 는 <code>/api/project/state</code>, <code>/api/project/start</code>, <code>/api/project/stop</code> 만 유지됩니다.</li>
+          <li>runtime debug, artifact admin, calibration 경로는 public surface에서 제거되었고 내부 경로로만 유지됩니다.</li>
           <li>이 브랜치의 기본 truth 는 <code>virtual-center-rectilinear-rigid</code> 이며, launch-ready 확인 전에는 시작이 차단됩니다.</li>
-          <li>React 번들이 준비되면 대시보드에서 <code>정렬 미리보기</code>, <code>시작</code>, <code>검증</code> 흐름만 노출됩니다.</li>
+          <li>React 번들이 준비되면 단일 페이지에서 <code>Project state</code>, <code>Start Project</code>, <code>Stop Project</code> 흐름만 노출됩니다.</li>
         </ul>
       </div>
     </main>
@@ -259,28 +256,6 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     gpu_path_ready = zero_copy_ready
     output_receive_uri = RuntimeService._receive_uri_from_target(production_output_target) or "udp://@:24000"
 
-    preview_left_url = str(
-        merged.get("preview_left_url")
-        or merged.get("alignment_preview_left_url")
-        or merged.get("start_preview_left_url")
-        or ""
-    ).strip()
-    preview_right_url = str(
-        merged.get("preview_right_url")
-        or merged.get("alignment_preview_right_url")
-        or merged.get("start_preview_right_url")
-        or ""
-    ).strip()
-    preview_stitched_url = str(
-        merged.get("preview_stitched_url")
-        or merged.get("alignment_preview_stitched_url")
-        or merged.get("start_preview_stitched_url")
-        or ""
-    ).strip()
-    preview_ready = any((preview_left_url, preview_right_url, preview_stitched_url)) or bool(
-        merged.get("alignment_preview_ready") or merged.get("start_preview_ready")
-    )
-
     runtime_launch_ready = False
     runtime_launch_ready_reason = ""
     mesh_refresh_artifact_path = str(mesh_refresh.get("runtime_active_artifact_path") or "").strip()
@@ -375,33 +350,9 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
             "zero_copy_reason": zero_copy_reason,
             "zero_copy_blockers": zero_copy_blockers,
             "production_output_target": production_output_target,
-            "preview_ready": preview_ready,
-            "preview_left_url": preview_left_url,
-            "preview_right_url": preview_right_url,
-            "preview_stitched_url": preview_stitched_url,
         }
     )
     return merged
-def _public_runtime_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
-    return public_runtime_state_surface(_merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state))
-
-
-def _public_runtime_response(payload: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(payload, dict):
-        return {"ok": True, "state": _public_runtime_state({}, mesh_refresh_state)}
-    result = dict(payload)
-    if isinstance(result.get("state"), dict):
-        result["state"] = _public_runtime_state(result["state"], mesh_refresh_state)
-    return result
-
-
-def _internal_mesh_refresh(mesh_refresh: MeshRefreshService, body: dict[str, Any] | None = None) -> dict[str, Any]:
-    result = mesh_refresh.run(body)
-    if not isinstance(result, dict):
-        raise ValueError("mesh-refresh did not return a JSON object")
-    return result
-
-
 def _project_receive_uri_from_target(target: Any) -> str:
     text = str(target or "").strip()
     if not text.startswith("udp://"):
@@ -543,6 +494,108 @@ def _project_log_entries(events: Iterable[dict[str, Any]], *, limit: int = 20) -
     return formatted[-max(1, int(limit)) :]
 
 
+DEBUG_PROJECT_STAGE_ORDER = (
+    "check_config",
+    "connect_inputs",
+    "capture_frames",
+    "match_features",
+    "solve_geometry",
+    "build_artifact",
+    "artifact_ready",
+    "prepare_runtime",
+    "launch_runtime",
+    "confirm_output",
+    "running",
+)
+
+DEBUG_PROJECT_STAGE_LABELS = {
+    "check_config": "Check config",
+    "connect_inputs": "Connect cameras",
+    "capture_frames": "Capture frames",
+    "match_features": "Match features",
+    "solve_geometry": "Solve geometry",
+    "build_artifact": "Build artifact",
+    "artifact_ready": "Artifact ready",
+    "prepare_runtime": "Prepare runtime",
+    "launch_runtime": "Launch runtime",
+    "confirm_output": "Confirm live output",
+    "running": "Running",
+}
+
+PHASE_TO_DEBUG_STAGE = {
+    "idle": "check_config",
+    "checking_inputs": "check_config",
+    "refreshing_mesh": "connect_inputs",
+    "connect_inputs": "connect_inputs",
+    "capture_frames": "capture_frames",
+    "match_features": "match_features",
+    "solve_geometry": "solve_geometry",
+    "build_artifact": "build_artifact",
+    "artifact_ready": "artifact_ready",
+    "preparing_runtime": "prepare_runtime",
+    "starting_runtime": "launch_runtime",
+    "confirm_output": "confirm_output",
+    "running": "running",
+    "blocked": "confirm_output",
+    "error": "confirm_output",
+}
+
+
+def _debug_stage_from_phase(phase: Any) -> str:
+    normalized = str(phase or "").strip().lower()
+    if not normalized:
+        return "check_config"
+    return PHASE_TO_DEBUG_STAGE.get(normalized, normalized if normalized in DEBUG_PROJECT_STAGE_ORDER else "check_config")
+
+
+def _build_debug_steps(
+    *,
+    current_phase: Any,
+    status: str,
+    project_log: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    current_stage = _debug_stage_from_phase(current_phase)
+    try:
+        current_index = DEBUG_PROJECT_STAGE_ORDER.index(current_stage)
+    except ValueError:
+        current_index = 0
+
+    latest_by_stage: dict[str, dict[str, Any]] = {}
+    for entry in project_log:
+        if not isinstance(entry, dict):
+            continue
+        stage = _debug_stage_from_phase(entry.get("phase"))
+        latest_by_stage[stage] = entry
+
+    debug_steps: list[dict[str, Any]] = []
+    final_status = str(status or "").strip().lower()
+    for index, stage in enumerate(DEBUG_PROJECT_STAGE_ORDER):
+        state = "pending"
+        if final_status == "running":
+            state = "done" if stage != "running" else "current"
+        elif final_status in {"blocked", "error"}:
+            if index < current_index:
+                state = "done"
+            elif index == current_index:
+                state = "failed"
+        else:
+            if index < current_index:
+                state = "done"
+            elif index == current_index and final_status == "starting":
+                state = "current"
+        entry = latest_by_stage.get(stage) or {}
+        debug_steps.append(
+            {
+                "id": stage,
+                "label": DEBUG_PROJECT_STAGE_LABELS.get(stage, stage.replace("_", " ").title()),
+                "state": state,
+                "message": str(entry.get("message") or "").strip(),
+                "timestamp_sec": float(entry.get("timestamp_sec") or 0.0),
+            }
+        )
+    return debug_steps
+
+
 def _prepare_failure_needs_mesh_refresh(message: str) -> bool:
     normalized = str(message or "").strip().lower()
     if not normalized:
@@ -594,6 +647,18 @@ def _configured_rtsp_urls_for_request(request: dict[str, Any] | None = None) -> 
     return left_rtsp, right_rtsp
 
 
+def _internal_mesh_refresh(
+    mesh_refresh: MeshRefreshService,
+    body: dict[str, Any] | None = None,
+    *,
+    progress: Any = None,
+) -> dict[str, Any]:
+    result = mesh_refresh.run_with_progress(body, progress=progress)
+    if not isinstance(result, dict):
+        raise ValueError("mesh-refresh did not return a JSON object")
+    return result
+
+
 def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
     merged = _merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state)
     running = bool(merged.get("running"))
@@ -623,9 +688,24 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
         runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
     blocker_reason = config_blocker or merged_blocker or runtime_blocker or last_error
 
+    starting_phases = {
+        "checking_inputs",
+        "refreshing_mesh",
+        "connect_inputs",
+        "capture_frames",
+        "match_features",
+        "solve_geometry",
+        "build_artifact",
+        "artifact_ready",
+        "preparing_runtime",
+        "starting_runtime",
+        "launch_runtime",
+        "confirm_output",
+    }
+
     if running:
         status = "running"
-    elif start_phase in {"checking_inputs", "refreshing_mesh", "preparing_runtime", "starting_runtime"}:
+    elif start_phase in starting_phases:
         status = "starting"
     elif blocker_reason:
         status = "blocked"
@@ -654,6 +734,9 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     output_target = str(merged.get("production_output_target") or "").strip()
     output_bridge_reason = str(merged.get("output_bridge_reason") or "").strip()
     production_output_last_error = str(merged.get("production_output_last_error") or "").strip()
+
+    project_log = _project_log_entries(merged.get("recent_events") or [])
+    debug_steps = _build_debug_steps(current_phase=start_phase, status=status, project_log=project_log)
 
     return {
         "status": status,
@@ -684,7 +767,10 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
         "zero_copy_ready": bool(merged.get("zero_copy_ready")),
         "zero_copy_reason": str(merged.get("zero_copy_reason") or "").strip(),
         "zero_copy_blockers": list(merged.get("zero_copy_blockers") or []),
-        "project_log": _project_log_entries(merged.get("recent_events") or []),
+        "project_log": project_log,
+        "debug_mode": True,
+        "debug_current_stage": _debug_stage_from_phase(start_phase),
+        "debug_steps": debug_steps,
     }
 def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | None = None) -> bool:
     if bool(state.get("running")):
@@ -724,7 +810,7 @@ def _project_start_response(
             "state": initial_state,
         }
 
-    backend.set_project_progress("checking_inputs", "Checking inputs.")
+    backend.set_project_progress("check_config", "Checking runtime config and camera inputs.")
     left_rtsp, right_rtsp = _configured_rtsp_urls_for_request(request)
     require_configured_rtsp_urls(left_rtsp, right_rtsp, context="Start Project")
 
@@ -732,8 +818,8 @@ def _project_start_response(
     mesh_refresh_triggered = False
     prepare_result: dict[str, Any] | None = None
     if explicit_artifact_path is None:
-        backend.set_project_progress("refreshing_mesh", "Refreshing stitch geometry.")
-        _internal_mesh_refresh(mesh_refresh, request)
+        backend.set_project_progress("connect_inputs", "Connecting to the camera streams.")
+        _internal_mesh_refresh(mesh_refresh, request, progress=backend.set_project_progress)
         mesh_refresh_triggered = True
     try:
         backend.set_project_progress("preparing_runtime", "Preparing runtime.")
@@ -741,8 +827,8 @@ def _project_start_response(
     except Exception as exc:
         latest_state = _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
         if explicit_artifact_path is not None and _project_start_needs_mesh_refresh(latest_state, exc):
-            backend.set_project_progress("refreshing_mesh", "Refreshing stitch geometry.")
-            _internal_mesh_refresh(mesh_refresh, request)
+            backend.set_project_progress("connect_inputs", "Connecting to the camera streams.")
+            _internal_mesh_refresh(mesh_refresh, request, progress=backend.set_project_progress)
             mesh_refresh_triggered = True
             backend.set_project_progress("preparing_runtime", "Preparing runtime.")
             prepare_result = backend.prepare(request)
@@ -760,7 +846,7 @@ def _project_start_response(
         backend.set_project_progress("blocked", reason)
         raise ValueError(reason)
 
-    backend.set_project_progress("starting_runtime", "Starting runtime.")
+    backend.set_project_progress("launch_runtime", "Launching the native runtime.")
     try:
         result = backend.start(request)
     except Exception as exc:
@@ -780,228 +866,11 @@ def _project_start_response(
     else:
         response["message"] = message
     return response
-class _CaptureOptionsEnv:
-    def __init__(self, *, transport: str, timeout_sec: float) -> None:
-        self._transport = str(transport or "tcp").strip() or "tcp"
-        self._timeout_sec = max(1.0, float(timeout_sec))
-        self._previous = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
-
-    def __enter__(self) -> None:
-        timeout_us = max(100_000, int(self._timeout_sec * 1_000_000.0))
-        capture_options = [f"rtsp_transport;{self._transport}", f"timeout;{timeout_us}"]
-        if self._transport.lower() == "udp":
-            capture_options.extend(["fifo_size;8388608", "overrun_nonfatal;1"])
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(capture_options)
-
-    def __exit__(self, exc_type, exc, tb) -> None:
-        if self._previous is None:
-            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
-        else:
-            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = self._previous
-
-
-def _encode_jpeg(frame: np.ndarray) -> bytes:
-    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
-    if not ok:
-        raise ValueError("failed to encode jpeg preview")
-    return encoded.tobytes()
-
-
-def _capture_rtsp_frame(url: str, *, transport: str, timeout_sec: float, warmup_frames: int = 18) -> np.ndarray:
-    if not str(url or "").strip():
-        raise ValueError("rtsp url is empty")
-    with _CaptureOptionsEnv(transport=transport, timeout_sec=timeout_sec):
-        capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
-    if not capture.isOpened():
-        raise ValueError(f"cannot open rtsp stream: {url}")
-    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    latest_frame: np.ndarray | None = None
-    deadline = time.time() + max(2.0, float(timeout_sec))
-    try:
-        while time.time() < deadline and latest_frame is None:
-            ok, frame = capture.read()
-            if ok and frame is not None:
-                latest_frame = frame
-        while time.time() < deadline and latest_frame is not None and warmup_frames > 1:
-            ok, frame = capture.read()
-            if ok and frame is not None:
-                latest_frame = frame
-            warmup_frames -= 1
-    finally:
-        capture.release()
-    if latest_frame is None:
-        raise ValueError(f"failed to capture a frame from {url}")
-    return latest_frame
-
-
-def _artifact_canvas_size(artifact: dict[str, Any]) -> tuple[int, int]:
-    canvas = artifact.get("canvas", {}) if isinstance(artifact.get("canvas"), dict) else {}
-    width = int(canvas.get("width") or 0)
-    height = int(canvas.get("height") or 0)
-    if width > 0 and height > 0:
-        return width, height
-    geometry = artifact.get("geometry", {}) if isinstance(artifact.get("geometry"), dict) else {}
-    output_resolution = geometry.get("output_resolution")
-    if isinstance(output_resolution, (list, tuple)) and len(output_resolution) >= 2:
-        return max(1, int(output_resolution[0])), max(1, int(output_resolution[1]))
-    return 1920, 1080
-
-
-def _build_rectilinear_remap(side_projection: dict[str, Any], *, output_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
-    output_width = max(1, int(output_size[0]))
-    output_height = max(1, int(output_size[1]))
-    src_focal = float(side_projection.get("focal_px") or 1.0)
-    src_center = side_projection.get("center") if isinstance(side_projection.get("center"), (list, tuple)) else [0.0, 0.0]
-    virtual_focal = float(side_projection.get("virtual_focal_px") or side_projection.get("focal_px") or 1.0)
-    virtual_center = side_projection.get("virtual_center") if isinstance(side_projection.get("virtual_center"), (list, tuple)) else [output_width / 2.0, output_height / 2.0]
-    rotation_raw = side_projection.get("virtual_to_source_rotation")
-    rotation = np.eye(3, dtype=np.float64)
-    if isinstance(rotation_raw, (list, tuple, np.ndarray)):
-        try:
-            rotation = np.asarray(rotation_raw, dtype=np.float64).reshape(3, 3)
-        except Exception:
-            rotation = np.eye(3, dtype=np.float64)
-
-    grid_x, grid_y = np.meshgrid(
-        np.arange(output_width, dtype=np.float64),
-        np.arange(output_height, dtype=np.float64),
-    )
-    virtual_dirs = np.stack(
-        [
-            (grid_x - float(virtual_center[0])) / max(1.0, float(virtual_focal)),
-            (grid_y - float(virtual_center[1])) / max(1.0, float(virtual_focal)),
-            np.ones((output_height, output_width), dtype=np.float64),
-        ],
-        axis=-1,
-    )
-    source_dirs = np.einsum("ij,hwj->hwi", rotation, virtual_dirs)
-    z = source_dirs[..., 2]
-    valid = np.isfinite(z) & (z > 1e-6)
-    map_x = np.full((output_height, output_width), -1.0, dtype=np.float32)
-    map_y = np.full((output_height, output_width), -1.0, dtype=np.float32)
-    valid_x = (float(src_focal) * source_dirs[..., 0] / z) + float(src_center[0])
-    valid_y = (float(src_focal) * source_dirs[..., 1] / z) + float(src_center[1])
-    map_x[valid] = valid_x[valid].astype(np.float32)
-    map_y[valid] = valid_y[valid].astype(np.float32)
-    return map_x, map_y
-
-
-def _apply_alignment_transform(frame: np.ndarray, alignment: dict[str, Any]) -> np.ndarray:
-    matrix = alignment.get("matrix")
-    if matrix is None:
-        return frame
-    try:
-        array = np.asarray(matrix, dtype=np.float64)
-    except Exception:
-        return frame
-    output_size = (int(frame.shape[1]), int(frame.shape[0]))
-    if array.size == 6:
-        affine = array.reshape(2, 3)
-        return cv2.warpAffine(
-            frame,
-            affine.astype(np.float32),
-            output_size,
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-    if array.size == 9:
-        homography = array.reshape(3, 3)
-        return cv2.warpPerspective(
-            frame,
-            homography.astype(np.float32),
-            output_size,
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
-    return frame
-
-
-def _compose_feather_preview(left_frame: np.ndarray, right_frame: np.ndarray) -> np.ndarray:
-    left = np.asarray(left_frame, dtype=np.float32)
-    right = np.asarray(right_frame, dtype=np.float32)
-    output = np.zeros_like(left)
-    left_mask = np.any(left_frame > 0, axis=2)
-    right_mask = np.any(right_frame > 0, axis=2)
-    overlap = left_mask & right_mask
-
-    output[left_mask & ~right_mask] = left[left_mask & ~right_mask]
-    output[right_mask & ~left_mask] = right[right_mask & ~left_mask]
-
-    if np.any(overlap):
-        overlap_columns = np.where(np.any(overlap, axis=0))[0]
-        if overlap_columns.size >= 2:
-            start = int(overlap_columns[0])
-            end = int(overlap_columns[-1])
-            width = max(1, end - start)
-            weights = np.zeros(left.shape[:2], dtype=np.float32)
-            band = np.clip((np.arange(left.shape[1], dtype=np.float32) - start) / float(width), 0.0, 1.0)
-            weights[:, :] = band[None, :]
-            weights = np.where(overlap, weights, 0.0)
-        else:
-            weights = np.where(overlap, 0.5, 0.0).astype(np.float32)
-        output[overlap] = (
-            left[overlap] * (1.0 - weights[overlap, None]) + right[overlap] * weights[overlap, None]
-        )
-    return np.clip(output, 0.0, 255.0).astype(np.uint8)
-
-
-def _render_virtual_alignment_previews(
-    artifact: dict[str, Any],
-    *,
-    left_frame: np.ndarray,
-    right_frame: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    if runtime_geometry_model(artifact) != "virtual-center-rectilinear":
-        raise ValueError("start preview requires a virtual-center-rectilinear geometry artifact")
-
-    projection = artifact.get("projection", {}) if isinstance(artifact.get("projection"), dict) else {}
-    left_projection = projection.get("left", {}) if isinstance(projection.get("left"), dict) else {}
-    right_projection = projection.get("right", {}) if isinstance(projection.get("right"), dict) else {}
-    alignment = artifact.get("alignment", {}) if isinstance(artifact.get("alignment"), dict) else {}
-    output_size = _artifact_canvas_size(artifact)
-
-    expected_left_resolution = left_projection.get("input_resolution")
-    if isinstance(expected_left_resolution, (list, tuple)) and len(expected_left_resolution) >= 2:
-        target_left = (max(1, int(expected_left_resolution[0])), max(1, int(expected_left_resolution[1])))
-        if (left_frame.shape[1], left_frame.shape[0]) != target_left:
-            left_frame = cv2.resize(left_frame, target_left, interpolation=cv2.INTER_LINEAR)
-
-    expected_right_resolution = right_projection.get("input_resolution")
-    if isinstance(expected_right_resolution, (list, tuple)) and len(expected_right_resolution) >= 2:
-        target_right = (max(1, int(expected_right_resolution[0])), max(1, int(expected_right_resolution[1])))
-        if (right_frame.shape[1], right_frame.shape[0]) != target_right:
-            right_frame = cv2.resize(right_frame, target_right, interpolation=cv2.INTER_LINEAR)
-
-    left_map_x, left_map_y = _build_rectilinear_remap(left_projection, output_size=output_size)
-    right_map_x, right_map_y = _build_rectilinear_remap(right_projection, output_size=output_size)
-
-    left_projected = cv2.remap(
-        left_frame,
-        left_map_x,
-        left_map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    right_projected = cv2.remap(
-        right_frame,
-        right_map_x,
-        right_map_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-    right_projected = _apply_alignment_transform(right_projected, alignment)
-    stitched = _compose_feather_preview(left_projected, right_projected)
-    return left_projected, right_projected, stitched
 
 
 class RuntimeService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
-        self._event_condition = threading.Condition(self._lock)
         self._events: list[dict[str, Any]] = []
         self._next_event_id = 1
         self._prepared_plan: RuntimePlan | None = None
@@ -1010,16 +879,11 @@ class RuntimeService:
         self._event_pump_stop = threading.Event()
         self._latest_metrics: dict[str, Any] = {}
         self._latest_hello: dict[str, Any] = {}
-        self._latest_validation: dict[str, Any] = {}
         self._last_error = ""
         self._last_status = "idle"
         self._gpu_only_blockers: list[str] = []
         self._project_start_phase = "idle"
         self._project_status_message = "Start Project will recompute rigid stitch geometry automatically."
-        self._start_preview_pending_confirmation = False
-        self._start_preview_left_jpeg: bytes | None = None
-        self._start_preview_right_jpeg: bytes | None = None
-        self._start_preview_stitched_jpeg: bytes | None = None
 
     def _record_event(self, event_type: str, payload: dict[str, Any] | None = None, *, seq: int = 0) -> dict[str, Any]:
         record = {
@@ -1033,7 +897,6 @@ class RuntimeService:
         self._events.append(record)
         if len(self._events) > 200:
             del self._events[:-200]
-        self._event_condition.notify_all()
         return record
 
     @staticmethod
@@ -1074,44 +937,6 @@ class RuntimeService:
     def project_progress(self) -> tuple[str, str]:
         with self._lock:
             return self._project_start_phase, self._project_status_message
-
-    def _clear_start_preview_locked(self) -> None:
-        self._start_preview_pending_confirmation = False
-        self._start_preview_left_jpeg = None
-        self._start_preview_right_jpeg = None
-        self._start_preview_stitched_jpeg = None
-
-    def _start_preview_url(self, name: str) -> str:
-        return f"/api/runtime/preview-align/assets/{name}.jpg"
-
-    def _render_start_preview_locked(self, plan: RuntimePlan) -> None:
-        artifact = load_runtime_geometry_artifact(plan.geometry_artifact_path)
-        left_frame = _capture_rtsp_frame(
-            plan.launch_spec.left_rtsp,
-            transport=plan.launch_spec.transport,
-            timeout_sec=plan.launch_spec.timeout_sec,
-        )
-        right_frame = _capture_rtsp_frame(
-            plan.launch_spec.right_rtsp,
-            transport=plan.launch_spec.transport,
-            timeout_sec=plan.launch_spec.timeout_sec,
-        )
-        left_preview, right_preview, stitched_preview = _render_virtual_alignment_previews(
-            artifact,
-            left_frame=left_frame,
-            right_frame=right_frame,
-        )
-        self._start_preview_left_jpeg = _encode_jpeg(left_preview)
-        self._start_preview_right_jpeg = _encode_jpeg(right_preview)
-        self._start_preview_stitched_jpeg = _encode_jpeg(stitched_preview)
-        self._start_preview_pending_confirmation = False
-        self._record_event(
-            "status",
-            {
-                "status": "preview_ready",
-                "geometry_artifact_path": str(plan.geometry_artifact_path),
-            },
-        )
 
     def _ensure_default_geometry_artifact(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         request = request or {}
@@ -1624,7 +1449,6 @@ class RuntimeService:
             "prepared_plan": None if self._prepared_plan is None else self._prepared_plan.summary,
             "latest_hello": self._latest_hello,
             "latest_metrics": self._latest_metrics,
-            "latest_validation": self._latest_validation,
             "event_count": len(self._events),
             "recent_events": [dict(event) for event in self._events[-30:]],
             "gpu_only_mode": True,
@@ -1632,33 +1456,8 @@ class RuntimeService:
             "gpu_only_blockers": list(self._gpu_only_blockers),
             "project_start_phase": self._project_start_phase,
             "project_status_message": self._project_status_message,
-            "start_preview_ready": any(
-                item is not None
-                for item in (
-                    self._start_preview_left_jpeg,
-                    self._start_preview_right_jpeg,
-                    self._start_preview_stitched_jpeg,
-                )
-            ),
-            "start_preview_pending_confirmation": self._start_preview_pending_confirmation,
-            "start_preview_left_url": self._start_preview_url("left") if self._start_preview_left_jpeg is not None else "",
-            "start_preview_right_url": self._start_preview_url("right") if self._start_preview_right_jpeg is not None else "",
-            "start_preview_stitched_url": self._start_preview_url("stitched") if self._start_preview_stitched_jpeg is not None else "",
-            "alignment_preview_ready": any(
-                item is not None
-                for item in (
-                    self._start_preview_left_jpeg,
-                    self._start_preview_right_jpeg,
-                    self._start_preview_stitched_jpeg,
-                )
-            ),
-            "alignment_preview_left_url": self._start_preview_url("left") if self._start_preview_left_jpeg is not None else "",
-            "alignment_preview_right_url": self._start_preview_url("right") if self._start_preview_right_jpeg is not None else "",
-            "alignment_preview_stitched_url": self._start_preview_url("stitched") if self._start_preview_stitched_jpeg is not None else "",
         }
         snapshot.update(self._flatten_truth_metrics(self._latest_metrics))
-        if self._latest_validation:
-            snapshot.update(self._latest_validation)
         if self._prepared_plan is not None:
             summary = self._prepared_plan.summary
             for key in (
@@ -1881,7 +1680,6 @@ class RuntimeService:
     def prepare(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             try:
-                self._clear_start_preview_locked()
                 explicit_artifact_path = self._resolve_requested_artifact_path(request)
                 if explicit_artifact_path is not None:
                     auto_geometry = self._ensure_default_geometry_artifact(request)
@@ -1913,40 +1711,6 @@ class RuntimeService:
                 "prepared": plan.summary,
                 "auto_calibrated": bool(auto_geometry.get("calibrated")),
                 "message": str(auto_geometry.get("message") or "runtime prepared"),
-                "state": self._snapshot_locked(),
-            }
-
-    def preview_align(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
-        with self._lock:
-            if self._supervisor is not None and self._supervisor.process.poll() is None:
-                self._last_status = "already_running"
-                return {"ok": True, "message": "runtime already running", "state": self._snapshot_locked()}
-            auto_prepare_result: dict[str, Any] | None = None
-            if self._prepared_plan is None:
-                auto_prepare_result = self.prepare(request)
-            plan = self._prepared_plan
-            if plan is None:
-                raise ValueError("runtime plan is unavailable after automatic prepare")
-            blockers = self._gpu_only_blockers_for_plan(plan)
-            self._gpu_only_blockers = blockers
-            if blockers:
-                self._last_error = f"preview failed: {' / '.join(blockers)}"
-                self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
-                raise ValueError(" / ".join(blockers))
-            self._render_start_preview_locked(plan)
-            self._last_status = "preview_ready"
-            self._last_error = ""
-            preview_message = "Virtual camera alignment preview is ready."
-            if auto_prepare_result is not None:
-                prepare_message = str(auto_prepare_result.get("message") or "").strip()
-                if prepare_message:
-                    preview_message = f"{prepare_message} / {preview_message}"
-            return {
-                "ok": True,
-                "preview_ready": True,
-                "auto_prepared": auto_prepare_result is not None,
-                "auto_calibrated": bool(auto_prepare_result and auto_prepare_result.get("auto_calibrated")),
-                "message": preview_message,
                 "state": self._snapshot_locked(),
             }
 
@@ -2049,7 +1813,7 @@ class RuntimeService:
                 self._supervisor.client.reload_config(plan.reload_payload)
                 self._supervisor.request_metrics()
                 self._record_event("status", {"status": "reload_sent", "geometry_artifact_path": str(plan.geometry_artifact_path)})
-                self.set_project_progress("starting_runtime", "Waiting for the first live output frame.")
+                self.set_project_progress("confirm_output", "Waiting for the first live output frame.")
                 self._wait_for_output_ready_locked(timeout_sec=10.0)
             except Exception as exc:
                 detail = str(exc).strip() or "runtime launch handshake failed"
@@ -2091,28 +1855,9 @@ class RuntimeService:
                 "state": self._snapshot_locked(),
             }
 
-    def reload(self, payload: dict[str, Any]) -> dict[str, Any]:
-        normalized = normalize_schema_v2_reload_payload(payload)
-        with self._lock:
-            if self._supervisor is None or self._supervisor.process.poll() is not None:
-                raise RuntimeError("runtime is not running")
-            self._supervisor.client.reload_config(normalized)
-            self._prepared_plan = self._build_plan(normalized)
-            self._clear_start_preview_locked()
-            self._last_status = "reloaded"
-            self._record_event(
-                "status",
-                {
-                    "status": "reloaded",
-                    "geometry_artifact_path": self._prepared_plan.summary.get("geometry_artifact_path", ""),
-                },
-            )
-            return {"ok": True, "state": self._snapshot_locked()}
-
     def stop(self) -> dict[str, Any]:
         with self._lock:
             self._event_pump_stop.set()
-            self._clear_start_preview_locked()
             if self._supervisor is not None:
                 try:
                     self._supervisor.shutdown()
@@ -2133,144 +1878,9 @@ class RuntimeService:
             self._record_event("stopped", {"status": "stopped"})
             return {"ok": True, "message": "Runtime stopped.", "state": self._snapshot_locked()}
 
-    def validate(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
-        strict_fresh = False
-        try:
-            plan = self._build_plan(request)
-            artifact_path = plan.geometry_artifact_path
-            plan_summary = plan.summary
-            strict_fresh = str(plan.launch_spec.sync_pair_mode).strip().lower() == "service"
-        except Exception:
-            artifact_path = self._resolve_requested_artifact_path(request)
-            if artifact_path is None:
-                raise
-            plan_summary = {
-                "geometry_artifact_path": str(artifact_path),
-                "runtime_schema_version": 2,
-            }
-
-        checksum_before = _compute_sha256(artifact_path)
-        artifact = load_runtime_geometry_artifact(artifact_path)
-        checksum_after = _compute_sha256(artifact_path)
-        geometry_model = runtime_geometry_model(artifact)
-        artifact_unchanged = checksum_before == checksum_after
-        rollout = geometry_rollout_metadata(artifact)
-        launch_ready = bool(artifact_unchanged and rollout["launch_ready"])
-        launch_ready_reason = (
-            "geometry artifact changed during read-only validation"
-            if not artifact_unchanged
-            else str(rollout["launch_ready_reason"])
-        )
-        result = {
-            "ok": True,
-            "validation_mode": "read-only",
-            "plan": plan_summary,
-            "artifact_type": artifact.get("artifact_type", ""),
-            "schema_version": artifact.get("schema_version", 0),
-            "geometry_model": rollout["geometry_model"],
-            "geometry_artifact_model": rollout["geometry_model"],
-            "geometry_residual_model": rollout["geometry_residual_model"],
-            "geometry_rollout_status": rollout["geometry_rollout_status"],
-            "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
-            "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
-            "geometry_compat_only": bool(rollout["geometry_compat_only"]),
-            "geometry_artifact_checksum": checksum_before,
-            "artifact_unchanged": artifact_unchanged,
-            "launch_ready": launch_ready,
-            "launch_ready_reason": launch_ready_reason,
-            "strict_fresh": strict_fresh,
-        }
-        with self._lock:
-            self._latest_validation = result.copy()
-            self._record_event(
-                "status",
-                {"status": "validated", "geometry_artifact_path": str(artifact_path)},
-            )
-        return result
-
     def state(self) -> dict[str, Any]:
         with self._lock:
             return self._snapshot_locked()
-
-    def start_preview_jpeg(self, name: str) -> bytes | None:
-        with self._lock:
-            normalized = str(name or "").strip().lower()
-            if normalized == "left":
-                return self._start_preview_left_jpeg
-            if normalized == "right":
-                return self._start_preview_right_jpeg
-            if normalized == "stitched":
-                return self._start_preview_stitched_jpeg
-            return None
-
-    def list_geometry_artifacts(self) -> list[dict[str, Any]]:
-        artifacts: list[dict[str, Any]] = []
-        data_dir = repo_root() / "data"
-        if not data_dir.exists():
-            return artifacts
-        active_artifact = ""
-        if self._prepared_plan is not None:
-            active_artifact = str(self._prepared_plan.geometry_artifact_path)
-        for path in sorted(data_dir.glob("*.json")):
-            try:
-                artifact = load_runtime_geometry_artifact(path)
-            except Exception:
-                continue
-            rollout = geometry_rollout_metadata(artifact)
-            if not bool(rollout["geometry_operator_visible"]) and str(path) != active_artifact:
-                continue
-            artifacts.append(
-                {
-                    "name": path.name,
-                    "path": str(path),
-                    "artifact_type": artifact.get("artifact_type", ""),
-                    "schema_version": artifact.get("schema_version", 0),
-                    "saved_at_epoch_sec": artifact.get("saved_at_epoch_sec", 0),
-                    "geometry_model": rollout["geometry_model"],
-                    "geometry_residual_model": rollout["geometry_residual_model"],
-                    "geometry_rollout_status": rollout["geometry_rollout_status"],
-                    "operator_visible": bool(rollout["geometry_operator_visible"]),
-                    "fallback_only": bool(rollout["geometry_fallback_only"]),
-                    "compat_only": bool(rollout["geometry_compat_only"]),
-                    "launch_ready": bool(rollout["launch_ready"]),
-                    "launch_ready_reason": str(rollout["launch_ready_reason"]),
-                }
-            )
-        return artifacts
-
-    def get_geometry_artifact(self, name: str) -> dict[str, Any]:
-        candidate = (repo_root() / "data" / name).resolve()
-        data_root = (repo_root() / "data").resolve()
-        if data_root not in candidate.parents and candidate != data_root:
-            raise FileNotFoundError("invalid artifact path")
-        artifact = load_runtime_geometry_artifact(candidate)
-        artifact["path"] = str(candidate)
-        return artifact
-
-    def stream_events(self, last_event_id: int = 0) -> Iterable[str]:
-        with self._lock:
-            start_index = 0
-            for index, event in enumerate(self._events):
-                if int(event.get("id", 0)) > int(last_event_id):
-                    start_index = index
-                    break
-            else:
-                start_index = len(self._events)
-
-        def _generator() -> Iterable[str]:
-            nonlocal start_index
-            while True:
-                with self._event_condition:
-                    while start_index >= len(self._events):
-                        self._event_condition.wait(timeout=1.0)
-                    pending = self._events[start_index:]
-                    start_index = len(self._events)
-                for event in pending:
-                    yield f"id: {event['id']}\n"
-                    yield f"event: {event['type']}\n"
-                    yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
-        return _generator()
 
 
 def create_app(
@@ -2281,7 +1891,13 @@ def create_app(
 ) -> FastAPI:
     backend = service or RuntimeService()
     mesh_refresh = mesh_refresh_service or MeshRefreshService()
-    app = FastAPI(title="Hogak Runtime API", version="2")
+    app = FastAPI(
+        title="Hogak Runtime API",
+        version="2",
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
+    )
     app.state.runtime_service = backend
     app.state.mesh_refresh_service = mesh_refresh
 
@@ -2311,91 +1927,6 @@ def create_app(
             "message": str(result.get("message") or "Project stopped."),
             "state": _project_state(backend.state(), mesh_refresh.state()),
         }
-
-    @app.post("/_internal/runtime/prepare", include_in_schema=False)
-    def prepare_runtime(body: dict[str, Any] | None = None):
-        try:
-            return backend.prepare(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/runtime/start", include_in_schema=False)
-    def start_runtime(body: dict[str, Any] | None = None):
-        try:
-            return _project_start_response(backend, mesh_refresh, body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/runtime/preview-align", include_in_schema=False)
-    def preview_runtime_alignment(body: dict[str, Any] | None = None):
-        try:
-            return _public_runtime_response(backend.preview_align(body), mesh_refresh.state())
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/runtime/stop", include_in_schema=False)
-    def stop_runtime():
-        return _public_runtime_response(backend.stop(), mesh_refresh.state())
-
-    @app.post("/api/runtime/validate", include_in_schema=False)
-    def validate_runtime(body: dict[str, Any] | None = None):
-        try:
-            return _public_runtime_response(backend.validate(body), mesh_refresh.state())
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/_internal/runtime/reload", include_in_schema=False)
-    def reload_runtime(body: dict[str, Any]):
-        try:
-            return backend.reload(body)
-        except RuntimeError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/api/runtime/state", include_in_schema=False)
-    def runtime_state():
-        return _public_runtime_state(backend.state(), mesh_refresh.state())
-
-    @app.get("/_internal/runtime/state", include_in_schema=False)
-    def internal_runtime_state():
-        return _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
-
-    @app.get("/_internal/runtime/events", include_in_schema=False)
-    def runtime_events(last_event_id: int = 0):
-        return StreamingResponse(
-            backend.stream_events(last_event_id=last_event_id),
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "Connection": "keep-alive",
-            },
-        )
-
-    @app.get("/api/runtime/preview-align/assets/{name}.jpg", include_in_schema=False)
-    def runtime_preview_asset(name: str):
-        jpeg = backend.start_preview_jpeg(name)
-        if jpeg is None:
-            raise HTTPException(status_code=503, detail="start preview frame unavailable")
-        return Response(content=jpeg, media_type="image/jpeg")
-
-    @app.get("/api/artifacts/geometry", include_in_schema=False)
-    def list_geometry_artifacts():
-        return {"items": backend.list_geometry_artifacts()}
-
-    @app.get("/api/artifacts/geometry/{name}", include_in_schema=False)
-    def get_geometry_artifact(name: str):
-        try:
-            return backend.get_geometry_artifact(name)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.post("/_internal/runtime/mesh-refresh", include_in_schema=False)
-    def refresh_runtime_mesh_api(body: dict[str, Any] | None = None):
-        try:
-            return _internal_mesh_refresh(mesh_refresh, body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     if frontend_dist_dir is None:
         frontend_env = os.environ.get("HOGAK_FRONTEND_DIST_DIR", "").strip()

@@ -15,6 +15,9 @@ It intentionally captures only:
 - mesh refresh and rigid rollback handling
 - acceptance checkpoints
 
+This ledger is the minimal active cleanup record for the current product path.
+Top-level README files and `reports/*` should be treated as archival or drift-prone until they are explicitly rewritten.
+
 ## Official Product Truth
 
 The official product geometry is:
@@ -77,8 +80,7 @@ The following are no longer public product APIs:
 
 The only kept internal runtime preparation surface is:
 
-- `POST /_internal/runtime/mesh-refresh`
-- `GET /_internal/runtime/mesh-refresh/state`
+- `python -m stitching.cli mesh-refresh`
 
 ## Official Operator Flow
 
@@ -111,12 +113,6 @@ Current internal CLI:
 
 ```powershell
 python -m stitching.cli mesh-refresh --left-rtsp "rtsp://LEFT" --right-rtsp "rtsp://RIGHT"
-```
-
-Current internal API:
-
-```text
-POST /_internal/runtime/mesh-refresh
 ```
 
 The output of mesh refresh is expected to become the active rigid runtime artifact used by runtime preparation and validation.

@@ -148,17 +148,6 @@ class RuntimeClient:
         normalized = normalize_schema_v2_reload_payload(payload)
         self.send_command("reload_config", normalized)
 
-    def reset_auto_calibration(self, *, homography_file: str = "") -> None:
-        payload: dict[str, Any] = {}
-        if homography_file.strip():
-            payload["homography_file"] = homography_file.strip()
-        self.send_command("reset_auto_calibration", payload)
-
-    def reload_homography(self, homography_file: str) -> None:
-        if not homography_file.strip():
-            raise ValueError("homography_file is required")
-        self.send_command("reload_homography", {"homography_file": homography_file.strip()})
-
     def shutdown(self) -> None:
         try:
             self.send_command("shutdown", {})

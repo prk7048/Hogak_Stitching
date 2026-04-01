@@ -8,17 +8,11 @@ from stitching.runtime_site_config import RuntimeSiteConfigError
 
 
 CURRENT_MAIN_PATH_NOTE = (
-    "Current Python entrypoints: operator-server for the product surface, mesh-refresh for internal stitch refresh, and native-calibrate/native-validate for internal maintenance."
+    "Current Python entrypoints: operator-server for the product surface and mesh-refresh for internal stitch refresh."
 )
 
-COMMAND_ALIASES = {
-    "prepare-runtime": "native-calibrate",
-    "validate-runtime": "native-validate",
-}
-
-
 def _normalize_command_name(command: str) -> str:
-    return COMMAND_ALIASES.get(str(command), str(command))
+    return str(command)
 
 
 def _bootstrap_runtime_config(argv: list[str]) -> tuple[argparse.ArgumentParser, list[str]]:
@@ -201,22 +195,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    native_calib_cmd = subparsers.add_parser(
-        "native-calibrate",
-        aliases=["prepare-runtime"],
-        help="Current main path: capture RTSP frame pair and save runtime homography",
-    )
-    _add_native_calibration_args(native_calib_cmd)
-
-    native_validate_cmd = subparsers.add_parser(
-        "native-validate",
-        aliases=["validate-runtime"],
-        help="Run strict fresh 30 validation and write a JSON report",
-    )
-    from stitching.native_runtime_validation import add_native_validation_args
-
-    add_native_validation_args(native_validate_cmd)
-
     operator_server_cmd = subparsers.add_parser(
         "operator-server",
         help="Run the unified FastAPI + React operator surface",
@@ -248,16 +226,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main() -> int:
     try:
         args = parse_args()
-
-        if args.command == "native-calibrate":
-            from stitching.native_calibration import run_native_calibration
-
-            return int(run_native_calibration(args))
-
-        if args.command == "native-validate":
-            from stitching.native_runtime_validation import run_native_validation
-
-            return int(run_native_validation(args))
 
         if args.command == "operator-server":
             from stitching.runtime_backend import main as run_runtime_backend

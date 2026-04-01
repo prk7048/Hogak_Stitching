@@ -391,6 +391,103 @@ code {
   font-weight: 700;
 }
 
+.debug-panel {
+  padding: 20px;
+  border-radius: 22px;
+  border: 1px dashed rgba(78, 140, 125, 0.32);
+  background: rgba(255, 252, 245, 0.96);
+}
+
+.debug-panel summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.debug-panel-copy {
+  margin-top: 14px;
+}
+
+.debug-panel-copy p {
+  margin: 0;
+  color: #5f7474;
+  line-height: 1.6;
+}
+
+.debug-stage-list {
+  display: grid;
+  gap: 10px;
+  margin-top: 16px;
+}
+
+.debug-stage-item {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(28, 42, 44, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.debug-stage-item.active {
+  box-shadow: 0 0 0 4px rgba(78, 140, 125, 0.08);
+}
+
+.debug-stage-marker {
+  width: 12px;
+  height: 12px;
+  margin-top: 6px;
+  border-radius: 999px;
+  border: 2px solid rgba(28, 42, 44, 0.16);
+  background: transparent;
+}
+
+.debug-stage-item.done .debug-stage-marker {
+  border-color: rgba(80, 184, 126, 0.55);
+  background: #50b87e;
+}
+
+.debug-stage-item.current .debug-stage-marker {
+  border-color: rgba(89, 157, 255, 0.5);
+  background: #599dff;
+}
+
+.debug-stage-item.failed .debug-stage-marker {
+  border-color: rgba(226, 159, 68, 0.55);
+  background: #e29f44;
+}
+
+.debug-stage-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: baseline;
+}
+
+.debug-stage-heading strong {
+  font-size: 0.98rem;
+}
+
+.debug-stage-heading span {
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 0.72rem;
+  color: #6f8687;
+}
+
+.debug-stage-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.debug-stage-copy p {
+  margin: 0;
+  color: #5f7474;
+  line-height: 1.55;
+}
+
 .details-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

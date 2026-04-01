@@ -30,6 +30,20 @@ const START_FLOW = [
   { id: "running", label: "Running" },
 ] as const;
 
+function debugTone(state: string): string {
+  const normalized = String(state || "").trim().toLowerCase();
+  if (normalized === "done") {
+    return "done";
+  }
+  if (normalized === "current") {
+    return "current";
+  }
+  if (normalized === "failed") {
+    return "failed";
+  }
+  return "pending";
+}
+
 function text(value: unknown, fallback = "-"): string {
   const normalized = String(value ?? "").trim();
   return normalized || fallback;
@@ -114,6 +128,8 @@ export function ProjectPage() {
     ? state.zero_copy_blockers.map((item) => String(item ?? "").trim()).filter(Boolean)
     : [];
   const projectLog = Array.isArray(state.project_log) ? state.project_log : [];
+  const debugSteps = Array.isArray(state.debug_steps) ? state.debug_steps : [];
+  const debugCurrentStage = String(state.debug_current_stage || "").trim();
 
   const statusMessage =
     text(state.status_message, "") ||
@@ -352,6 +368,36 @@ export function ProjectPage() {
               </div>
             ) : null}
           </details>
+
+          {state.debug_mode ? (
+            <details className="debug-panel" open={viewMode === "starting" || viewMode === "blocked" || viewMode === "error"}>
+              <summary>Debug progress</summary>
+              <div className="debug-panel-copy">
+                <p>
+                  This debug-only panel shows the internal startup stages so we can inspect where Start Project is slowing down or failing.
+                </p>
+              </div>
+              <div className="debug-stage-list" role="list" aria-label="Debug startup stages">
+                {debugSteps.map((step, index) => {
+                  const tone = debugTone(step.state || "pending");
+                  const stepId = String(step.id || step.label || index);
+                  const isCurrent = debugCurrentStage && step.id === debugCurrentStage;
+                  return (
+                    <div key={stepId} className={`debug-stage-item ${tone} ${isCurrent ? "active" : ""}`} role="listitem">
+                      <div className="debug-stage-marker" aria-hidden="true" />
+                      <div className="debug-stage-copy">
+                        <div className="debug-stage-heading">
+                          <strong>{text(step.label, "Unnamed step")}</strong>
+                          <span>{text(step.state, "pending")}</span>
+                        </div>
+                        <p>{text(step.message, tone === "current" ? "In progress." : tone === "done" ? "Completed." : tone === "failed" ? "Failed." : "Pending.")}</p>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </details>
+          ) : null}
         </div>
       </section>
     </main>
