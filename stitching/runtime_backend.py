@@ -224,24 +224,30 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     output_path_bridge = output_path_mode == "native-nvenc-bridge"
     output_path_requested_direct = output_path_mode == "gpu-direct"
     zero_copy_blockers: list[str] = []
+    zero_copy_truth_pending: list[str] = []
     if input_path_mode == "cuda-decode-cpu-staged":
         zero_copy_blockers.append("reader transfers decoded frames to CPU before stitch input")
     elif input_path_mode != "unknown":
         zero_copy_blockers.append(f"input path is {input_path_mode}, not zero-copy")
     else:
-        zero_copy_blockers.append("input path truth is unavailable")
+        zero_copy_truth_pending.append("input path truth will be resolved during prepare")
     if not output_path_direct and not output_path_requested_direct:
         if output_path_mode == "unknown":
-            zero_copy_blockers.append("output path truth is unavailable")
+            zero_copy_truth_pending.append("output path truth will be resolved during prepare")
         elif output_path_mode == "native-nvenc-unavailable":
             zero_copy_blockers.append("native NVENC output path is unavailable")
         else:
             zero_copy_blockers.append(f"output path is {output_path_mode}, not direct")
     zero_copy_ready = len(zero_copy_blockers) == 0
-    zero_copy_reason = "end-to-end zero-copy path is active" if zero_copy_ready else "; ".join(zero_copy_blockers)
+    if zero_copy_blockers:
+        zero_copy_reason = "; ".join(zero_copy_blockers)
+    elif zero_copy_truth_pending:
+        zero_copy_reason = "; ".join(zero_copy_truth_pending)
+    else:
+        zero_copy_reason = "end-to-end zero-copy path is active"
     gpu_path_mode = output_path_mode
     gpu_path_ready = zero_copy_ready
-    output_receive_uri = RuntimeService._receive_uri_from_target(production_output_target)
+    output_receive_uri = RuntimeService._receive_uri_from_target(production_output_target) or "udp://@:24000"
 
     preview_left_url = str(
         merged.get("preview_left_url")
@@ -307,10 +313,8 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     blocker_reasons: list[str] = []
     if gpu_only_blockers:
         blocker_reasons.extend(gpu_only_blockers)
-    if not zero_copy_ready:
+    if zero_copy_blockers:
         blocker_reasons.extend(zero_copy_blockers)
-    if not output_receive_uri:
-        blocker_reasons.append("output receive URI is unavailable")
     if not runtime_launch_ready and not needs_mesh_refresh:
         blocker_reasons.append(runtime_launch_ready_reason or "runtime geometry is not launch-ready")
     blocker_reason = " / ".join(item for item in blocker_reasons if str(item).strip())
