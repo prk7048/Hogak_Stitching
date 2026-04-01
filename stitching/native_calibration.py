@@ -1721,6 +1721,20 @@ def _compute_visual_metrics(
     return visual_score, luma_diff, edge_diff_mean, ghosting
 
 
+def _is_output_geometry_plan_failure(exc: StitchingFailure) -> bool:
+    if exc.code != ErrorCode.HOMOGRAPHY_FAIL:
+        return False
+    detail = str(exc.detail or "").strip().lower()
+    return any(
+        token in detail
+        for token in (
+            "output geometry too large",
+            "output pixel count too large",
+            "invalid output geometry",
+        )
+    )
+
+
 def _build_candidate(
     *,
     left: np.ndarray,
@@ -1742,7 +1756,14 @@ def _build_candidate(
             raise
         homography, inlier_mask = _estimate_affine_homography(keypoints_left, keypoints_right, matches, config)
         transform_model = "affine_fallback"
-    plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+    try:
+        plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+    except StitchingFailure as exc:
+        if transform_model != "homography" or not _is_output_geometry_plan_failure(exc):
+            raise
+        homography, inlier_mask = _estimate_affine_homography(keypoints_left, keypoints_right, matches, config)
+        transform_model = "affine_geometry_fallback"
+        plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
     inliers_count = int(inlier_mask.ravel().sum())
     match_count = int(len(matches))
     inlier_ratio = float(inliers_count / float(max(1, match_count)))
