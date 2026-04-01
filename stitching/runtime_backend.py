@@ -222,7 +222,7 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     output_path_mode = production_output_runtime_mode or "unknown"
     output_path_direct = output_path_mode == "native-nvenc-direct"
     output_path_bridge = output_path_mode == "native-nvenc-bridge"
-    output_path_requested_direct = output_path_mode == "gpu-direct"
+    output_path_requested_direct = output_path_mode in {"gpu-direct", "gpu-direct-requested"}
     production_output_last_error = str(merged.get("production_output_last_error") or "").strip()
     production_output_command_line = str(merged.get("production_output_command_line") or "").strip()
     output_bridge_reason = _command_line_token(production_output_command_line, "bridge-reason")
@@ -240,6 +240,8 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
             zero_copy_truth_pending.append("output path truth will be resolved during prepare")
         elif output_path_mode == "native-nvenc-unavailable":
             zero_copy_blockers.append("native NVENC output path is unavailable")
+        elif output_path_mode == "native-nvenc-direct-blocked" and output_bridge_reason:
+            zero_copy_blockers.append(f"gpu-direct direct-only requirement failed: {output_bridge_reason}")
         elif production_output_last_error:
             zero_copy_blockers.append(production_output_last_error)
         elif output_path_mode == "native-nvenc-bridge" and output_bridge_reason:
@@ -454,7 +456,7 @@ def _metrics_indicate_output_ready(metrics: dict[str, Any] | None) -> bool:
     runtime_mode = str(metrics.get("production_output_runtime_mode") or "").strip().lower()
     frames_written = _metric_int(metrics.get("production_output_frames_written"))
     output_active = _metric_bool(metrics.get("production_output_active"))
-    return output_active and frames_written > 0 and runtime_mode in {"native-nvenc-direct", "native-nvenc-bridge"}
+    return output_active and frames_written > 0 and runtime_mode == "native-nvenc-direct"
 
 
 def _metrics_output_failure_reason(metrics: dict[str, Any] | None) -> str:
@@ -467,9 +469,11 @@ def _metrics_output_failure_reason(metrics: dict[str, Any] | None) -> str:
     command_line = str(metrics.get("production_output_command_line") or "").strip()
     bridge_reason = _command_line_token(command_line, "bridge-reason")
     mode_token = _command_line_token(command_line, "mode")
+    if mode_token == "direct-required-blocked" and bridge_reason:
+        return f"gpu-direct direct-only requirement failed: {bridge_reason}"
+    if runtime_mode == "native-nvenc-direct-blocked" and bridge_reason:
+        return f"gpu-direct direct-only requirement failed: {bridge_reason}"
     if runtime_mode == "native-nvenc-bridge" and bridge_reason:
-        if mode_token == "direct-required-blocked":
-            return f"gpu-direct direct-only requirement failed: {bridge_reason}"
         return f"gpu-direct bridge active: {bridge_reason}"
     status = str(metrics.get("status") or "").strip().lower()
     if status in {"gpu_only_output_blocked", "reader_start_failed", "input decode failed", "stitch_failed"}:

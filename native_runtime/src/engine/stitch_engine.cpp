@@ -2316,7 +2316,7 @@ std::string output_runtime_mode_hint(const std::string& runtime) {
         return "ffmpeg-process";
     }
     if (runtime == "gpu-direct") {
-        return "native-nvenc-bridge";
+        return "gpu-direct-requested";
     }
     if (runtime.empty()) {
         return "none";
