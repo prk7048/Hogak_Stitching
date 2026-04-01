@@ -27,8 +27,7 @@ The only internal fallback geometry is:
 
 The official operator surface is now:
 
-1. `/run`
-2. `/validate`
+1. `/`
 
 Everything else is internal, compatibility-only, or debug-only.
 
@@ -53,30 +52,20 @@ Removed or hidden product-facing routes now redirect or stay internal:
 - `/artifacts`
 - `/dashboard`
 - `/validation`
-
-Public UI entrypoints are:
-
 - `/run`
 - `/validate`
 
-Compatibility redirects still send old links into the product flow:
+Public UI entrypoint is:
 
-- `/` -> `/run`
-- `/dashboard` -> `/run`
-- `/validation` -> `/validate`
+- `/`
 
 ## Removed or Hidden Product APIs
 
 The public product surface now supports only:
 
-- `GET /api/runtime/state`
-- `POST /api/runtime/preview-align`
-- `POST /api/runtime/start`
-- `POST /api/runtime/stop`
-- `POST /api/runtime/validate`
-- `GET /api/runtime/preview-align/assets/{name}.jpg`
-- `GET /api/artifacts/geometry`
-- `GET /api/artifacts/geometry/{name}`
+- `GET /api/project/state`
+- `POST /api/project/start`
+- `POST /api/project/stop`
 
 The following are no longer public product APIs:
 
@@ -94,21 +83,19 @@ The only kept internal runtime preparation surface is:
 
 The official operator workflow is:
 
-1. Run internal `mesh-refresh` only when engineering or support needs to regenerate the active mesh artifact.
-2. Open `/run`.
-3. Check the active mesh artifact and launch readiness.
-4. Trigger alignment preview.
-5. Confirm the left, right, and stitched preview frames.
-6. Start transmit.
-7. Verify `udp://@:24000` from an external player.
-8. Open `/validate`.
-9. Confirm active model, checksum, fallback state, and launch readiness.
+1. Open `/`.
+2. Press `Start Project`.
+3. Let the system run internal `mesh-refresh` automatically only when needed.
+4. Verify `udp://@:24000` from an external player.
+5. Expand `Details` only when you need the active model, checksum, fallback, or GPU path truth.
+6. Press `Stop Project` when finished.
 
-`Start` now means only one thing:
+`Start Project` now means only one thing:
 
+- check inputs
+- refresh mesh only when required
+- prepare runtime
 - start transmit
-
-It is no longer overloaded with bakeoff, selection, or hidden prepare semantics.
 
 ## Internal Mesh Refresh
 
@@ -192,28 +179,16 @@ python -m stitching.cli operator-server --host 127.0.0.1 --port 8088
 python -m stitching.cli mesh-refresh --left-rtsp "rtsp://LEFT" --right-rtsp "rtsp://RIGHT"
 ```
 
-### Runtime preview
+### Project start
 
 ```powershell
-Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/runtime/preview-align"
+Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/project/start"
 ```
 
-### Runtime start
+### Project stop
 
 ```powershell
-Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/runtime/start"
-```
-
-### Runtime stop
-
-```powershell
-Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/runtime/stop"
-```
-
-### Runtime validate
-
-```powershell
-Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/runtime/validate"
+Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:8088/api/project/stop"
 ```
 
 ### External player
@@ -232,10 +207,9 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -strict experimental "udp://
 
 ### Product surface
 
-- [ ] `/run` is the main operator page
-- [ ] `/validate` is the validation page
-- [ ] old bakeoff, geometry compare, and calibration routes do not expose product flows
-- [ ] public runtime APIs are limited to run and validate concerns
+- [ ] `/` is the only operator page
+- [ ] old bakeoff, geometry compare, validation, outputs, artifacts, and calibration routes redirect into `/`
+- [ ] public APIs are limited to project start, stop, and state
 
 ### Runtime truth
 
@@ -247,9 +221,8 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -strict experimental "udp://
 ### Mesh flow
 
 - [ ] `mesh-refresh` can regenerate the active mesh artifact
-- [ ] `preview-align` uses the refreshed mesh artifact
-- [ ] `start` launches transmit with the active mesh artifact
-- [ ] `/validate` reports the same active model and artifact
+- [ ] `Start Project` launches transmit with the active mesh artifact
+- [ ] `GET /api/project/state` reports the same active model and artifact
 
 ### Rollback
 

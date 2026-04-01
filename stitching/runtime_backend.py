@@ -163,22 +163,44 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         or merged.get("geometry_residual_model")
         or ""
     ).strip()
+    artifact_rollout: dict[str, Any] | None = None
+    runtime_artifact_checksum = str(merged.get("runtime_artifact_checksum") or merged.get("geometry_artifact_checksum") or "").strip()
 
     if runtime_active_artifact_path and (not runtime_active_model or not runtime_active_residual_model):
+        try:
+            artifact_path = Path(runtime_active_artifact_path)
+            artifact = load_runtime_geometry_artifact(artifact_path)
+        except Exception:
+            artifact = None
+        if isinstance(artifact, dict):
+            artifact_rollout = geometry_rollout_metadata(artifact)
+            if not runtime_active_model:
+                runtime_active_model = str(artifact_rollout.get("geometry_model") or runtime_geometry_model(artifact))
+            if not runtime_active_residual_model:
+                runtime_active_residual_model = str(
+                    artifact_rollout.get("geometry_residual_model") or runtime_geometry_residual_model(artifact)
+                )
+            if not runtime_artifact_checksum and artifact_path.exists():
+                runtime_artifact_checksum = _compute_sha256(artifact_path)
+    elif runtime_active_artifact_path:
+        artifact_path = Path(runtime_active_artifact_path)
+        if not runtime_artifact_checksum and artifact_path.exists():
+            runtime_artifact_checksum = _compute_sha256(artifact_path)
+
+    if artifact_rollout is None and runtime_active_artifact_path:
         try:
             artifact = load_runtime_geometry_artifact(Path(runtime_active_artifact_path))
         except Exception:
             artifact = None
         if isinstance(artifact, dict):
-            rollout = geometry_rollout_metadata(artifact)
-            if not runtime_active_model:
-                runtime_active_model = str(rollout.get("geometry_model") or runtime_geometry_model(artifact))
-            if not runtime_active_residual_model:
-                runtime_active_residual_model = str(
-                    rollout.get("geometry_residual_model") or runtime_geometry_residual_model(artifact)
-                )
+            artifact_rollout = geometry_rollout_metadata(artifact)
 
     production_output_runtime_mode = str(merged.get("production_output_runtime_mode") or "").strip()
+    production_output_target = str(
+        merged.get("production_output_target")
+        or (merged.get("prepared_plan") or {}).get("transmit_target")
+        or ""
+    ).strip()
     input_runtime = str(
         merged.get("input_runtime")
         or merged.get("prepared_plan", {}).get("input_runtime")
@@ -220,6 +242,7 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     )
     gpu_path_mode = output_path_mode
     gpu_path_ready = zero_copy_ready
+    output_receive_uri = RuntimeService._receive_uri_from_target(production_output_target)
     preview_left_url = str(
         merged.get("preview_left_url")
         or merged.get("alignment_preview_left_url")
@@ -241,16 +264,75 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     preview_ready = any((preview_left_url, preview_right_url, preview_stitched_url)) or bool(
         merged.get("alignment_preview_ready") or merged.get("start_preview_ready")
     )
+    runtime_launch_ready = bool(
+        merged.get("runtime_launch_ready")
+        or merged.get("launch_ready")
+        or mesh_refresh.get("runtime_launch_ready")
+        or (artifact_rollout or {}).get("launch_ready")
+    )
+    runtime_launch_ready_reason = str(
+        merged.get("runtime_launch_ready_reason")
+        or merged.get("launch_ready_reason")
+        or mesh_refresh.get("runtime_launch_ready_reason")
+        or (artifact_rollout or {}).get("launch_ready_reason")
+        or ""
+    ).strip()
+    fallback_used = bool(
+        merged.get("fallback_used")
+        or merged.get("geometry_fallback_only")
+        or (artifact_rollout or {}).get("geometry_fallback_only")
+    )
+    gpu_only_blockers = [str(item).strip() for item in list(merged.get("gpu_only_blockers") or []) if str(item).strip()]
+    needs_mesh_refresh = (
+        not runtime_active_artifact_path
+        or str(runtime_active_residual_model or "").strip().lower() != "mesh"
+        or fallback_used
+        or not runtime_launch_ready
+    )
+    blocker_reason = ""
+    if gpu_only_blockers:
+        blocker_reason = " / ".join(gpu_only_blockers)
+    elif not runtime_launch_ready and not needs_mesh_refresh:
+        blocker_reason = runtime_launch_ready_reason or "runtime geometry is not launch-ready"
+
+    running = bool(merged.get("running"))
+    status = str(merged.get("status") or "idle").strip() or "idle"
+    if running:
+        start_phase = "running"
+        status_message = (
+            f"프로젝트가 실행 중입니다. 외부 플레이어에서 {output_receive_uri} 를 여세요."
+            if output_receive_uri
+            else "프로젝트가 실행 중입니다."
+        )
+    elif blocker_reason:
+        start_phase = "blocked"
+        status_message = blocker_reason
+    elif needs_mesh_refresh:
+        start_phase = "mesh-refresh"
+        status_message = "시작 시 mesh-refresh를 자동 실행합니다."
+    else:
+        start_phase = "ready"
+        status_message = "시작할 준비가 되었습니다."
+    can_start = not running and not blocker_reason
+    can_stop = running
 
     merged.update(
         {
+            "status": status,
+            "start_phase": start_phase,
+            "status_message": status_message,
+            "can_start": can_start,
+            "can_stop": can_stop,
+            "blocker_reason": blocker_reason,
+            "output_receive_uri": output_receive_uri,
             "runtime_active_model": runtime_active_model or "",
             "runtime_active_residual_model": runtime_active_residual_model or "",
+            "geometry_residual_model": runtime_active_residual_model or "",
             "runtime_active_artifact_path": runtime_active_artifact_path,
-            "runtime_artifact_checksum": str(merged.get("geometry_artifact_checksum") or "").strip(),
-            "runtime_launch_ready": bool(merged.get("launch_ready")),
-            "runtime_launch_ready_reason": str(merged.get("launch_ready_reason") or "").strip(),
-            "fallback_used": bool(merged.get("geometry_fallback_only")),
+            "runtime_artifact_checksum": runtime_artifact_checksum,
+            "runtime_launch_ready": runtime_launch_ready,
+            "runtime_launch_ready_reason": runtime_launch_ready_reason,
+            "fallback_used": fallback_used,
             "input_path_mode": input_path_mode,
             "gpu_path_mode": gpu_path_mode,
             "gpu_path_ready": gpu_path_ready,
@@ -260,6 +342,7 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
             "zero_copy_ready": zero_copy_ready,
             "zero_copy_reason": zero_copy_reason,
             "zero_copy_blockers": zero_copy_blockers,
+            "production_output_target": production_output_target,
             "preview_ready": preview_ready,
             "preview_left_url": preview_left_url,
             "preview_right_url": preview_right_url,
@@ -287,6 +370,210 @@ def _internal_mesh_refresh(mesh_refresh: MeshRefreshService, body: dict[str, Any
     if not isinstance(result, dict):
         raise ValueError("mesh-refresh did not return a JSON object")
     return result
+
+
+def _project_receive_uri_from_target(target: Any) -> str:
+    text = str(target or "").strip()
+    if not text.startswith("udp://"):
+        return text
+    endpoint = text.split("?", 1)[0][len("udp://") :]
+    host_port = endpoint[1:] if endpoint.startswith("@") else endpoint
+    separator = host_port.rfind(":")
+    if separator < 0:
+        return text
+    port = host_port[separator + 1 :].strip()
+    if not port:
+        return text
+    return f"udp://@:{port}"
+
+
+def _prepare_failure_needs_mesh_refresh(message: str) -> bool:
+    normalized = str(message or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "mesh-refresh",
+            "launch-ready runtime geometry artifact",
+            "internal fallback model",
+            "active mesh artifact",
+        )
+    )
+
+
+def _configured_rtsp_urls_for_request(request: dict[str, Any] | None = None) -> tuple[str, str]:
+    site_config = load_runtime_site_config()
+    cameras = site_config.get("cameras", {}) if isinstance(site_config.get("cameras"), dict) else {}
+    request = request or {}
+    left_inputs = request.get("inputs", {}).get("left", {}) if isinstance(request.get("inputs"), dict) else {}
+    right_inputs = request.get("inputs", {}).get("right", {}) if isinstance(request.get("inputs"), dict) else {}
+    left_rtsp = str(
+        request.get("left_rtsp")
+        or left_inputs.get("url")
+        or cameras.get("left_rtsp")
+        or ""
+    ).strip()
+    right_rtsp = str(
+        request.get("right_rtsp")
+        or right_inputs.get("url")
+        or cameras.get("right_rtsp")
+        or ""
+    ).strip()
+    return left_rtsp, right_rtsp
+
+
+def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
+    merged = _merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state)
+    running = bool(merged.get("running"))
+    last_error = str(merged.get("last_error") or "").strip()
+    config_blocker = ""
+    try:
+        left_rtsp, right_rtsp = _configured_rtsp_urls_for_request()
+        require_configured_rtsp_urls(left_rtsp, right_rtsp, context="Start Project")
+    except Exception as exc:
+        config_blocker = str(exc)
+
+    start_phase = str(merged.get("project_start_phase") or "").strip().lower()
+    status_message = str(merged.get("project_status_message") or "").strip()
+    blocker_reason = config_blocker or str(merged.get("runtime_launch_ready_reason") or "").strip()
+
+    if running:
+        status = "running"
+    elif start_phase in {"checking_inputs", "refreshing_mesh", "preparing_runtime", "starting_runtime"}:
+        status = "starting"
+    elif config_blocker:
+        status = "blocked"
+    elif last_error:
+        status = "error"
+    else:
+        status = "idle"
+
+    if status == "running" and not status_message:
+        status_message = "Project is running. Open the external player to confirm the panorama output."
+    elif status == "starting" and not status_message:
+        status_message = "Start Project is preparing the runtime."
+    elif status == "blocked" and not status_message:
+        status_message = blocker_reason or "Project start is blocked."
+    elif status == "error" and not status_message:
+        status_message = last_error or "Project start failed."
+    elif not status_message:
+        status_message = "Start Project will refresh the mesh artifact automatically when needed."
+
+    can_start = not running and status != "starting" and not config_blocker
+    can_stop = running
+    output_target = str(merged.get("production_output_target") or "").strip()
+
+    return {
+      "status": status,
+      "start_phase": start_phase or ("running" if running else "idle"),
+      "status_message": status_message,
+      "running": running,
+      "can_start": can_start,
+      "can_stop": can_stop,
+      "blocker_reason": blocker_reason if status in {"blocked", "error"} else "",
+      "output_receive_uri": _project_receive_uri_from_target(output_target) or "udp://@:24000",
+      "runtime_active_model": str(merged.get("runtime_active_model") or "").strip(),
+      "runtime_active_artifact_path": str(merged.get("runtime_active_artifact_path") or "").strip(),
+      "runtime_artifact_checksum": str(merged.get("runtime_artifact_checksum") or "").strip(),
+      "runtime_launch_ready": bool(merged.get("runtime_launch_ready")),
+      "runtime_launch_ready_reason": str(merged.get("runtime_launch_ready_reason") or "").strip(),
+      "geometry_residual_model": str(merged.get("runtime_active_residual_model") or "").strip(),
+      "fallback_used": bool(merged.get("fallback_used")),
+      "gpu_path_mode": str(merged.get("gpu_path_mode") or "unknown").strip() or "unknown",
+      "gpu_path_ready": bool(merged.get("gpu_path_ready")),
+    }
+
+
+def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | None = None) -> bool:
+    if bool(state.get("running")):
+        return False
+    residual = str(state.get("geometry_residual_model") or "").strip().lower()
+    if not str(state.get("runtime_active_artifact_path") or "").strip():
+        return True
+    if residual and residual != "mesh":
+        return True
+    if bool(state.get("fallback_used")):
+        return True
+    if not bool(state.get("runtime_launch_ready")):
+        return True
+    message = str(exc or "").strip().lower()
+    return any(
+        token in message
+        for token in (
+            "mesh-refresh",
+            "mesh artifact",
+            "launch-ready runtime geometry artifact",
+            "internal fallback model",
+        )
+    )
+
+
+def _project_start_response(
+    backend: "RuntimeService",
+    mesh_refresh: MeshRefreshService,
+    body: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    request = body or {}
+    initial_state = _project_state(backend.state(), mesh_refresh.state())
+    if bool(initial_state.get("running")):
+        return {
+            "ok": True,
+            "message": "Project is already running.",
+            "state": initial_state,
+        }
+        state["status_message"] = state.get("status_message") or "프로젝트가 이미 실행 중입니다."
+        return {"ok": True, "message": state["status_message"], "state": state}
+
+    backend.set_project_progress("checking_inputs", "Checking inputs.")
+    left_rtsp, right_rtsp = _configured_rtsp_urls_for_request(request)
+    require_configured_rtsp_urls(left_rtsp, right_rtsp, context="Start Project")
+
+    mesh_refresh_triggered = False
+    prepare_result: dict[str, Any] | None = None
+    try:
+        backend.set_project_progress("preparing_runtime", "Preparing runtime.")
+        prepare_result = backend.prepare(request)
+    except Exception as exc:
+        latest_state = _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
+        if not _project_start_needs_mesh_refresh(latest_state, exc):
+            backend.set_project_progress("blocked", str(exc))
+            raise
+        backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
+        _internal_mesh_refresh(mesh_refresh, request)
+        mesh_refresh_triggered = True
+        backend.set_project_progress("preparing_runtime", "Preparing runtime.")
+        prepare_result = backend.prepare(request)
+
+    prepared_project_state = _project_state(backend.state(), mesh_refresh.state())
+    if not bool(prepared_project_state.get("runtime_launch_ready")):
+        reason = str(prepared_project_state.get("runtime_launch_ready_reason") or "Runtime launch is blocked.")
+        backend.set_project_progress("blocked", reason)
+        raise ValueError(reason)
+
+    backend.set_project_progress("starting_runtime", "Starting runtime.")
+    try:
+        result = backend.start(request)
+    except Exception as exc:
+        backend.set_project_progress("error", str(exc))
+        raise
+    response = {
+        "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
+        "message": str(result.get("message") or "").strip() if isinstance(result, dict) else "",
+        "state": _project_state(backend.state(), mesh_refresh.state()),
+    }
+    message = response["message"] or "Project started."
+    if mesh_refresh_triggered:
+        response["message"] = (
+            f"mesh-refresh를 자동 실행했습니다. {message}".strip()
+            if message
+            else "mesh-refresh를 자동 실행한 뒤 프로젝트를 시작했습니다."
+        )
+    if mesh_refresh_triggered:
+        response["message"] = f"Mesh refresh ran automatically. {message}".strip()
+    elif prepare_result is not None and bool(prepare_result.get("auto_calibrated")):
+        response["message"] = f"Mesh artifact refreshed automatically. {message}".strip()
+    return response
 
 
 class _CaptureOptionsEnv:
@@ -523,6 +810,8 @@ class RuntimeService:
         self._last_error = ""
         self._last_status = "idle"
         self._gpu_only_blockers: list[str] = []
+        self._project_start_phase = "idle"
+        self._project_status_message = "Start Project will refresh the mesh artifact automatically when needed."
         self._start_preview_pending_confirmation = False
         self._start_preview_left_jpeg: bytes | None = None
         self._start_preview_right_jpeg: bytes | None = None
@@ -555,6 +844,15 @@ class RuntimeService:
         if not port:
             return text
         return f"udp://@:{port}"
+
+    def set_project_progress(self, phase: str, message: str) -> None:
+        with self._lock:
+            self._project_start_phase = str(phase or "idle").strip() or "idle"
+            self._project_status_message = str(message or "").strip()
+
+    def project_progress(self) -> tuple[str, str]:
+        with self._lock:
+            return self._project_start_phase, self._project_status_message
 
     def _clear_start_preview_locked(self) -> None:
         self._start_preview_pending_confirmation = False
@@ -1111,6 +1409,8 @@ class RuntimeService:
             "gpu_only_mode": True,
             "gpu_only_ready": len(self._gpu_only_blockers) == 0,
             "gpu_only_blockers": list(self._gpu_only_blockers),
+            "project_start_phase": self._project_start_phase,
+            "project_status_message": self._project_status_message,
             "start_preview_ready": any(
                 item is not None
                 for item in (
@@ -1369,6 +1669,8 @@ class RuntimeService:
             self._prepared_plan = plan
             self._last_status = "prepared"
             self._last_error = ""
+            self._project_start_phase = "idle"
+            self._project_status_message = "Project is ready to start."
             self._record_event("status", {"status": "prepared", "geometry_artifact_path": str(plan.geometry_artifact_path)})
             return {
                 "ok": True,
@@ -1442,6 +1744,8 @@ class RuntimeService:
         with self._lock:
             if self._supervisor is not None and self._supervisor.process.poll() is None:
                 self._last_status = "already_running"
+                self._project_start_phase = "running"
+                self._project_status_message = "Project is already running."
                 return {"ok": True, "state": self._snapshot_locked()}
             auto_prepare_result: dict[str, Any] | None = None
             if self._prepared_plan is None:
@@ -1470,6 +1774,7 @@ class RuntimeService:
             self._start_event_pump()
             self._last_status = "running"
             self._last_error = ""
+            self._project_start_phase = "running"
             self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid})
             transmit_receive_uri = self._receive_uri_from_target(plan.summary.get("transmit_target", ""))
             start_message = (
@@ -1477,6 +1782,7 @@ class RuntimeService:
             )
             receive_uri = transmit_receive_uri or str(plan.summary.get("transmit_target", "")).strip()
             start_message = f"런타임을 시작했습니다. 외부 플레이어에서 {receive_uri} 를 여세요."
+            self._project_status_message = start_message
             if auto_prepare_result is not None:
                 prepare_message = str(auto_prepare_result.get("message") or "").strip()
                 if prepare_message:
@@ -1525,6 +1831,9 @@ class RuntimeService:
                 self._event_pump_thread.join(timeout=2.5)
                 self._event_pump_thread = None
             self._last_status = "stopped"
+            self._last_error = ""
+            self._project_start_phase = "idle"
+            self._project_status_message = "Project is stopped."
             self._record_event("stopped", {"status": "stopped"})
             return {"ok": True, "message": "Runtime stopped.", "state": self._snapshot_locked()}
 
@@ -1680,6 +1989,33 @@ def create_app(
     app.state.runtime_service = backend
     app.state.mesh_refresh_service = mesh_refresh
 
+    @app.get("/api/project/state")
+    def project_state():
+        return _project_state(backend.state(), mesh_refresh.state())
+
+    @app.post("/api/project/start")
+    def project_start(body: dict[str, Any] | None = None):
+        try:
+            return _project_start_response(backend, mesh_refresh, body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/project/stop")
+    def project_stop():
+        current_state = _project_state(backend.state(), mesh_refresh.state())
+        if not bool(current_state.get("running")):
+            return {
+                "ok": True,
+                "message": "Project is already stopped.",
+                "state": current_state,
+            }
+        result = backend.stop()
+        return {
+            "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
+            "message": str(result.get("message") or "Project stopped."),
+            "state": _project_state(backend.state(), mesh_refresh.state()),
+        }
+
     @app.post("/_internal/runtime/prepare", include_in_schema=False)
     def prepare_runtime(body: dict[str, Any] | None = None):
         try:
@@ -1687,25 +2023,25 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/runtime/start")
+    @app.post("/api/runtime/start", include_in_schema=False)
     def start_runtime(body: dict[str, Any] | None = None):
         try:
-            return _public_runtime_response(backend.start(body), mesh_refresh.state())
+            return _project_start_response(backend, mesh_refresh, body)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/runtime/preview-align")
+    @app.post("/api/runtime/preview-align", include_in_schema=False)
     def preview_runtime_alignment(body: dict[str, Any] | None = None):
         try:
             return _public_runtime_response(backend.preview_align(body), mesh_refresh.state())
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/runtime/stop")
+    @app.post("/api/runtime/stop", include_in_schema=False)
     def stop_runtime():
         return _public_runtime_response(backend.stop(), mesh_refresh.state())
 
-    @app.post("/api/runtime/validate")
+    @app.post("/api/runtime/validate", include_in_schema=False)
     def validate_runtime(body: dict[str, Any] | None = None):
         try:
             return _public_runtime_response(backend.validate(body), mesh_refresh.state())
@@ -1721,7 +2057,7 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/runtime/state")
+    @app.get("/api/runtime/state", include_in_schema=False)
     def runtime_state():
         return _public_runtime_state(backend.state(), mesh_refresh.state())
 
@@ -1740,27 +2076,23 @@ def create_app(
             },
         )
 
-    @app.get("/api/runtime/preview-align/assets/{name}.jpg")
+    @app.get("/api/runtime/preview-align/assets/{name}.jpg", include_in_schema=False)
     def runtime_preview_asset(name: str):
         jpeg = backend.start_preview_jpeg(name)
         if jpeg is None:
             raise HTTPException(status_code=503, detail="start preview frame unavailable")
         return Response(content=jpeg, media_type="image/jpeg")
 
-    @app.get("/api/artifacts/geometry")
+    @app.get("/api/artifacts/geometry", include_in_schema=False)
     def list_geometry_artifacts():
         return {"items": backend.list_geometry_artifacts()}
 
-    @app.get("/api/artifacts/geometry/{name}")
+    @app.get("/api/artifacts/geometry/{name}", include_in_schema=False)
     def get_geometry_artifact(name: str):
         try:
             return backend.get_geometry_artifact(name)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.get("/_internal/runtime/mesh-refresh/state", include_in_schema=False)
-    def mesh_refresh_state():
-        return mesh_refresh.state()
 
     @app.post("/_internal/runtime/mesh-refresh", include_in_schema=False)
     def refresh_runtime_mesh_api(body: dict[str, Any] | None = None):

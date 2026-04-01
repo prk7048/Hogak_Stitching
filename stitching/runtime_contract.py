@@ -176,34 +176,22 @@ SUPPORTED_RELOAD_CONFIG_FIELDS = (
 
 PUBLIC_RUNTIME_STATE_FIELDS = (
     "status",
+    "start_phase",
+    "status_message",
     "running",
-    "last_error",
+    "can_start",
+    "can_stop",
+    "blocker_reason",
+    "output_receive_uri",
     "runtime_active_model",
-    "runtime_active_residual_model",
+    "geometry_residual_model",
     "runtime_active_artifact_path",
     "runtime_artifact_checksum",
     "runtime_launch_ready",
     "runtime_launch_ready_reason",
     "fallback_used",
-    "input_path_mode",
     "gpu_path_mode",
     "gpu_path_ready",
-    "output_path_mode",
-    "output_path_direct",
-    "output_path_bridge",
-    "zero_copy_ready",
-    "zero_copy_reason",
-    "zero_copy_blockers",
-    "production_output_runtime_mode",
-    "production_output_target",
-    "production_output_frames_written",
-    "production_output_frames_dropped",
-    "production_output_written_fps",
-    "stitch_actual_fps",
-    "preview_ready",
-    "preview_left_url",
-    "preview_right_url",
-    "preview_stitched_url",
 )
 
 
@@ -324,28 +312,22 @@ def public_runtime_state_surface(state: dict[str, Any]) -> dict[str, Any]:
 
     surface = {key: state.get(key) for key in PUBLIC_RUNTIME_STATE_FIELDS}
     surface.setdefault("status", "idle")
+    surface["start_phase"] = "" if surface.get("start_phase") is None else str(surface.get("start_phase") or "")
+    surface["status_message"] = "" if surface.get("status_message") is None else str(surface.get("status_message") or "")
     surface["running"] = bool(surface.get("running"))
-    surface["last_error"] = "" if surface.get("last_error") is None else str(surface.get("last_error") or "")
+    surface["can_start"] = bool(surface.get("can_start"))
+    surface["can_stop"] = bool(surface.get("can_stop"))
+    surface["blocker_reason"] = "" if surface.get("blocker_reason") is None else str(surface.get("blocker_reason") or "")
+    surface["output_receive_uri"] = "" if surface.get("output_receive_uri") is None else str(surface.get("output_receive_uri") or "")
     surface["runtime_active_model"] = "" if surface.get("runtime_active_model") is None else str(surface.get("runtime_active_model") or "")
-    surface["runtime_active_residual_model"] = "" if surface.get("runtime_active_residual_model") is None else str(surface.get("runtime_active_residual_model") or "")
+    surface["geometry_residual_model"] = "" if surface.get("geometry_residual_model") is None else str(surface.get("geometry_residual_model") or "")
     surface["runtime_active_artifact_path"] = "" if surface.get("runtime_active_artifact_path") is None else str(surface.get("runtime_active_artifact_path") or "")
     surface["runtime_artifact_checksum"] = "" if surface.get("runtime_artifact_checksum") is None else str(surface.get("runtime_artifact_checksum") or "")
     surface["runtime_launch_ready"] = bool(surface.get("runtime_launch_ready"))
     surface["runtime_launch_ready_reason"] = "" if surface.get("runtime_launch_ready_reason") is None else str(surface.get("runtime_launch_ready_reason") or "")
     surface["fallback_used"] = bool(surface.get("fallback_used"))
-    surface["input_path_mode"] = "" if surface.get("input_path_mode") is None else str(surface.get("input_path_mode") or "")
     surface["gpu_path_mode"] = "" if surface.get("gpu_path_mode") is None else str(surface.get("gpu_path_mode") or "")
     surface["gpu_path_ready"] = bool(surface.get("gpu_path_ready"))
-    surface["output_path_mode"] = "" if surface.get("output_path_mode") is None else str(surface.get("output_path_mode") or "")
-    surface["output_path_direct"] = bool(surface.get("output_path_direct"))
-    surface["output_path_bridge"] = bool(surface.get("output_path_bridge"))
-    surface["zero_copy_ready"] = bool(surface.get("zero_copy_ready"))
-    surface["zero_copy_reason"] = "" if surface.get("zero_copy_reason") is None else str(surface.get("zero_copy_reason") or "")
-    surface["zero_copy_blockers"] = list(surface.get("zero_copy_blockers") or [])
-    surface["preview_ready"] = bool(surface.get("preview_ready"))
-    surface["preview_left_url"] = "" if surface.get("preview_left_url") is None else str(surface.get("preview_left_url") or "")
-    surface["preview_right_url"] = "" if surface.get("preview_right_url") is None else str(surface.get("preview_right_url") or "")
-    surface["preview_stitched_url"] = "" if surface.get("preview_stitched_url") is None else str(surface.get("preview_stitched_url") or "")
     return surface
 
 
