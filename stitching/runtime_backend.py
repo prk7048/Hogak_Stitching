@@ -460,7 +460,11 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     start_phase = str(merged.get("project_start_phase") or "").strip().lower()
     status_message = str(merged.get("project_status_message") or "").strip()
     merged_blocker = str(merged.get("blocker_reason") or "").strip()
-    blocker_reason = config_blocker or merged_blocker or str(merged.get("runtime_launch_ready_reason") or "").strip()
+    needs_mesh_refresh = _project_start_needs_mesh_refresh(merged)
+    runtime_blocker = ""
+    if not needs_mesh_refresh:
+        runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
+    blocker_reason = config_blocker or merged_blocker or runtime_blocker
 
     if running:
         status = "running"
@@ -482,7 +486,11 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     elif status == "error" and not status_message:
         status_message = last_error or "Project start failed."
     elif not status_message:
-        status_message = "Start Project recalculates stitch geometry automatically."
+        status_message = (
+            "Start Project recalculates stitch geometry automatically."
+            if needs_mesh_refresh
+            else "Project is ready to start."
+        )
 
     can_start = not running and status != "starting" and not blocker_reason
     can_stop = running
