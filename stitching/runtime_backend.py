@@ -558,6 +558,21 @@ def _prepare_failure_needs_mesh_refresh(message: str) -> bool:
     )
 
 
+def _is_recoverable_missing_geometry_reason(message: Any) -> bool:
+    normalized = str(message or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        marker in normalized
+        for marker in (
+            "launch-ready runtime geometry artifact",
+            "run mesh-refresh first",
+            "active rigid artifact",
+            "internal fallback model",
+        )
+    )
+
+
 def _configured_rtsp_urls_for_request(request: dict[str, Any] | None = None) -> tuple[str, str]:
     site_config = load_runtime_site_config()
     cameras = site_config.get("cameras", {}) if isinstance(site_config.get("cameras"), dict) else {}
@@ -597,18 +612,12 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     merged_blocker = str(merged.get("blocker_reason") or "").strip()
     needs_mesh_refresh = _project_start_needs_mesh_refresh(merged)
     if needs_mesh_refresh:
-        suppress_tokens = (
-            "launch-ready runtime geometry artifact",
-            "run mesh-refresh first",
-            "active rigid artifact",
-            "default runtime geometry artifact resolves to an internal fallback model",
-        )
-        normalized_last_error = last_error.lower()
-        normalized_merged_blocker = merged_blocker.lower()
-        if any(token in normalized_last_error for token in suppress_tokens):
+        if _is_recoverable_missing_geometry_reason(last_error):
             last_error = ""
-        if any(token in normalized_merged_blocker for token in suppress_tokens):
+        if _is_recoverable_missing_geometry_reason(merged_blocker):
             merged_blocker = ""
+        if _is_recoverable_missing_geometry_reason(merged.get("runtime_launch_ready_reason")):
+            merged["runtime_launch_ready_reason"] = "Start Project will regenerate stitch geometry automatically."
     runtime_blocker = ""
     if not needs_mesh_refresh and not bool(merged.get("runtime_launch_ready")):
         runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
@@ -1873,7 +1882,17 @@ class RuntimeService:
         with self._lock:
             try:
                 self._clear_start_preview_locked()
-                auto_geometry = self._ensure_default_geometry_artifact(request)
+                explicit_artifact_path = self._resolve_requested_artifact_path(request)
+                if explicit_artifact_path is not None:
+                    auto_geometry = self._ensure_default_geometry_artifact(request)
+                else:
+                    auto_geometry = {
+                        "calibrated": False,
+                        "artifact_path": "",
+                        "geometry_model": "",
+                        "launch_ready": False,
+                        "message": "Start Project will regenerate stitch geometry automatically.",
+                    }
                 plan = self._build_plan(request)
                 blockers = self._gpu_only_blockers_for_plan(plan)
                 self._gpu_only_blockers = blockers
