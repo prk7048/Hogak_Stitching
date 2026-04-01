@@ -29,6 +29,49 @@ export type GeometryArtifactSummary = {
 
 export type RuntimeActionResponse = Record<string, unknown>;
 
+export type GeometryBakeoffCandidate = {
+  model: string;
+  global_model: string;
+  residual_model: string;
+  projection_model: string;
+  exposure_model: string;
+  seam_model: string;
+  blend_model: string;
+  crop_model: string;
+  good_match_count: number;
+  inlier_count: number;
+  mean_reprojection_error_px: number;
+  vertical_misalignment_p90_px: number;
+  overlap_luma_diff: number;
+  seam_visibility_score: number;
+  right_edge_scale_drift: number;
+  crop_ratio: number;
+  mesh_max_displacement_px: number;
+  mesh_max_local_scale_drift: number;
+  mesh_max_local_rotation_drift?: number;
+  status: string;
+  fallback_used: boolean;
+  selected: boolean;
+  runtime_artifact_path?: string;
+  stitched_preview_url?: string;
+  stitched_video_url?: string;
+  overlap_crop_url?: string;
+  seam_debug_url?: string;
+  video_duration_sec?: number;
+  video_fps?: number;
+  video_frame_count?: number;
+};
+
+export type GeometryBakeoffState = {
+  status: string;
+  session_id: string;
+  bundle_dir: string;
+  selected_candidate_model: string;
+  promoted_candidate_model: string;
+  runtime_active_artifact_path: string;
+  candidates: GeometryBakeoffCandidate[];
+};
+
 export type CalibrationPair = {
   index: number;
   label: string;
@@ -370,6 +413,69 @@ function normalizeGeometryArtifact(item: unknown, index: number): GeometryArtifa
   };
 }
 
+function normalizeBakeoffCandidate(item: unknown): GeometryBakeoffCandidate | null {
+  if (!isRecord(item)) {
+    return null;
+  }
+  return {
+    model: pickString(item.model),
+    global_model: pickString(item.global_model),
+    residual_model: pickString(item.residual_model),
+    projection_model: pickString(item.projection_model),
+    exposure_model: pickString(item.exposure_model),
+    seam_model: pickString(item.seam_model),
+    blend_model: pickString(item.blend_model),
+    crop_model: pickString(item.crop_model),
+    good_match_count: Number(item.good_match_count ?? 0),
+    inlier_count: Number(item.inlier_count ?? 0),
+    mean_reprojection_error_px: Number(item.mean_reprojection_error_px ?? 0),
+    vertical_misalignment_p90_px: Number(item.vertical_misalignment_p90_px ?? 0),
+    overlap_luma_diff: Number(item.overlap_luma_diff ?? 0),
+    seam_visibility_score: Number(item.seam_visibility_score ?? 0),
+    right_edge_scale_drift: Number(item.right_edge_scale_drift ?? 0),
+    crop_ratio: Number(item.crop_ratio ?? 0),
+    mesh_max_displacement_px: Number(item.mesh_max_displacement_px ?? 0),
+    mesh_max_local_scale_drift: Number(item.mesh_max_local_scale_drift ?? 0),
+    mesh_max_local_rotation_drift: Number(item.mesh_max_local_rotation_drift ?? 0),
+    status: pickString(item.status, "unknown"),
+    fallback_used: Boolean(item.fallback_used),
+    selected: Boolean(item.selected),
+    runtime_artifact_path: pickString(item.runtime_artifact_path),
+    stitched_preview_url: pickString(item.stitched_preview_url),
+    stitched_video_url: pickString(item.stitched_video_url),
+    overlap_crop_url: pickString(item.overlap_crop_url),
+    seam_debug_url: pickString(item.seam_debug_url),
+    video_duration_sec: Number(item.video_duration_sec ?? 0),
+    video_fps: Number(item.video_fps ?? 0),
+    video_frame_count: Number(item.video_frame_count ?? 0),
+  };
+}
+
+function normalizeBakeoffState(item: unknown): GeometryBakeoffState {
+  if (!isRecord(item)) {
+    return {
+      status: "idle",
+      session_id: "",
+      bundle_dir: "",
+      selected_candidate_model: "",
+      promoted_candidate_model: "",
+      runtime_active_artifact_path: "",
+      candidates: [],
+    };
+  }
+  return {
+    status: pickString(item.status, "idle"),
+    session_id: pickString(item.session_id),
+    bundle_dir: pickString(item.bundle_dir),
+    selected_candidate_model: pickString(item.selected_candidate_model),
+    promoted_candidate_model: pickString(item.promoted_candidate_model),
+    runtime_active_artifact_path: pickString(item.runtime_active_artifact_path),
+    candidates: Array.isArray(item.candidates)
+      ? item.candidates.map((candidate) => normalizeBakeoffCandidate(candidate)).filter((candidate): candidate is GeometryBakeoffCandidate => candidate !== null)
+      : [],
+  };
+}
+
 function parseRuntimeEvent(raw: string, fallbackType = "message"): RuntimeEvent {
   const parsed = JSON.parse(raw) as unknown;
   if (!isRecord(parsed)) {
@@ -459,6 +565,30 @@ export async function fetchGeometryArtifact(name: string): Promise<GeometryArtif
   } catch {
     return null;
   }
+}
+
+export async function fetchGeometryBakeoffState(): Promise<GeometryBakeoffState> {
+  try {
+    const payload = await requestJson<unknown>("/api/bakeoff/state");
+    return normalizeBakeoffState(payload);
+  } catch {
+    return normalizeBakeoffState({});
+  }
+}
+
+export async function runGeometryBakeoff(body?: unknown): Promise<GeometryBakeoffState> {
+  const payload = await postJson<unknown>("/api/bakeoff/run", body ?? {});
+  return normalizeBakeoffState(payload);
+}
+
+export async function selectGeometryBakeoffWinner(body: { bundle_dir: string; model: string }): Promise<GeometryBakeoffState> {
+  const payload = await postJson<unknown>("/api/bakeoff/select", body);
+  return normalizeBakeoffState(payload);
+}
+
+export async function promoteGeometryBakeoffWinner(body: { bundle_dir: string; model?: string }): Promise<GeometryBakeoffState> {
+  const payload = await postJson<unknown>("/api/bakeoff/promote", body);
+  return normalizeBakeoffState(payload);
 }
 
 export async function prepareRuntime(body?: unknown): Promise<RuntimeActionResponse> {

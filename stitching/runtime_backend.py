@@ -17,10 +17,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
-from stitching.native_calibration import ensure_runtime_raw_homography
 from stitching.project_defaults import (
-    DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-    DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
 )
 from stitching.runtime_calibration_service import CalibrationService
@@ -30,6 +27,7 @@ from stitching.runtime_geometry_artifact import (
     runtime_geometry_artifact_path,
     runtime_geometry_model,
 )
+from stitching.runtime_geometry_bakeoff import GeometryBakeoffService
 from stitching.runtime_launcher import RuntimeLaunchSpec, query_gpu_direct_status
 from stitching.runtime_site_config import load_runtime_site_config, repo_root, require_configured_rtsp_urls
 from stitching.runtime_supervisor import RuntimeSupervisor
@@ -125,7 +123,7 @@ npm run build</pre>
           <li>런타임 API 는 계속 <code>/api/runtime/*</code> 에서 사용할 수 있습니다.</li>
           <li>캘리브레이션 화면은 React 번들이 준비되면 함께 표시됩니다.</li>
           <li>기존 bridge 는 제거되었고, <code>/legacy/calibration</code> 은 <code>/calibration/start</code> 로 이동합니다.</li>
-          <li>이 브랜치에서는 대시보드의 <code>시작 (Start)</code> 버튼 한 번으로 자동 준비 후 바로 송출됩니다.</li>
+          <li>이 브랜치에서는 Bakeoff winner를 promote한 뒤, 대시보드의 <code>시작 (Start)</code> 버튼으로 정렬 미리보기와 실제 송출을 순서대로 확인합니다.</li>
         </ul>
       </div>
     </main>
@@ -139,6 +137,224 @@ def _compute_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+class _CaptureOptionsEnv:
+    def __init__(self, *, transport: str, timeout_sec: float) -> None:
+        self._transport = str(transport or "tcp").strip() or "tcp"
+        self._timeout_sec = max(1.0, float(timeout_sec))
+        self._previous = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+
+    def __enter__(self) -> None:
+        timeout_us = max(100_000, int(self._timeout_sec * 1_000_000.0))
+        capture_options = [f"rtsp_transport;{self._transport}", f"timeout;{timeout_us}"]
+        if self._transport.lower() == "udp":
+            capture_options.extend(["fifo_size;8388608", "overrun_nonfatal;1"])
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(capture_options)
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._previous is None:
+            os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+        else:
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = self._previous
+
+
+def _encode_jpeg(frame: np.ndarray) -> bytes:
+    ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 88])
+    if not ok:
+        raise ValueError("failed to encode jpeg preview")
+    return encoded.tobytes()
+
+
+def _capture_rtsp_frame(url: str, *, transport: str, timeout_sec: float, warmup_frames: int = 18) -> np.ndarray:
+    if not str(url or "").strip():
+        raise ValueError("rtsp url is empty")
+    with _CaptureOptionsEnv(transport=transport, timeout_sec=timeout_sec):
+        capture = cv2.VideoCapture(url, cv2.CAP_FFMPEG)
+    if not capture.isOpened():
+        raise ValueError(f"cannot open rtsp stream: {url}")
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    latest_frame: np.ndarray | None = None
+    deadline = time.time() + max(2.0, float(timeout_sec))
+    try:
+        while time.time() < deadline and latest_frame is None:
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                latest_frame = frame
+        while time.time() < deadline and latest_frame is not None and warmup_frames > 1:
+            ok, frame = capture.read()
+            if ok and frame is not None:
+                latest_frame = frame
+            warmup_frames -= 1
+    finally:
+        capture.release()
+    if latest_frame is None:
+        raise ValueError(f"failed to capture a frame from {url}")
+    return latest_frame
+
+
+def _artifact_canvas_size(artifact: dict[str, Any]) -> tuple[int, int]:
+    canvas = artifact.get("canvas", {}) if isinstance(artifact.get("canvas"), dict) else {}
+    width = int(canvas.get("width") or 0)
+    height = int(canvas.get("height") or 0)
+    if width > 0 and height > 0:
+        return width, height
+    geometry = artifact.get("geometry", {}) if isinstance(artifact.get("geometry"), dict) else {}
+    output_resolution = geometry.get("output_resolution")
+    if isinstance(output_resolution, (list, tuple)) and len(output_resolution) >= 2:
+        return max(1, int(output_resolution[0])), max(1, int(output_resolution[1]))
+    return 1920, 1080
+
+
+def _build_rectilinear_remap(side_projection: dict[str, Any], *, output_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
+    output_width = max(1, int(output_size[0]))
+    output_height = max(1, int(output_size[1]))
+    src_focal = float(side_projection.get("focal_px") or 1.0)
+    src_center = side_projection.get("center") if isinstance(side_projection.get("center"), (list, tuple)) else [0.0, 0.0]
+    virtual_focal = float(side_projection.get("virtual_focal_px") or side_projection.get("focal_px") or 1.0)
+    virtual_center = side_projection.get("virtual_center") if isinstance(side_projection.get("virtual_center"), (list, tuple)) else [output_width / 2.0, output_height / 2.0]
+    rotation_raw = side_projection.get("virtual_to_source_rotation")
+    rotation = np.eye(3, dtype=np.float64)
+    if isinstance(rotation_raw, (list, tuple, np.ndarray)):
+        try:
+            rotation = np.asarray(rotation_raw, dtype=np.float64).reshape(3, 3)
+        except Exception:
+            rotation = np.eye(3, dtype=np.float64)
+
+    grid_x, grid_y = np.meshgrid(
+        np.arange(output_width, dtype=np.float64),
+        np.arange(output_height, dtype=np.float64),
+    )
+    virtual_dirs = np.stack(
+        [
+            (grid_x - float(virtual_center[0])) / max(1.0, float(virtual_focal)),
+            (grid_y - float(virtual_center[1])) / max(1.0, float(virtual_focal)),
+            np.ones((output_height, output_width), dtype=np.float64),
+        ],
+        axis=-1,
+    )
+    source_dirs = np.einsum("ij,hwj->hwi", rotation, virtual_dirs)
+    z = source_dirs[..., 2]
+    valid = np.isfinite(z) & (z > 1e-6)
+    map_x = np.full((output_height, output_width), -1.0, dtype=np.float32)
+    map_y = np.full((output_height, output_width), -1.0, dtype=np.float32)
+    valid_x = (float(src_focal) * source_dirs[..., 0] / z) + float(src_center[0])
+    valid_y = (float(src_focal) * source_dirs[..., 1] / z) + float(src_center[1])
+    map_x[valid] = valid_x[valid].astype(np.float32)
+    map_y[valid] = valid_y[valid].astype(np.float32)
+    return map_x, map_y
+
+
+def _apply_alignment_transform(frame: np.ndarray, alignment: dict[str, Any]) -> np.ndarray:
+    matrix = alignment.get("matrix")
+    if matrix is None:
+        return frame
+    try:
+        array = np.asarray(matrix, dtype=np.float64)
+    except Exception:
+        return frame
+    output_size = (int(frame.shape[1]), int(frame.shape[0]))
+    if array.size == 6:
+        affine = array.reshape(2, 3)
+        return cv2.warpAffine(
+            frame,
+            affine.astype(np.float32),
+            output_size,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+    if array.size == 9:
+        homography = array.reshape(3, 3)
+        return cv2.warpPerspective(
+            frame,
+            homography.astype(np.float32),
+            output_size,
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=(0, 0, 0),
+        )
+    return frame
+
+
+def _compose_feather_preview(left_frame: np.ndarray, right_frame: np.ndarray) -> np.ndarray:
+    left = np.asarray(left_frame, dtype=np.float32)
+    right = np.asarray(right_frame, dtype=np.float32)
+    output = np.zeros_like(left)
+    left_mask = np.any(left_frame > 0, axis=2)
+    right_mask = np.any(right_frame > 0, axis=2)
+    overlap = left_mask & right_mask
+
+    output[left_mask & ~right_mask] = left[left_mask & ~right_mask]
+    output[right_mask & ~left_mask] = right[right_mask & ~left_mask]
+
+    if np.any(overlap):
+        overlap_columns = np.where(np.any(overlap, axis=0))[0]
+        if overlap_columns.size >= 2:
+            start = int(overlap_columns[0])
+            end = int(overlap_columns[-1])
+            width = max(1, end - start)
+            weights = np.zeros(left.shape[:2], dtype=np.float32)
+            band = np.clip((np.arange(left.shape[1], dtype=np.float32) - start) / float(width), 0.0, 1.0)
+            weights[:, :] = band[None, :]
+            weights = np.where(overlap, weights, 0.0)
+        else:
+            weights = np.where(overlap, 0.5, 0.0).astype(np.float32)
+        output[overlap] = (
+            left[overlap] * (1.0 - weights[overlap, None]) + right[overlap] * weights[overlap, None]
+        )
+    return np.clip(output, 0.0, 255.0).astype(np.uint8)
+
+
+def _render_virtual_alignment_previews(
+    artifact: dict[str, Any],
+    *,
+    left_frame: np.ndarray,
+    right_frame: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if runtime_geometry_model(artifact) != "virtual-center-rectilinear":
+        raise ValueError("start preview requires a virtual-center-rectilinear geometry artifact")
+
+    projection = artifact.get("projection", {}) if isinstance(artifact.get("projection"), dict) else {}
+    left_projection = projection.get("left", {}) if isinstance(projection.get("left"), dict) else {}
+    right_projection = projection.get("right", {}) if isinstance(projection.get("right"), dict) else {}
+    alignment = artifact.get("alignment", {}) if isinstance(artifact.get("alignment"), dict) else {}
+    output_size = _artifact_canvas_size(artifact)
+
+    expected_left_resolution = left_projection.get("input_resolution")
+    if isinstance(expected_left_resolution, (list, tuple)) and len(expected_left_resolution) >= 2:
+        target_left = (max(1, int(expected_left_resolution[0])), max(1, int(expected_left_resolution[1])))
+        if (left_frame.shape[1], left_frame.shape[0]) != target_left:
+            left_frame = cv2.resize(left_frame, target_left, interpolation=cv2.INTER_LINEAR)
+
+    expected_right_resolution = right_projection.get("input_resolution")
+    if isinstance(expected_right_resolution, (list, tuple)) and len(expected_right_resolution) >= 2:
+        target_right = (max(1, int(expected_right_resolution[0])), max(1, int(expected_right_resolution[1])))
+        if (right_frame.shape[1], right_frame.shape[0]) != target_right:
+            right_frame = cv2.resize(right_frame, target_right, interpolation=cv2.INTER_LINEAR)
+
+    left_map_x, left_map_y = _build_rectilinear_remap(left_projection, output_size=output_size)
+    right_map_x, right_map_y = _build_rectilinear_remap(right_projection, output_size=output_size)
+
+    left_projected = cv2.remap(
+        left_frame,
+        left_map_x,
+        left_map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    right_projected = cv2.remap(
+        right_frame,
+        right_map_x,
+        right_map_y,
+        interpolation=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
+    right_projected = _apply_alignment_transform(right_projected, alignment)
+    stitched = _compose_feather_preview(left_projected, right_projected)
+    return left_projected, right_projected, stitched
 
 
 class PreviewWorker:
@@ -235,6 +451,10 @@ class RuntimeService:
         self._last_error = ""
         self._last_status = "idle"
         self._gpu_only_blockers: list[str] = []
+        self._start_preview_pending_confirmation = False
+        self._start_preview_left_jpeg: bytes | None = None
+        self._start_preview_right_jpeg: bytes | None = None
+        self._start_preview_stitched_jpeg: bytes | None = None
 
     def _record_event(self, event_type: str, payload: dict[str, Any] | None = None, *, seq: int = 0) -> dict[str, Any]:
         record = {
@@ -264,6 +484,44 @@ class RuntimeService:
             return text
         return f"udp://@:{port}"
 
+    def _clear_start_preview_locked(self) -> None:
+        self._start_preview_pending_confirmation = False
+        self._start_preview_left_jpeg = None
+        self._start_preview_right_jpeg = None
+        self._start_preview_stitched_jpeg = None
+
+    def _start_preview_url(self, name: str) -> str:
+        return f"/api/runtime/start-preview/{name}.jpg"
+
+    def _render_start_preview_locked(self, plan: RuntimePlan) -> None:
+        artifact = load_runtime_geometry_artifact(plan.geometry_artifact_path)
+        left_frame = _capture_rtsp_frame(
+            plan.launch_spec.left_rtsp,
+            transport=plan.launch_spec.transport,
+            timeout_sec=plan.launch_spec.timeout_sec,
+        )
+        right_frame = _capture_rtsp_frame(
+            plan.launch_spec.right_rtsp,
+            transport=plan.launch_spec.transport,
+            timeout_sec=plan.launch_spec.timeout_sec,
+        )
+        left_preview, right_preview, stitched_preview = _render_virtual_alignment_previews(
+            artifact,
+            left_frame=left_frame,
+            right_frame=right_frame,
+        )
+        self._start_preview_left_jpeg = _encode_jpeg(left_preview)
+        self._start_preview_right_jpeg = _encode_jpeg(right_preview)
+        self._start_preview_stitched_jpeg = _encode_jpeg(stitched_preview)
+        self._start_preview_pending_confirmation = True
+        self._record_event(
+            "status",
+            {
+                "status": "start_preview_ready",
+                "geometry_artifact_path": str(plan.geometry_artifact_path),
+            },
+        )
+
     def _ensure_default_geometry_artifact(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         request = request or {}
         explicit_artifact_path = self._resolve_requested_artifact_path(request)
@@ -281,26 +539,7 @@ class RuntimeService:
             }
 
         site_config = load_runtime_site_config()
-        cameras = site_config.get("cameras", {})
         paths = site_config.get("paths", {})
-        runtime = site_config.get("runtime", {})
-        request_inputs = request.get("inputs") if isinstance(request.get("inputs"), dict) else {}
-        request_runtime = request.get("runtime") if isinstance(request.get("runtime"), dict) else {}
-
-        left_rtsp = str(
-            request.get("left_rtsp")
-            or ((request_inputs.get("left") or {}).get("url") if isinstance(request_inputs.get("left"), dict) else "")
-            or cameras.get("left_rtsp")
-            or ""
-        ).strip()
-        right_rtsp = str(
-            request.get("right_rtsp")
-            or ((request_inputs.get("right") or {}).get("url") if isinstance(request_inputs.get("right"), dict) else "")
-            or cameras.get("right_rtsp")
-            or ""
-        ).strip()
-        require_configured_rtsp_urls(left_rtsp, right_rtsp, context="runtime backend")
-
         homography_file = Path(
             str(request.get("homography_file") or paths.get("homography_file") or DEFAULT_NATIVE_HOMOGRAPHY_PATH)
         ).expanduser()
@@ -318,64 +557,10 @@ class RuntimeService:
                     "message": "existing launch-ready geometry artifact reused",
                 }
 
-        debug_dir = Path(str(paths.get("calibration_debug_dir") or DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR)).expanduser()
-        inliers_output_path = Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE).expanduser()
-        rtsp_transport = str(
-            request_runtime.get("rtsp_transport")
-            or runtime.get("rtsp_transport")
-            or (request_inputs.get("left") or {}).get("transport")
-            or "tcp"
+        raise ValueError(
+            "launch-ready runtime geometry artifact가 없습니다. "
+            "Geometry Bakeoff를 실행하고 winner를 freeze/promote 한 뒤 다시 시도하세요."
         )
-        rtsp_timeout_sec = float(
-            request_runtime.get("rtsp_timeout_sec")
-            or runtime.get("rtsp_timeout_sec")
-            or (request_inputs.get("left") or {}).get("timeout_sec")
-            or 10.0
-        )
-
-        updated_reference, _backup_path, calibration_result, messages = ensure_runtime_raw_homography(
-            left_rtsp=left_rtsp,
-            right_rtsp=right_rtsp,
-            output_path=homography_file,
-            inliers_output_path=inliers_output_path,
-            debug_dir=debug_dir,
-            rtsp_transport=rtsp_transport,
-            rtsp_timeout_sec=rtsp_timeout_sec,
-            warmup_frames=45,
-            process_scale=1.0,
-            backup_existing=True,
-        )
-        if not geometry_artifact.exists():
-            raise ValueError(f"automatic calibration finished but geometry artifact is missing: {geometry_artifact}")
-
-        artifact = load_runtime_geometry_artifact(geometry_artifact)
-        rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
-        if not bool(rollout["launch_ready"]):
-            raise ValueError(str(rollout["launch_ready_reason"] or "calibrated geometry artifact is not launch-ready"))
-        message_parts = [part for part in messages if str(part).strip()]
-        if calibration_result is not None:
-            message_parts.append(
-                "automatic calibration saved "
-                f"{rollout['geometry_model']} (matches={int(calibration_result.get('matches_count') or 0)}, "
-                f"inliers={int(calibration_result.get('inliers_count') or 0)})"
-            )
-        elif updated_reference:
-            message_parts.append(f"geometry prepared with reference={updated_reference}")
-        self._record_event(
-            "status",
-            {
-                "status": "auto_calibrated",
-                "geometry_artifact_path": str(geometry_artifact),
-                "geometry_model": rollout["geometry_model"],
-            },
-        )
-        return {
-            "calibrated": True,
-            "artifact_path": str(geometry_artifact),
-            "geometry_model": rollout["geometry_model"],
-            "launch_ready": True,
-            "message": " / ".join(message_parts) if message_parts else "automatic calibration completed",
-        }
 
     def _build_plan(self, request: dict[str, Any] | None = None) -> RuntimePlan:
         site_config = load_runtime_site_config()
@@ -850,6 +1035,18 @@ class RuntimeService:
             "gpu_only_mode": True,
             "gpu_only_ready": len(self._gpu_only_blockers) == 0,
             "gpu_only_blockers": list(self._gpu_only_blockers),
+            "start_preview_ready": any(
+                item is not None
+                for item in (
+                    self._start_preview_left_jpeg,
+                    self._start_preview_right_jpeg,
+                    self._start_preview_stitched_jpeg,
+                )
+            ),
+            "start_preview_pending_confirmation": self._start_preview_pending_confirmation,
+            "start_preview_left_url": self._start_preview_url("left") if self._start_preview_left_jpeg is not None else "",
+            "start_preview_right_url": self._start_preview_url("right") if self._start_preview_right_jpeg is not None else "",
+            "start_preview_stitched_url": self._start_preview_url("stitched") if self._start_preview_stitched_jpeg is not None else "",
         }
         snapshot.update(self._flatten_truth_metrics(self._latest_metrics))
         if self._latest_validation:
@@ -1068,6 +1265,7 @@ class RuntimeService:
     def prepare(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         with self._lock:
             try:
+                self._clear_start_preview_locked()
                 auto_geometry = self._ensure_default_geometry_artifact(request)
                 plan = self._build_plan(request)
                 blockers = self._gpu_only_blockers_for_plan(plan)
@@ -1133,6 +1331,27 @@ class RuntimeService:
                 self._last_error = f"start failed: {' / '.join(blockers)}"
                 self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
                 raise ValueError(" / ".join(blockers))
+            transmit_receive_uri = self._receive_uri_from_target(plan.summary.get("transmit_target", ""))
+            if not self._start_preview_pending_confirmation:
+                self._render_start_preview_locked(plan)
+                self._last_status = "preview_ready"
+                self._last_error = ""
+                preview_message = "Virtual camera alignment preview is ready. Press Start again to launch the stitched runtime."
+                if auto_prepare_result is not None:
+                    prepare_message = str(auto_prepare_result.get("message") or "").strip()
+                    if prepare_message:
+                        preview_message = f"{prepare_message} / {preview_message}"
+                if transmit_receive_uri:
+                    preview_message = f"{preview_message} External player: {transmit_receive_uri}"
+                return {
+                    "ok": True,
+                    "preview_ready": True,
+                    "awaiting_start_confirmation": True,
+                    "auto_prepared": auto_prepare_result is not None,
+                    "auto_calibrated": bool(auto_prepare_result and auto_prepare_result.get("auto_calibrated")),
+                    "message": preview_message,
+                    "state": self._snapshot_locked(),
+                }
             self._supervisor = RuntimeSupervisor.launch(plan.launch_spec)
             try:
                 hello = self._supervisor.wait_for_hello(timeout_sec=5.0)
@@ -1151,6 +1370,7 @@ class RuntimeService:
                 self._preview_worker = PreviewWorker(probe_target)
                 self._preview_worker.start()
             self._start_event_pump()
+            self._start_preview_pending_confirmation = False
             self._last_status = "running"
             self._last_error = ""
             self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid})
@@ -1158,6 +1378,7 @@ class RuntimeService:
             start_message = (
                 f"런타임을 시작했습니다. 외부 플레이어에서 {transmit_receive_uri or plan.summary.get('transmit_target', '')} 를 여세요."
             )
+            start_message = f"Runtime started. Open {transmit_receive_uri or plan.summary.get('transmit_target', '')} in an external player."
             if auto_prepare_result is not None:
                 prepare_message = str(auto_prepare_result.get("message") or "").strip()
                 if prepare_message:
@@ -1177,6 +1398,7 @@ class RuntimeService:
                 raise RuntimeError("runtime is not running")
             self._supervisor.client.reload_config(normalized)
             self._prepared_plan = self._build_plan(normalized)
+            self._clear_start_preview_locked()
             self._last_status = "reloaded"
             self._record_event(
                 "status",
@@ -1190,6 +1412,7 @@ class RuntimeService:
     def stop(self) -> dict[str, Any]:
         with self._lock:
             self._event_pump_stop.set()
+            self._clear_start_preview_locked()
             if self._preview_worker is not None:
                 self._preview_worker.stop()
                 self._preview_worker = None
@@ -1208,7 +1431,7 @@ class RuntimeService:
                 self._event_pump_thread = None
             self._last_status = "stopped"
             self._record_event("stopped", {"status": "stopped"})
-            return {"ok": True, "state": self._snapshot_locked()}
+            return {"ok": True, "message": "Runtime stopped.", "state": self._snapshot_locked()}
 
     def validate(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
         strict_fresh = False
@@ -1274,17 +1497,33 @@ class RuntimeService:
                 return None
             return self._preview_worker.latest_jpeg
 
+    def start_preview_jpeg(self, name: str) -> bytes | None:
+        with self._lock:
+            normalized = str(name or "").strip().lower()
+            if normalized == "left":
+                return self._start_preview_left_jpeg
+            if normalized == "right":
+                return self._start_preview_right_jpeg
+            if normalized == "stitched":
+                return self._start_preview_stitched_jpeg
+            return None
+
     def list_geometry_artifacts(self) -> list[dict[str, Any]]:
         artifacts: list[dict[str, Any]] = []
         data_dir = repo_root() / "data"
         if not data_dir.exists():
             return artifacts
+        active_artifact = ""
+        if self._prepared_plan is not None:
+            active_artifact = str(self._prepared_plan.geometry_artifact_path)
         for path in sorted(data_dir.glob("*.json")):
             try:
                 artifact = load_runtime_geometry_artifact(path)
             except Exception:
                 continue
             rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            if not bool(rollout["geometry_operator_visible"]) and str(path) != active_artifact:
+                continue
             artifacts.append(
                 {
                     "name": path.name,
@@ -1342,13 +1581,16 @@ def create_app(
     *,
     service: RuntimeService | None = None,
     calibration_service: CalibrationService | None = None,
+    geometry_bakeoff_service: GeometryBakeoffService | None = None,
     frontend_dist_dir: str | Path | None = None,
 ) -> FastAPI:
     backend = service or RuntimeService()
     calibration = calibration_service or CalibrationService()
+    geometry_bakeoff = geometry_bakeoff_service or GeometryBakeoffService()
     app = FastAPI(title="Hogak Runtime API", version="2")
     app.state.runtime_service = backend
     app.state.calibration_service = calibration
+    app.state.geometry_bakeoff_service = geometry_bakeoff
 
     @app.post("/api/runtime/prepare")
     def prepare_runtime(body: dict[str, Any] | None = None):
@@ -1406,6 +1648,13 @@ def create_app(
             raise HTTPException(status_code=503, detail="preview frame unavailable")
         return Response(content=jpeg, media_type="image/jpeg")
 
+    @app.get("/api/runtime/start-preview/{name}.jpg")
+    def runtime_start_preview(name: str):
+        jpeg = backend.start_preview_jpeg(name)
+        if jpeg is None:
+            raise HTTPException(status_code=503, detail="start preview frame unavailable")
+        return Response(content=jpeg, media_type="image/jpeg")
+
     @app.get("/api/artifacts/geometry")
     def list_geometry_artifacts():
         return {"items": backend.list_geometry_artifacts()}
@@ -1416,6 +1665,45 @@ def create_app(
             return backend.get_geometry_artifact(name)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.get("/api/bakeoff/state")
+    def geometry_bakeoff_state():
+        return geometry_bakeoff.state()
+
+    @app.post("/api/bakeoff/run")
+    def run_geometry_bakeoff_api(body: dict[str, Any] | None = None):
+        try:
+            return geometry_bakeoff.run(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/bakeoff/select")
+    def select_geometry_bakeoff_api(body: dict[str, Any]):
+        try:
+            return geometry_bakeoff.select(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/bakeoff/promote")
+    def promote_geometry_bakeoff_api(body: dict[str, Any]):
+        try:
+            return geometry_bakeoff.promote(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/api/bakeoff/assets/{session_id}/{candidate_model}/{filename}")
+    def geometry_bakeoff_asset(session_id: str, candidate_model: str, filename: str):
+        try:
+            content = geometry_bakeoff.read_asset(session_id, candidate_model, filename)
+        except FileNotFoundError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        suffix = Path(filename).suffix.lower()
+        media_type = "image/png"
+        if suffix in {".jpg", ".jpeg"}:
+            media_type = "image/jpeg"
+        elif suffix == ".mp4":
+            media_type = "video/mp4"
+        return Response(content=content, media_type=media_type)
 
     @app.post("/api/calibration/session/start")
     def start_calibration_session(body: dict[str, Any] | None = None):

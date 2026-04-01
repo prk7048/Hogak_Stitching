@@ -9,24 +9,25 @@ export function displayRuntimeStatus(value: unknown): string {
       return "실행 중";
     case "prepared":
       return "준비됨";
+    case "preview_ready":
+    case "start_preview_ready":
+      return "정렬 미리보기 준비됨";
     case "idle":
-      return "대기";
+      return "대기 중";
     case "already_running":
       return "이미 실행 중";
     case "reloaded":
-      return "다시 불러옴";
+      return "재적용됨";
     case "backend unavailable":
       return "백엔드 연결 안 됨";
     case "gpu_only_blocked":
       return "GPU-only 차단";
     case "gpu_only_input_unavailable":
-      return "GPU 입력 경로 차단";
+      return "GPU 입력 불가";
     case "gpu_only_output_blocked":
-      return "GPU 출력 경로 차단";
+      return "GPU 출력 불가";
     case "gpu_only_path_unavailable":
-      return "GPU stitch 경로 차단";
-    case "unknown":
-      return "알 수 없음";
+      return "GPU 경로 불가";
     default:
       return text(value);
   }
@@ -35,11 +36,19 @@ export function displayRuntimeStatus(value: unknown): string {
 export function displayGeometryMode(value: unknown): string {
   switch (String(value ?? "").trim()) {
     case "planar-homography":
-      return "평면 호모그래피 (Planar)";
+      return "Planar Homography";
     case "cylindrical-affine":
-      return "원통 투영 + Affine (Cylindrical)";
-    case "unknown":
-      return "알 수 없음";
+      return "Cylindrical Affine";
+    case "virtual-center-rectilinear":
+      return "Virtual-Center Rectilinear";
+    case "left-anchor-homography":
+      return "Left-Anchor Homography";
+    case "left-anchor-homography-mesh":
+      return "Left-Anchor Homography + Mesh";
+    case "virtual-center-rectilinear-rigid":
+      return "Virtual-Center Rectilinear + Rigid";
+    case "virtual-center-rectilinear-mesh":
+      return "Virtual-Center Rectilinear + Mesh";
     default:
       return text(value);
   }
@@ -48,12 +57,13 @@ export function displayGeometryMode(value: unknown): string {
 export function displaySeamMode(value: unknown): string {
   switch (String(value ?? "").trim()) {
     case "dynamic-path":
-      return "동적 경계선";
+      return "동적 seam 경로";
+    case "min-cost-seam":
+      return "Min-cost seam";
     case "seam_feather":
     case "feather":
-      return "Feather 블렌드";
-    case "unknown":
-      return "알 수 없음";
+    case "narrow-seam-feather":
+      return "좁은 seam feather";
     default:
       return text(value);
   }
@@ -62,12 +72,11 @@ export function displaySeamMode(value: unknown): string {
 export function displayExposureMode(value: unknown): string {
   switch (String(value ?? "").trim()) {
     case "gain-bias":
-      return "Gain/Bias 보정";
+    case "gain-bias-luma":
+      return "Gain/Bias";
     case "none":
     case "off":
-      return "사용 안 함";
-    case "unknown":
-      return "알 수 없음";
+      return "꺼짐";
     default:
       return text(value);
   }
@@ -80,15 +89,13 @@ export function displayOutputRuntimeMode(value: unknown): string {
     case "gpu-direct":
       return "GPU-Direct";
     case "native-nvenc-direct":
-      return "NVENC 직접 경로";
+      return "NVENC Direct";
     case "native-nvenc-bridge":
-      return "NVENC 브리지";
+      return "NVENC Bridge";
     case "native-nvenc-unavailable":
       return "NVENC 사용 불가";
     case "none":
-      return "사용 안 함";
-    case "unknown":
-      return "알 수 없음";
+      return "비활성";
     default:
       return text(value);
   }
@@ -124,7 +131,7 @@ export function displayEventType(value: unknown): string {
     case "status":
       return "상태";
     case "hello":
-      return "시작 알림";
+      return "런타임 시작";
     case "stopped":
       return "중지";
     case "error":
@@ -141,10 +148,13 @@ export function displayCalibrationStep(value: unknown): string {
     case "start":
       return "시작";
     case "assisted":
+    case "assisted-calibration":
       return "점 선택";
     case "review":
     case "calibration-review":
       return "검토";
+    case "geometry-compare":
+      return "Geometry Bakeoff";
     case "stitch-review":
       return "최종 확인";
     default:

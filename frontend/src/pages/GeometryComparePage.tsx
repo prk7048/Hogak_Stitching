@@ -1,65 +1,148 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { MetricCard } from "../components/MetricCard";
 import { PageHeader } from "../components/PageHeader";
-import { describeRuntimeActionResult, prepareRuntime, validateRuntime } from "../lib/api";
-import { displayExposureMode, displayGeometryMode, displaySeamMode } from "../lib/display";
-import { useRuntimeFeed } from "../lib/useRuntimeFeed";
+import {
+  apiUrl,
+  fetchGeometryBakeoffState,
+  promoteGeometryBakeoffWinner,
+  runGeometryBakeoff,
+  selectGeometryBakeoffWinner,
+  type GeometryBakeoffCandidate,
+  type GeometryBakeoffState,
+} from "../lib/api";
 
-function text(value: unknown, fallback = "-"): string {
-  const normalized = String(value ?? "").trim();
-  return normalized || fallback;
+function metric(value: number, digits = 3): string {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+  return Number(value).toFixed(digits);
+}
+
+function candidatePreview(url?: string): string {
+  return url ? apiUrl(url) : "";
+}
+
+function emptyState(): GeometryBakeoffState {
+  return {
+    status: "idle",
+    session_id: "",
+    bundle_dir: "",
+    selected_candidate_model: "",
+    promoted_candidate_model: "",
+    runtime_active_artifact_path: "",
+    candidates: [],
+  };
+}
+
+function CandidateCard({
+  candidate,
+  busy,
+  onSelect,
+  onPromote,
+}: {
+  candidate: GeometryBakeoffCandidate;
+  busy: boolean;
+  onSelect: (model: string) => void;
+  onPromote: (model: string) => void;
+}) {
+  return (
+    <section className="panel wide">
+      <div className="panel-title">{candidate.model}</div>
+      <div className="panel-subtitle">
+        global={candidate.global_model} / residual={candidate.residual_model} / projection={candidate.projection_model}
+      </div>
+      <div className="metric-grid metric-grid-compact">
+        <MetricCard label="Reproj" value={metric(candidate.mean_reprojection_error_px)} detail="mean px" tone="accent" />
+        <MetricCard label="Vertical p90" value={metric(candidate.vertical_misalignment_p90_px)} detail="px" />
+        <MetricCard label="Right-edge drift" value={metric(candidate.right_edge_scale_drift)} detail="1.0 is better" />
+        <MetricCard label="Seam visibility" value={metric(candidate.seam_visibility_score)} detail={candidate.status} tone={candidate.fallback_used ? "warn" : "calm"} />
+      </div>
+      <div className="metric-grid metric-grid-compact">
+        <MetricCard label="Overlap luma" value={metric(candidate.overlap_luma_diff)} detail="lower is better" />
+        <MetricCard label="Crop ratio" value={metric(candidate.crop_ratio)} detail="cropped/full" />
+        <MetricCard label="Mesh disp" value={metric(candidate.mesh_max_displacement_px)} detail="px" />
+        <MetricCard label="Mesh scale drift" value={metric(candidate.mesh_max_local_scale_drift)} detail={candidate.fallback_used ? "degraded" : "mesh active"} tone={candidate.fallback_used ? "warn" : "calm"} />
+      </div>
+      <div className="panel-grid calibration-grid">
+        <section className="panel">
+          <div className="panel-title">1-minute video</div>
+          {candidate.stitched_video_url ? (
+            <video
+              className="calibration-image"
+              controls
+              muted
+              loop
+              playsInline
+              preload="metadata"
+              src={candidatePreview(candidate.stitched_video_url)}
+            />
+          ) : (
+            <div className="muted">No comparison video yet</div>
+          )}
+          <div className="muted" style={{ marginTop: "8px" }}>
+            {candidate.video_duration_sec ? `${metric(candidate.video_duration_sec, 1)}s / ${metric(candidate.video_fps ?? 0, 0)} fps` : "video unavailable"}
+          </div>
+        </section>
+        <section className="panel">
+          <div className="panel-title">Stitched preview</div>
+          {candidate.stitched_preview_url ? <img className="calibration-image" alt={`${candidate.model} stitched preview`} src={candidatePreview(candidate.stitched_preview_url)} /> : <div className="muted">No preview</div>}
+        </section>
+        <section className="panel">
+          <div className="panel-title">Overlap crop</div>
+          {candidate.overlap_crop_url ? <img className="calibration-image" alt={`${candidate.model} overlap crop`} src={candidatePreview(candidate.overlap_crop_url)} /> : <div className="muted">No overlap crop</div>}
+        </section>
+      </div>
+      <div className="panel-grid">
+        <section className="panel">
+          <div className="panel-title">Seam debug</div>
+          {candidate.seam_debug_url ? <img className="calibration-image" alt={`${candidate.model} seam debug`} src={candidatePreview(candidate.seam_debug_url)} /> : <div className="muted">No seam debug</div>}
+        </section>
+        <section className="panel">
+          <div className="panel-title">Actions</div>
+          <div className="action-output">
+            <div>Selected: {candidate.selected ? "yes" : "no"}</div>
+            <div>Runtime artifact: {candidate.runtime_artifact_path || "not launch-ready yet"}</div>
+            <div>Exposure: {candidate.exposure_model}</div>
+            <div>Blend: {candidate.blend_model}</div>
+            <div>Crop: {candidate.crop_model}</div>
+          </div>
+          <div className="operator-actions operator-actions-inline">
+            <button className="action-button secondary" disabled={busy} onClick={() => onSelect(candidate.model)} type="button">
+              Winner freeze
+            </button>
+            <button className="action-button" disabled={busy || !candidate.runtime_artifact_path} onClick={() => onPromote(candidate.model)} type="button">
+              Runtime promote
+            </button>
+          </div>
+        </section>
+      </div>
+    </section>
+  );
 }
 
 export function GeometryComparePage() {
-  const { state, artifacts, refreshRuntime } = useRuntimeFeed();
+  const [state, setState] = useState<GeometryBakeoffState>(emptyState());
   const [busyAction, setBusyAction] = useState<string | null>(null);
-  const [selectedArtifactPath, setSelectedArtifactPath] = useState("");
   const [actionSummary, setActionSummary] = useState(
-    "Select a launch-ready virtual-center-rectilinear artifact, then prepare or validate it.",
+    "Run the offline bakeoff to generate the four auto-only geometry candidates. The active runtime artifact stays unchanged until a winner is promoted.",
   );
 
-  const visibleArtifacts = useMemo(
-    () => artifacts.filter((artifact) => artifact.operator_visible !== false),
-    [artifacts],
-  );
-  const rollbackArtifacts = useMemo(
-    () => artifacts.filter((artifact) => Boolean(artifact.fallback_only) || Boolean(artifact.compat_only)),
-    [artifacts],
-  );
+  const refresh = async () => {
+    setState(await fetchGeometryBakeoffState());
+  };
 
   useEffect(() => {
-    const hasSelectedVisibleArtifact = visibleArtifacts.some(
-      (artifact) => artifact.path === selectedArtifactPath || artifact.name === selectedArtifactPath,
-    );
-    if (!hasSelectedVisibleArtifact) {
-      setSelectedArtifactPath(visibleArtifacts[0]?.path || visibleArtifacts[0]?.name || "");
-    }
-  }, [selectedArtifactPath, visibleArtifacts]);
+    void refresh();
+  }, []);
 
-  const selectedArtifact =
-    visibleArtifacts.find(
-      (artifact) => artifact.path === selectedArtifactPath || artifact.name === selectedArtifactPath,
-    ) ?? visibleArtifacts[0];
-  const activeArtifactPath = text(
-    state.geometry_artifact_path ??
-      ((state.prepared_plan as Record<string, unknown> | undefined)?.geometry_artifact_path as string | undefined),
-    "",
-  );
-  const activeArtifact =
-    artifacts.find((artifact) => artifact.path === activeArtifactPath || artifact.name === activeArtifactPath) ?? null;
-  const activeModel = text(state.geometry_artifact_model ?? state.geometry_mode, "unknown");
-  const rolloutStatus = text(state.geometry_rollout_status ?? activeArtifact?.geometry_rollout_status, "unknown");
-  const launchReadyReason = text(state.launch_ready_reason ?? activeArtifact?.launch_ready_reason, "-");
-  const activeFallbackOnly = Boolean(state.geometry_fallback_only ?? activeArtifact?.fallback_only);
-
-  const runAction = async (label: string, action: () => Promise<unknown>) => {
+  const runAction = async (label: string, action: () => Promise<GeometryBakeoffState>) => {
     setBusyAction(label);
     setActionSummary(`${label} in progress...`);
     try {
-      const result = await action();
-      setActionSummary(`${label}: ${describeRuntimeActionResult(result)}`);
-      await refreshRuntime();
+      const nextState = await action();
+      setState(nextState);
+      setActionSummary(`${label} completed.`);
     } catch (error) {
       setActionSummary(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
@@ -70,139 +153,83 @@ export function GeometryComparePage() {
   return (
     <section className="page">
       <PageHeader
-        eyebrow="Diagnostics / Geometry"
-        title="Default Geometry Candidate"
-        description="The operator surface only promotes virtual-center-rectilinear artifacts. Legacy artifacts remain available for explicit rollback by artifact path."
+        eyebrow="Calibration / Bakeoff"
+        title="Offline Geometry Bakeoff"
+        description="수동 점 선택 없이 auto-only bakeoff로 4개 후보를 같은 rectified clip에서 비교합니다. winner를 freeze/promote 하기 전까지 runtime artifact는 바뀌지 않습니다."
         status={
           <>
-            <strong>{selectedArtifact?.name ?? "No launch-ready virtual-center-rectilinear artifact found."}</strong>
+            <strong>{state.session_id ? `Session ${state.session_id}` : "No bakeoff bundle yet."}</strong>
             <span>{actionSummary}</span>
           </>
         }
         actions={
           <>
-            <label className="field-group field-group-compact">
-              <span className="field-label">Candidate artifact</span>
-              <select
-                className="field-input"
-                value={selectedArtifactPath}
-                onChange={(event) => setSelectedArtifactPath(event.target.value)}
-              >
-                {visibleArtifacts.length === 0 ? (
-                  <option value="">No operator-visible candidate artifacts</option>
-                ) : null}
-                {visibleArtifacts.map((artifact) => (
-                  <option key={artifact.path || artifact.name} value={artifact.path || artifact.name}>
-                    {artifact.name}
-                  </option>
-                ))}
-              </select>
-            </label>
             <button
               className="action-button"
-              disabled={busyAction !== null || !selectedArtifact}
-              onClick={() =>
-                void runAction("Prepare candidate", () =>
-                  prepareRuntime({
-                    geometry: {
-                      artifact_path: selectedArtifact?.path || selectedArtifact?.name || "",
-                    },
-                  }),
-                )
-              }
+              disabled={busyAction !== null}
+              onClick={() => void runAction("Run bakeoff", () => runGeometryBakeoff({ video_duration_sec: 60, video_fps: 15 }))}
               type="button"
             >
-              Prepare candidate
+              Run 1-minute bakeoff
             </button>
-            <button
-              className="action-button secondary"
-              disabled={busyAction !== null || !selectedArtifact}
-              onClick={() =>
-                void runAction("Validate candidate", () =>
-                  validateRuntime({
-                    geometry: {
-                      artifact_path: selectedArtifact?.path || selectedArtifact?.name || "",
-                    },
-                  }),
-                )
-              }
-              type="button"
-            >
-              Validate candidate
+            <button className="action-button secondary" disabled={busyAction !== null} onClick={() => void refresh()} type="button">
+              Refresh
             </button>
           </>
         }
       />
 
       <div className="metric-grid metric-grid-compact">
-        <MetricCard label="Active geometry" value={displayGeometryMode(activeModel)} detail={rolloutStatus} tone="accent" />
-        <MetricCard
-          label="Active artifact"
-          value={activeArtifact?.name ?? activeArtifactPath ?? "none"}
-          detail={activeArtifactPath || "-"}
-        />
-        <MetricCard label="Seam mode" value={displaySeamMode(state.seam_mode ?? "feather")} />
-        <MetricCard label="Exposure mode" value={displayExposureMode(state.exposure_mode ?? "none")} />
+        <MetricCard label="Bundle" value={state.session_id || "-"} detail={state.bundle_dir || "no bundle"} tone="accent" />
+        <MetricCard label="Winner" value={state.selected_candidate_model || "-"} detail="freeze only" />
+        <MetricCard label="Promoted" value={state.promoted_candidate_model || "-"} detail={state.runtime_active_artifact_path || "runtime unchanged"} />
+        <MetricCard label="Candidates" value={String(state.candidates.length)} detail="fixed set of four" />
       </div>
 
-      <div className="panel-grid">
-        <section className="panel">
-          <div className="panel-title">Operator-visible default</div>
-          <p className="muted">
-            Virtual-center-rectilinear is the only geometry candidate shown here as a normal launch-ready choice.
-          </p>
-          <div className="definition-list">
-            <div className="definition-item">
-              <span className="definition-label">Selected model</span>
-              <span className="definition-value">{text(selectedArtifact?.geometry_model, "none")}</span>
-            </div>
-            <div className="definition-item">
-              <span className="definition-label">Launch readiness</span>
-              <span className="definition-value">{text(selectedArtifact?.launch_ready ? "ready" : "not ready")}</span>
-            </div>
-            <div className="definition-item">
-              <span className="definition-label">Reason</span>
-              <span className="definition-value">{text(selectedArtifact?.launch_ready_reason)}</span>
-            </div>
-          </div>
-        </section>
-        <section className="panel">
-          <div className="panel-title">Rollback-only artifacts</div>
-          <p className="muted">
-            Cylindrical-affine and other legacy artifacts stay off the normal chooser. Use their artifact path only for explicit rollback.
-          </p>
-          <div className="definition-list">
-            <div className="definition-item">
-              <span className="definition-label">Active fallback</span>
-              <span className="definition-value">{activeFallbackOnly ? "yes" : "no"}</span>
-            </div>
-            <div className="definition-item">
-              <span className="definition-label">Current reason</span>
-              <span className="definition-value">{launchReadyReason}</span>
-            </div>
-            <div className="definition-item">
-              <span className="definition-label">Rollback count</span>
-              <span className="definition-value">{String(rollbackArtifacts.length)}</span>
-            </div>
-          </div>
-          {rollbackArtifacts.length > 0 ? (
-            <ul className="check-list">
-              {rollbackArtifacts.map((artifact) => (
-                <li key={artifact.path || artifact.name}>
-                  {artifact.name} [{text(artifact.geometry_model)}] {text(artifact.path)}
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p className="muted">No rollback-only artifacts were found in the current artifact inventory.</p>
-          )}
-        </section>
+      <div className="status-strip">
+        <div className="status-strip-title">Bakeoff policy</div>
+        <div className="status-strip-body">
+          SIFT primary, ORB fallback, BFMatcher + ratio test, and RANSAC homography are only the front-end for stable
+          inliers and a coarse model. Mesh is residual-only, cylindrical is excluded from the normal bakeoff set, and
+          each candidate now saves a 1-minute stitched comparison video.
+        </div>
       </div>
 
-      <details className="details-panel">
-        <summary className="details-summary">Action summary</summary>
-        <pre className="action-output">{actionSummary}</pre>
-      </details>
+      {state.candidates.length === 0 ? (
+        <section className="panel">
+          <div className="panel-title">No bundle yet</div>
+          <p className="muted">
+            This page is not the legacy runtime artifact chooser. Click <strong>Run 1-minute bakeoff</strong> to capture a representative clip, solve the four candidates, and then render one stitched comparison video per candidate:
+            <code>left-anchor-homography</code>, <code>left-anchor-homography-mesh</code>, <code>virtual-center-rectilinear-rigid</code>, and <code>virtual-center-rectilinear-mesh</code>.
+          </p>
+        </section>
+      ) : null}
+
+      <div className="panel-grid calibration-grid">
+        {state.candidates.map((candidate) => (
+          <CandidateCard
+            key={candidate.model}
+            candidate={candidate}
+            busy={busyAction !== null}
+            onSelect={(model) =>
+              void runAction("Freeze winner", () =>
+                selectGeometryBakeoffWinner({
+                  bundle_dir: state.bundle_dir,
+                  model,
+                }),
+              )
+            }
+            onPromote={(model) =>
+              void runAction("Promote winner", () =>
+                promoteGeometryBakeoffWinner({
+                  bundle_dir: state.bundle_dir,
+                  model,
+                }),
+              )
+            }
+          />
+        ))}
+      </div>
     </section>
   );
 }
