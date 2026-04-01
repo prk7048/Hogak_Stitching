@@ -13,6 +13,7 @@ import numpy as np
 
 from stitching.core import (
     StitchConfig,
+    StitchingFailure,
     _blend_seam_path,
     _compensate_exposure,
     _compute_overlap_diff_mean,
@@ -125,6 +126,42 @@ def _capture_clip(config: NativeCalibrationConfig, *, clip_frames: int) -> list[
     if not captured:
         raise ValueError("failed to capture a synchronized bakeoff clip")
     return captured
+
+
+def _select_best_clip_calibration(
+    config: NativeCalibrationConfig,
+    clip: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[int, np.ndarray, np.ndarray, dict[str, Any]]:
+    successes: list[tuple[tuple[float, int, int], int, np.ndarray, np.ndarray, dict[str, Any]]] = []
+    failures: list[str] = []
+    for index, (left_frame, right_frame) in enumerate(clip):
+        try:
+            result = calibrate_native_homography_from_frames(
+                config,
+                left_frame,
+                right_frame,
+                prompt_for_points=False,
+                review_required=False,
+                save_outputs=False,
+            )
+        except StitchingFailure as exc:
+            failures.append(f"frame#{index}:{exc.code.value}:{exc.detail}")
+            continue
+        except Exception as exc:
+            failures.append(f"frame#{index}:{exc}")
+            continue
+        score = (
+            float(result.get("candidate_score") or 0.0),
+            int(result.get("inliers_count") or 0),
+            int(result.get("matches_count") or 0),
+        )
+        successes.append((score, index, left_frame, right_frame, result))
+    if not successes:
+        detail = " | ".join(failures[:8]) if failures else "unknown"
+        raise ValueError(f"bakeoff calibration failed for all captured frames ({detail})")
+    successes.sort(key=lambda item: item[0], reverse=True)
+    _score, best_index, left_frame, right_frame, result = successes[0]
+    return best_index, left_frame, right_frame, result
 
 
 def _warp_right_to_left_canvas(
@@ -1212,16 +1249,7 @@ def run_geometry_bakeoff(
     video_fps: int = DEFAULT_VIDEO_FPS,
 ) -> dict[str, Any]:
     clip = _capture_clip(config, clip_frames=clip_frames)
-    representative_index = len(clip) // 2
-    left_frame, right_frame = clip[representative_index]
-    calibration_result = calibrate_native_homography_from_frames(
-        config,
-        left_frame,
-        right_frame,
-        prompt_for_points=False,
-        review_required=False,
-        save_outputs=False,
-    )
+    representative_index, left_frame, right_frame, calibration_result = _select_best_clip_calibration(config, clip)
     homography = np.asarray(calibration_result["homography_matrix"], dtype=np.float64).reshape(3, 3)
     left_inlier_points = np.asarray(calibration_result.get("left_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
     right_inlier_points = np.asarray(calibration_result.get("right_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
@@ -1435,6 +1463,11 @@ def run_geometry_bakeoff_from_args(args: argparse.Namespace) -> int:
         assisted_max_auto_matches=max(0, int(args.assisted_max_auto_matches)),
         match_backend="classic",
         review_required=False,
+        min_matches=max(8, int(getattr(args, "min_matches", 40))),
+        min_inliers=max(6, int(getattr(args, "min_inliers", 20))),
+        ratio_test=float(getattr(args, "ratio_test", 0.75)),
+        ransac_reproj_threshold=float(getattr(args, "ransac_thresh", 5.0)),
+        max_features=max(500, int(getattr(args, "max_features", 4000))),
     )
     bundle = run_geometry_bakeoff(
         config,
@@ -1512,6 +1545,11 @@ class GeometryBakeoffService:
             assisted_max_auto_matches=max(0, int(body.get("assisted_max_auto_matches") or 600)),
             match_backend="classic",
             review_required=False,
+            min_matches=max(8, int(body.get("min_matches") or 40)),
+            min_inliers=max(6, int(body.get("min_inliers") or 20)),
+            ratio_test=float(body.get("ratio_test") or 0.75),
+            ransac_reproj_threshold=float(body.get("ransac_thresh") or 5.0),
+            max_features=max(500, int(body.get("max_features") or 4000)),
         )
         bundle = run_geometry_bakeoff(
             config,
