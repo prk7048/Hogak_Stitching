@@ -183,52 +183,6 @@ def _prompt_runtime_start(
     )
 
 
-def _alternate_gradio_python() -> str | None:
-    disabled = str(os.environ.get("HOGAK_DISABLE_ALT_GRADIO_PYTHON", "") or "").strip().lower()
-    if disabled in {"1", "true", "yes", "on"}:
-        return None
-
-    candidates: list[str] = []
-    local_py314 = Path.home() / "AppData" / "Local" / "Programs" / "Python" / "Python314" / "python.exe"
-    if local_py314.exists():
-        candidates.append(str(local_py314))
-
-    py_launcher = shutil.which("py")
-    if py_launcher:
-        try:
-            out = subprocess.check_output([py_launcher, "-0p"], text=True, stderr=subprocess.DEVNULL, timeout=3.0)
-        except Exception:
-            out = ""
-        for raw in out.splitlines():
-            line = raw.strip()
-            if "Python314" in line and ".exe" in line:
-                exe = line.split()[-1].strip()
-                if exe and exe not in candidates:
-                    candidates.append(exe)
-
-    for candidate in candidates:
-        try:
-            subprocess.check_output(
-                [candidate, "-c", "import gradio; print(gradio.__version__)"],
-                text=True,
-                stderr=subprocess.DEVNULL,
-                timeout=5.0,
-            )
-        except Exception:
-            continue
-        return candidate
-    return None
-
-
-def _run_native_runtime_with_alternate_gradio_python(args: argparse.Namespace, python_exe: str) -> int:
-    child_argv = [python_exe, "-m", "stitching.cli", "native-runtime", *sys.argv[2:]]
-    child_env = os.environ.copy()
-    child_env["HOGAK_DISABLE_ALT_GRADIO_PYTHON"] = "1"
-    print(f"Gradio is unavailable in the active .venv. Launching the interactive UI with {python_exe}.")
-    completed = subprocess.run(child_argv, env=child_env, cwd=str(Path.cwd()))
-    return int(completed.returncode or 0)
-
-
 class SystemStatsSampler:
     def __init__(self, interval_sec: float = 1.0) -> None:
         self._interval_sec = max(0.2, float(interval_sec))
@@ -757,8 +711,6 @@ def add_native_runtime_args(cmd: argparse.ArgumentParser) -> None:
         help="Named output preset. Python applies width/height/fps/codec/bitrate/muxer before launching runtime.",
     )
     cmd.add_argument("--no-output-ui", action="store_true", help="Skip preset selection UI and use default output standard")
-    cmd.add_argument("--ui-port", type=int, default=7860, help="Preferred local port for the interactive Gradio runtime UI")
-    cmd.add_argument("--no-browser", action="store_true", help="Do not auto-open a browser when launching the interactive Gradio runtime UI")
     cmd.add_argument("--sync-pair-mode", choices=["none", "latest", "oldest", "service"], default="none")
     cmd.add_argument("--allow-frame-reuse", action="store_true", help="Allow stale one-side pair reuse for smoother output")
     cmd.add_argument("--pair-reuse-max-age-ms", type=float, default=90.0)
@@ -1826,18 +1778,6 @@ def _ensure_runtime_homography_ready(
 def run_native_runtime_monitor(args: argparse.Namespace) -> int:
     for message in _normalize_distortion_args(args):
         print(message)
-    if not bool(getattr(args, "no_output_ui", False)):
-        try:
-            from stitching.runtime_gradio_ui import gradio_available, run_native_runtime_gradio
-        except Exception as exc:
-            print(f"Interactive Gradio UI unavailable ({type(exc).__name__}: {exc}). Falling back to legacy runtime UI.")
-        else:
-            if gradio_available():
-                return int(run_native_runtime_gradio(args))
-            alternate_python = _alternate_gradio_python()
-            if alternate_python:
-                return _run_native_runtime_with_alternate_gradio_python(args, alternate_python)
-            print("Gradio is not installed in the active environment and no alternate Gradio Python was found. Falling back to legacy runtime UI.")
 
     run_calibration_first = False
     prompted_for_runtime_start = False

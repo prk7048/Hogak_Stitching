@@ -51,11 +51,13 @@ BAKEOFF_CANDIDATE_MODELS = (
 )
 DEFAULT_BAKEOFF_WINNER_MODEL = "virtual-center-rectilinear-mesh"
 DEFAULT_BAKEOFF_ROOT = Path("data/geometry_bakeoff")
+DEFAULT_MESH_REFRESH_ROOT = Path("data/mesh_refresh")
 DEFAULT_CLIP_FRAMES = 12
 DEFAULT_VIDEO_DURATION_SEC = 60
 DEFAULT_VIDEO_FPS = 15
 DEFAULT_GRID_COLS = 16
 DEFAULT_GRID_ROWS = 8
+INTERNAL_MESH_REFRESH_MODEL = "virtual-center-rectilinear-mesh"
 
 
 @dataclass(slots=True)
@@ -149,7 +151,7 @@ def _capture_clip(config: NativeCalibrationConfig, *, clip_frames: int) -> list[
         left_cap.release()
         right_cap.release()
     if not captured:
-        raise ValueError("failed to capture a synchronized bakeoff clip")
+        raise ValueError("failed to capture a synchronized mesh-refresh clip")
     return captured
 
 
@@ -233,7 +235,7 @@ def _select_best_clip_calibration(
             aggregate_failures.append(f"{attempt_name}[{joined}]")
 
     detail = " | ".join(aggregate_failures[:2]) if aggregate_failures else "unknown"
-    raise ValueError(f"bakeoff calibration failed for all captured frames ({detail})")
+    raise ValueError(f"mesh-refresh calibration failed for all captured frames ({detail})")
 
 
 def _warp_right_to_left_canvas(
@@ -1541,33 +1543,12 @@ def run_geometry_bakeoff(
         "video_duration_sec": int(video_duration_sec),
         "video_fps": int(video_fps),
         "bundle_dir": str(bakeoff_root),
-        "selected_candidate_model": selected_candidate_model,
-        "promoted_candidate_model": "",
+        "recommended_model": selected_candidate_model,
         "runtime_active_artifact_path": "",
-        "promotion_attempted": False,
-        "promotion_succeeded": False,
-        "promotion_blocker_reason": "",
         "candidates": candidate_results,
     }
     (bakeoff_root / "bundle.json").write_text(json.dumps(bundle_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
     return bundle_manifest
-
-
-def _load_bundle(bundle_dir: Path) -> dict[str, Any]:
-    payload = json.loads((bundle_dir / "bundle.json").read_text(encoding="utf-8"))
-    if not isinstance(payload, dict):
-        raise ValueError("bundle manifest must be a JSON object")
-    return payload
-
-
-def latest_bakeoff_bundle(root: Path | None = None) -> dict[str, Any] | None:
-    bakeoff_root = Path(root or DEFAULT_BAKEOFF_ROOT)
-    if not bakeoff_root.exists():
-        return None
-    candidates = sorted([path for path in bakeoff_root.iterdir() if path.is_dir() and (path / "bundle.json").exists()], key=lambda item: item.name, reverse=True)
-    if not candidates:
-        return None
-    return _load_bundle(candidates[0])
 
 
 def _resolve_active_runtime_paths() -> tuple[Path, Path]:
@@ -1578,97 +1559,245 @@ def _resolve_active_runtime_paths() -> tuple[Path, Path]:
     return homography_file, geometry_file
 
 
-def select_bakeoff_winner(bundle_dir: Path, *, candidate_model: str) -> dict[str, Any]:
-    bundle = _load_bundle(bundle_dir)
-    found = False
-    for candidate in bundle.get("candidates", []):
-        if not isinstance(candidate, dict):
-            continue
-        selected = str(candidate.get("model") or "") == str(candidate_model)
-        candidate["selected"] = bool(selected)
-        found = found or selected
-    if not found:
-        raise ValueError(f"candidate not found in bundle: {candidate_model}")
-    bundle["selected_candidate_model"] = str(candidate_model)
-    bundle["winner_frozen_at_epoch_sec"] = int(time.time())
-    bundle["promotion_attempted"] = False
-    bundle["promotion_succeeded"] = False
-    bundle["promotion_blocker_reason"] = ""
-    (bundle_dir / "winner.json").write_text(
-        json.dumps(
-            {
-                "session_id": bundle.get("session_id", bundle_dir.name),
-                "selected_candidate_model": candidate_model,
-                "frozen_at_epoch_sec": int(time.time()),
-            },
-            indent=2,
-            ensure_ascii=False,
-        ),
-        encoding="utf-8",
+def _mesh_refresh_session_dir(root: Path | None = None) -> Path:
+    return Path(root or DEFAULT_MESH_REFRESH_ROOT).expanduser() / _session_id()
+
+
+def _resolve_mesh_refresh_dir(body: dict[str, Any] | None = None) -> Path | None:
+    payload = body or {}
+    value = payload.get("refresh_dir") or payload.get("bundle_dir")
+    if not value:
+        return None
+    return Path(str(value)).expanduser()
+
+
+def _validate_mesh_refresh_request(body: dict[str, Any] | None = None) -> None:
+    payload = body or {}
+    requested_model = str(payload.get("model") or "").strip()
+    if requested_model and requested_model != INTERNAL_MESH_REFRESH_MODEL:
+        raise ValueError(
+            f"mesh-refresh only supports {INTERNAL_MESH_REFRESH_MODEL}; comparison candidate selection is no longer exposed here"
+        )
+    legacy_only_fields = [name for name in ("video_duration_sec", "video_fps") if name in payload]
+    if legacy_only_fields:
+        raise ValueError(
+            f"mesh-refresh does not generate public comparison videos; unsupported fields: {', '.join(legacy_only_fields)}"
+        )
+
+
+def _load_mesh_refresh_manifest(session_dir: Path) -> dict[str, Any]:
+    payload = json.loads((session_dir / "mesh_refresh.json").read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("mesh refresh manifest must be a JSON object")
+    return payload
+
+
+def latest_mesh_refresh(root: Path | None = None) -> dict[str, Any] | None:
+    refresh_root = Path(root or DEFAULT_MESH_REFRESH_ROOT).expanduser()
+    if not refresh_root.exists():
+        return None
+    sessions = sorted(
+        [path for path in refresh_root.iterdir() if path.is_dir() and (path / "mesh_refresh.json").exists()],
+        key=lambda item: item.name,
+        reverse=True,
     )
-    (bundle_dir / "bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
-    return bundle
+    if not sessions:
+        return None
+    return _load_mesh_refresh_manifest(sessions[0])
 
 
-def promote_bakeoff_winner(bundle_dir: Path, *, candidate_model: str | None = None) -> dict[str, Any]:
-    bundle = _load_bundle(bundle_dir)
-    target_model = str(candidate_model or bundle.get("selected_candidate_model") or "").strip()
-    if not target_model:
-        raise ValueError("select a bakeoff winner before promotion")
-    candidate_payload = None
-    for candidate in bundle.get("candidates", []):
-        if isinstance(candidate, dict) and str(candidate.get("model") or "") == target_model:
-            candidate_payload = candidate
-            break
-    if candidate_payload is None:
-        raise ValueError(f"candidate not found in bundle: {target_model}")
-    runtime_artifact_path = str(candidate_payload.get("runtime_artifact_path") or "").strip()
-    if not runtime_artifact_path:
-        raise ValueError(f"candidate {target_model} is not launch-ready for runtime promotion yet")
-    source_artifact = Path(runtime_artifact_path)
-    if not source_artifact.exists():
-        raise ValueError(f"candidate runtime artifact is missing: {source_artifact}")
-    artifact = load_runtime_geometry_artifact(source_artifact)
-    rollout = geometry_rollout_metadata(artifact)
-    if not bool(rollout.get("launch_ready")):
-        raise ValueError(str(rollout.get("launch_ready_reason") or f"candidate {target_model} is not launch-ready"))
+def _build_active_mesh_runtime_artifact(
+    *,
+    session_dir: Path,
+    config: NativeCalibrationConfig,
+    calibration_result: dict[str, Any],
+    homography: np.ndarray,
+    output_resolution: tuple[int, int],
+    virtual_solution: Any,
+    mesh_field: MeshField | None,
+) -> dict[str, Any]:
     active_homography_path, active_geometry_path = _resolve_active_runtime_paths()
-    if isinstance(artifact, dict):
-        source = artifact.get("source", {})
-        if isinstance(source, dict):
-            source_homography = str(source.get("homography_file") or "").strip()
-            if source_homography:
-                source_homography_path = Path(source_homography)
-                if source_homography_path.exists():
-                    active_homography_path.parent.mkdir(parents=True, exist_ok=True)
-                    active_homography_path.write_bytes(source_homography_path.read_bytes())
-            source["geometry_file"] = str(active_geometry_path)
-            source["homography_file"] = str(active_homography_path)
-        active_geometry_path.parent.mkdir(parents=True, exist_ok=True)
-        active_geometry_path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False), encoding="utf-8")
-    bundle["promoted_candidate_model"] = target_model
-    bundle["runtime_active_artifact_path"] = str(active_geometry_path)
-    bundle["promotion_attempted"] = True
-    bundle["promotion_succeeded"] = True
-    bundle["promotion_blocker_reason"] = ""
-    (bundle_dir / "bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
-    return bundle
+    active_homography_path.parent.mkdir(parents=True, exist_ok=True)
+    active_geometry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    _save_homography_file(
+        active_homography_path,
+        np.asarray(homography, dtype=np.float64),
+        dict(calibration_result.get("metadata") or {}),
+        distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
+    )
+
+    artifact = build_runtime_geometry_artifact(
+        source_homography_file=active_homography_path,
+        geometry_file=active_geometry_path,
+        homography=np.asarray(homography, dtype=np.float64),
+        metadata=dict(calibration_result.get("metadata") or {}),
+        distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
+        left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
+        right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
+        output_resolution=output_resolution,
+        inliers_count=int(calibration_result.get("inliers_count") or 0),
+        inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
+        left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
+        right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
+        geometry_model="virtual-center-rectilinear",
+        warp_model="virtual-center-remap",
+        alignment_model="rigid",
+        alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
+        residual_model="mesh",
+        mesh=_mesh_payload(mesh_field),
+        projection_model="rectilinear",
+        projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
+        projection_left_center=tuple(virtual_solution.left_projection_center),
+        projection_right_focal_px=float(virtual_solution.right_projection_focal_px),
+        projection_right_center=tuple(virtual_solution.right_projection_center),
+        virtual_camera={
+            "model": "rectilinear",
+            "focal_px": float(virtual_solution.virtual_focal_px),
+            "center": [float(virtual_solution.virtual_center[0]), float(virtual_solution.virtual_center[1])],
+            "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
+            "midpoint_alpha": float(virtual_solution.midpoint_alpha),
+            "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
+            "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
+        },
+    )
+    save_runtime_geometry_artifact(active_geometry_path, artifact)
+
+    snapshot_homography_path = session_dir / "runtime_homography.json"
+    snapshot_geometry_path = session_dir / "runtime_geometry.json"
+    _save_homography_file(
+        snapshot_homography_path,
+        np.asarray(homography, dtype=np.float64),
+        dict(calibration_result.get("metadata") or {}),
+        distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
+    )
+    artifact_snapshot = dict(artifact)
+    source = artifact_snapshot.get("source", {})
+    if isinstance(source, dict):
+        source["homography_file"] = str(snapshot_homography_path)
+        source["geometry_file"] = str(snapshot_geometry_path)
+    save_runtime_geometry_artifact(snapshot_geometry_path, artifact_snapshot)
+
+    rollout = geometry_rollout_metadata(artifact)
+    return {
+        "artifact": artifact,
+        "rollout": rollout,
+        "active_homography_path": str(active_homography_path),
+        "active_geometry_path": str(active_geometry_path),
+        "snapshot_homography_path": str(snapshot_homography_path),
+        "snapshot_geometry_path": str(snapshot_geometry_path),
+    }
 
 
-def use_bakeoff_winner(bundle_dir: Path, *, candidate_model: str) -> dict[str, Any]:
-    bundle = select_bakeoff_winner(bundle_dir, candidate_model=candidate_model)
-    try:
-        return promote_bakeoff_winner(bundle_dir, candidate_model=candidate_model)
-    except Exception as exc:
-        bundle = _load_bundle(bundle_dir)
-        bundle["promotion_attempted"] = True
-        bundle["promotion_succeeded"] = False
-        bundle["promotion_blocker_reason"] = str(exc)
-        (bundle_dir / "bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
-        return bundle
+def run_mesh_refresh(
+    config: NativeCalibrationConfig,
+    *,
+    session_dir: Path | None = None,
+    clip_frames: int = DEFAULT_CLIP_FRAMES,
+) -> dict[str, Any]:
+    clip = _capture_clip(config, clip_frames=max(3, int(clip_frames)))
+    representative_index, left_frame, right_frame, calibration_result = _select_best_clip_calibration(config, clip)
+    homography = np.asarray(calibration_result["homography_matrix"], dtype=np.float64).reshape(3, 3)
+    left_inlier_points = np.asarray(calibration_result.get("left_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
+    right_inlier_points = np.asarray(calibration_result.get("right_inlier_points") or [], dtype=np.float64).reshape(-1, 2)
+    output_resolution = (
+        int(calibration_result["output_resolution"][0]),
+        int(calibration_result["output_resolution"][1]),
+    )
+    virtual_solution = _solve_virtual_center_rectilinear(
+        left_points=list(calibration_result.get("left_inlier_points") or []),
+        right_points=list(calibration_result.get("right_inlier_points") or []),
+        left_shape=left_frame.shape,
+        right_shape=right_frame.shape,
+        output_resolution=output_resolution,
+    )
+    spec = _prepare_virtual_center_spec(
+        candidate_model="virtual-center-rectilinear-mesh",
+        left_frame=left_frame,
+        right_frame=right_frame,
+        left_inlier_points=left_inlier_points,
+        right_inlier_points=right_inlier_points,
+        output_resolution=output_resolution,
+        virtual_solution=virtual_solution,
+    )
+
+    refresh_dir = Path(session_dir).expanduser() if session_dir is not None else _mesh_refresh_session_dir()
+    refresh_dir.mkdir(parents=True, exist_ok=True)
+
+    artifact_info = _build_active_mesh_runtime_artifact(
+        session_dir=refresh_dir,
+        config=config,
+        calibration_result=calibration_result,
+        homography=homography,
+        output_resolution=output_resolution,
+        virtual_solution=virtual_solution,
+        mesh_field=spec.get("mesh_field"),
+    )
+    rollout = dict(artifact_info["rollout"])
+
+    manifest = {
+        "status": "ready",
+        "session_id": refresh_dir.name,
+        "refresh_dir": str(refresh_dir),
+        "runtime_active_artifact_path": str(artifact_info["active_geometry_path"]),
+        "mesh_refresh_model": INTERNAL_MESH_REFRESH_MODEL,
+        "geometry_artifact_model": str(rollout.get("geometry_model") or ""),
+        "geometry_residual_model": str(rollout.get("geometry_residual_model") or ""),
+        "geometry_rollout_status": str(rollout.get("geometry_rollout_status") or ""),
+        "runtime_launch_ready": bool(rollout.get("launch_ready")),
+        "runtime_launch_ready_reason": str(rollout.get("launch_ready_reason") or ""),
+        "representative_frame_index": int(representative_index),
+        "clip_frame_count": int(len(clip)),
+        "mesh_refresh_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
+        "good_match_count": int(calibration_result.get("matches_count") or 0),
+        "inlier_count": int(calibration_result.get("inliers_count") or 0),
+        "inlier_ratio": float(calibration_result.get("inlier_ratio") or 0.0),
+        "mesh_max_displacement_px": float(spec.get("mesh_max_displacement_px") or 0.0),
+        "mesh_max_local_scale_drift": float(spec.get("mesh_max_local_scale_drift") or 0.0),
+        "mesh_max_local_rotation_drift": float(spec.get("mesh_max_local_rotation_drift") or 0.0),
+        "right_edge_scale_drift": float(spec.get("right_edge_scale_drift") or 0.0),
+        "fallback_used": bool(spec.get("fallback_used")),
+        "status_detail": str(spec.get("status") or "ready"),
+        "active_homography_path": str(artifact_info["active_homography_path"]),
+        "snapshot_homography_path": str(artifact_info["snapshot_homography_path"]),
+        "snapshot_geometry_path": str(artifact_info["snapshot_geometry_path"]),
+        "created_at_epoch_sec": int(time.time()),
+    }
+    (refresh_dir / "mesh_refresh.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    return manifest
 
 
-def run_geometry_bakeoff_from_args(args: argparse.Namespace) -> int:
+def _mesh_refresh_config_from_body(body: dict[str, Any] | None = None) -> NativeCalibrationConfig:
+    body = body or {}
+    _validate_mesh_refresh_request(body)
+    site_config = load_runtime_site_config()
+    cameras = site_config.get("cameras", {}) if isinstance(site_config.get("cameras"), dict) else {}
+    paths = site_config.get("paths", {}) if isinstance(site_config.get("paths"), dict) else {}
+    runtime = site_config.get("runtime", {}) if isinstance(site_config.get("runtime"), dict) else {}
+    return NativeCalibrationConfig(
+        left_rtsp=str(body.get("left_rtsp") or cameras.get("left_rtsp") or "").strip(),
+        right_rtsp=str(body.get("right_rtsp") or cameras.get("right_rtsp") or "").strip(),
+        output_path=Path(str(paths.get("homography_file") or DEFAULT_NATIVE_HOMOGRAPHY_PATH)).expanduser(),
+        inliers_output_path=Path(str(body.get("inliers_out") or paths.get("calibration_inliers_file") or "data/calibration_inliers.json")).expanduser(),
+        debug_dir=Path(str(body.get("debug_dir") or paths.get("calibration_debug_dir") or "data/calibration_debug")).expanduser(),
+        rtsp_transport=str(body.get("rtsp_transport") or runtime.get("rtsp_transport") or "tcp").strip(),
+        rtsp_timeout_sec=max(1.0, float(body.get("rtsp_timeout_sec") or runtime.get("rtsp_timeout_sec") or 10.0)),
+        warmup_frames=max(1, int(body.get("warmup_frames") or runtime.get("warmup_frames") or 45)),
+        process_scale=max(0.1, float(body.get("process_scale") or runtime.get("process_scale") or 1.0)),
+        calibration_mode="auto",
+        assisted_reproj_threshold=max(1.0, float(body.get("assisted_reproj_threshold") or 12.0)),
+        assisted_max_auto_matches=max(0, int(body.get("assisted_max_auto_matches") or 600)),
+        match_backend="classic",
+        review_required=False,
+        min_matches=max(8, int(body.get("min_matches") or 40)),
+        min_inliers=max(6, int(body.get("min_inliers") or 20)),
+        ratio_test=float(body.get("ratio_test") or 0.75),
+        ransac_reproj_threshold=float(body.get("ransac_thresh") or 5.0),
+        max_features=max(500, int(body.get("max_features") or 4000)),
+    )
+
+
+def run_mesh_refresh_from_args(args: argparse.Namespace) -> int:
     config = NativeCalibrationConfig(
         left_rtsp=str(args.left_rtsp),
         right_rtsp=str(args.right_rtsp),
@@ -1690,122 +1819,53 @@ def run_geometry_bakeoff_from_args(args: argparse.Namespace) -> int:
         ransac_reproj_threshold=float(getattr(args, "ransac_thresh", 5.0)),
         max_features=max(500, int(getattr(args, "max_features", 4000))),
     )
-    bundle = run_geometry_bakeoff(
+    result = run_mesh_refresh(
         config,
-        bundle_dir=Path(str(args.bundle_dir)).expanduser() if getattr(args, "bundle_dir", None) else None,
+        session_dir=Path(str(args.refresh_dir)).expanduser() if getattr(args, "refresh_dir", None) else None,
         clip_frames=max(3, int(getattr(args, "clip_frames", DEFAULT_CLIP_FRAMES))),
-        video_duration_sec=max(1, int(getattr(args, "video_duration_sec", DEFAULT_VIDEO_DURATION_SEC))),
-        video_fps=max(1, int(getattr(args, "video_fps", DEFAULT_VIDEO_FPS))),
     )
-    print(json.dumps(bundle, indent=2, ensure_ascii=False))
+    print(json.dumps(result, indent=2, ensure_ascii=False))
     return 0
 
 
-def _candidate_asset_url(session_id: str, candidate_model: str, filename: str) -> str:
-    return f"/api/bakeoff/assets/{session_id}/{candidate_model}/{filename}"
-
-
-def _normalize_bundle_for_api(bundle: dict[str, Any]) -> dict[str, Any]:
-    session_id = str(bundle.get("session_id") or "")
-    items: list[dict[str, Any]] = []
-    for candidate in bundle.get("candidates", []):
-        if not isinstance(candidate, dict):
-            continue
-        model = str(candidate.get("model") or "").strip()
-        items.append(
-            {
-                **candidate,
-                "stitched_preview_url": _candidate_asset_url(session_id, model, "stitched_preview.png"),
-                "stitched_video_url": _candidate_asset_url(session_id, model, "stitched_video.mp4"),
-                "overlap_crop_url": _candidate_asset_url(session_id, model, "overlap_crop.png"),
-                "seam_debug_url": _candidate_asset_url(session_id, model, "seam_debug.png"),
-            }
-        )
-    return {
-        **bundle,
-        "candidates": items,
-    }
-
-
-class GeometryBakeoffService:
+class MeshRefreshService:
     def __init__(self, root: Path | None = None) -> None:
-        self._root = Path(root or DEFAULT_BAKEOFF_ROOT)
+        self._root = Path(root or DEFAULT_MESH_REFRESH_ROOT)
 
     def state(self) -> dict[str, Any]:
-        bundle = latest_bakeoff_bundle(self._root)
-        if bundle is None:
+        manifest = latest_mesh_refresh(self._root)
+        if manifest is None:
             return {
                 "status": "idle",
                 "session_id": "",
-                "bundle_dir": "",
-                "selected_candidate_model": "",
-                "promoted_candidate_model": "",
+                "refresh_dir": "",
                 "runtime_active_artifact_path": "",
-                "promotion_attempted": False,
-                "promotion_succeeded": False,
-                "promotion_blocker_reason": "",
-                "candidates": [],
+                "mesh_refresh_model": "",
+                "geometry_artifact_model": "",
+                "geometry_residual_model": "",
+                "geometry_rollout_status": "",
+                "runtime_launch_ready": False,
+                "runtime_launch_ready_reason": "",
             }
-        return _normalize_bundle_for_api(bundle)
+        return manifest
 
     def run(self, body: dict[str, Any] | None = None) -> dict[str, Any]:
-        body = body or {}
-        site_config = load_runtime_site_config()
-        cameras = site_config.get("cameras", {}) if isinstance(site_config.get("cameras"), dict) else {}
-        paths = site_config.get("paths", {}) if isinstance(site_config.get("paths"), dict) else {}
-        runtime = site_config.get("runtime", {}) if isinstance(site_config.get("runtime"), dict) else {}
-        config = NativeCalibrationConfig(
-            left_rtsp=str(body.get("left_rtsp") or cameras.get("left_rtsp") or "").strip(),
-            right_rtsp=str(body.get("right_rtsp") or cameras.get("right_rtsp") or "").strip(),
-            output_path=Path(str(paths.get("homography_file") or DEFAULT_NATIVE_HOMOGRAPHY_PATH)).expanduser(),
-            inliers_output_path=Path(str(body.get("inliers_out") or paths.get("calibration_inliers_file") or "data/calibration_inliers.json")).expanduser(),
-            debug_dir=Path(str(body.get("debug_dir") or paths.get("calibration_debug_dir") or "data/calibration_debug")).expanduser(),
-            rtsp_transport=str(body.get("rtsp_transport") or runtime.get("rtsp_transport") or "tcp").strip(),
-            rtsp_timeout_sec=max(1.0, float(body.get("rtsp_timeout_sec") or runtime.get("rtsp_timeout_sec") or 10.0)),
-            warmup_frames=max(1, int(body.get("warmup_frames") or runtime.get("warmup_frames") or 45)),
-            process_scale=max(0.1, float(body.get("process_scale") or runtime.get("process_scale") or 1.0)),
-            calibration_mode="auto",
-            assisted_reproj_threshold=max(1.0, float(body.get("assisted_reproj_threshold") or 12.0)),
-            assisted_max_auto_matches=max(0, int(body.get("assisted_max_auto_matches") or 600)),
-            match_backend="classic",
-            review_required=False,
-            min_matches=max(8, int(body.get("min_matches") or 40)),
-            min_inliers=max(6, int(body.get("min_inliers") or 20)),
-            ratio_test=float(body.get("ratio_test") or 0.75),
-            ransac_reproj_threshold=float(body.get("ransac_thresh") or 5.0),
-            max_features=max(500, int(body.get("max_features") or 4000)),
-        )
-        bundle = run_geometry_bakeoff(
-            config,
-            bundle_dir=Path(str(body.get("bundle_dir"))).expanduser() if body.get("bundle_dir") else None,
-            clip_frames=max(3, int(body.get("clip_frames") or DEFAULT_CLIP_FRAMES)),
-            video_duration_sec=max(1, int(body.get("video_duration_sec") or DEFAULT_VIDEO_DURATION_SEC)),
-            video_fps=max(1, int(body.get("video_fps") or DEFAULT_VIDEO_FPS)),
-        )
-        return _normalize_bundle_for_api(bundle)
+        config = _mesh_refresh_config_from_body(body)
+        refresh_dir = _resolve_mesh_refresh_dir(body)
+        clip_frames = max(3, int((body or {}).get("clip_frames") or DEFAULT_CLIP_FRAMES))
+        return run_mesh_refresh(config, session_dir=refresh_dir, clip_frames=clip_frames)
 
     def select(self, body: dict[str, Any]) -> dict[str, Any]:
-        bundle_dir = Path(str(body.get("bundle_dir") or "")).expanduser()
-        candidate_model = str(body.get("model") or "").strip()
-        if not candidate_model:
-            raise ValueError("model is required")
-        return _normalize_bundle_for_api(select_bakeoff_winner(bundle_dir, candidate_model=candidate_model))
+        _validate_mesh_refresh_request(body)
+        return self.run(body)
 
     def promote(self, body: dict[str, Any]) -> dict[str, Any]:
-        bundle_dir = Path(str(body.get("bundle_dir") or "")).expanduser()
-        candidate_model = str(body.get("model") or "").strip() if body.get("model") else None
-        return _normalize_bundle_for_api(promote_bakeoff_winner(bundle_dir, candidate_model=candidate_model))
+        _validate_mesh_refresh_request(body)
+        return self.run(body)
 
     def use_winner(self, body: dict[str, Any]) -> dict[str, Any]:
-        bundle_dir = Path(str(body.get("bundle_dir") or "")).expanduser()
-        candidate_model = str(body.get("model") or "").strip()
-        if not candidate_model:
-            raise ValueError("model is required")
-        return _normalize_bundle_for_api(use_bakeoff_winner(bundle_dir, candidate_model=candidate_model))
+        _validate_mesh_refresh_request(body)
+        return self.run(body)
 
     def read_asset(self, session_id: str, candidate_model: str, filename: str) -> bytes:
-        safe_name = Path(filename).name
-        if safe_name not in {"stitched_preview.png", "stitched_uncropped.png", "overlap_crop.png", "seam_debug.png", "stitched_video.mp4"}:
-            raise FileNotFoundError("unsupported bakeoff asset")
-        path = self._root / session_id / candidate_model / safe_name
-        return path.read_bytes()
+        raise FileNotFoundError("mesh-refresh does not publish public bakeoff assets")

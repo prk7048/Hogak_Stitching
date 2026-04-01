@@ -15,19 +15,23 @@ import cv2
 import numpy as np
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from stitching.project_defaults import (
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
 )
-from stitching.runtime_contract import geometry_rollout_metadata, normalize_schema_v2_reload_payload
+from stitching.runtime_contract import (
+    geometry_rollout_metadata,
+    normalize_schema_v2_reload_payload,
+    public_runtime_state_surface,
+)
 from stitching.runtime_geometry_artifact import (
     load_runtime_geometry_artifact,
     runtime_geometry_artifact_path,
     runtime_geometry_model,
     runtime_geometry_residual_model,
 )
-from stitching.runtime_geometry_bakeoff import GeometryBakeoffService
+from stitching.runtime_geometry_bakeoff import MeshRefreshService
 from stitching.runtime_launcher import RuntimeLaunchSpec, query_gpu_direct_status
 from stitching.runtime_site_config import load_runtime_site_config, repo_root, require_configured_rtsp_urls
 from stitching.runtime_supervisor import RuntimeSupervisor
@@ -120,10 +124,10 @@ npm run build</pre>
       <div class="note">
         <strong>현재 백엔드 상태</strong>
         <ul>
-          <li>런타임 API 는 계속 <code>/api/runtime/*</code> 에서 사용할 수 있습니다.</li>
-          <li>캘리브레이션 화면은 React 번들이 준비되면 함께 표시됩니다.</li>
-          <li>기존 bridge 는 제거되었고, <code>/legacy/calibration</code> 은 <code>/calibration/start</code> 로 이동합니다.</li>
-          <li>이 브랜치에서는 Bakeoff winner를 promote한 뒤, 대시보드의 <code>시작 (Start)</code> 버튼으로 정렬 미리보기와 실제 송출을 순서대로 확인합니다.</li>
+          <li>제품용 public API 는 <code>/api/runtime/*</code> 와 <code>/api/artifacts/geometry*</code> 만 유지됩니다.</li>
+          <li>Bakeoff, calibration, debug 경로는 public surface에서 제거되었고 내부 경로로만 유지됩니다.</li>
+          <li>이 브랜치의 기본 truth 는 <code>virtual-center-rectilinear-mesh</code> 이며, launch-ready 확인 전에는 시작이 차단됩니다.</li>
+          <li>React 번들이 준비되면 대시보드에서 <code>정렬 미리보기</code>, <code>시작</code>, <code>검증</code> 흐름만 노출됩니다.</li>
         </ul>
       </div>
     </main>
@@ -139,15 +143,13 @@ def _compute_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _merge_runtime_and_bakeoff_state(runtime_state: dict[str, Any], bakeoff_state: dict[str, Any]) -> dict[str, Any]:
+def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
     merged = dict(runtime_state or {})
-    bakeoff = dict(bakeoff_state or {})
-    selected_candidate_model = str(bakeoff.get("selected_candidate_model") or "").strip()
-    promoted_candidate_model = str(bakeoff.get("promoted_candidate_model") or "").strip()
+    mesh_refresh = dict(mesh_refresh_state or {})
     runtime_active_artifact_path = str(
         merged.get("runtime_active_artifact_path")
         or merged.get("geometry_artifact_path")
-        or bakeoff.get("runtime_active_artifact_path")
+        or mesh_refresh.get("runtime_active_artifact_path")
         or ""
     ).strip()
     runtime_active_model = str(
@@ -156,35 +158,135 @@ def _merge_runtime_and_bakeoff_state(runtime_state: dict[str, Any], bakeoff_stat
         or merged.get("geometry_mode")
         or ""
     ).strip()
+    runtime_active_residual_model = str(
+        merged.get("runtime_active_residual_model")
+        or merged.get("geometry_residual_model")
+        or ""
+    ).strip()
 
-    if runtime_active_artifact_path and not runtime_active_model:
+    if runtime_active_artifact_path and (not runtime_active_model or not runtime_active_residual_model):
         try:
             artifact = load_runtime_geometry_artifact(Path(runtime_active_artifact_path))
         except Exception:
             artifact = None
         if isinstance(artifact, dict):
-            runtime_active_model = runtime_geometry_model(artifact)
+            rollout = geometry_rollout_metadata(artifact)
+            if not runtime_active_model:
+                runtime_active_model = str(rollout.get("geometry_model") or runtime_geometry_model(artifact))
+            if not runtime_active_residual_model:
+                runtime_active_residual_model = str(
+                    rollout.get("geometry_residual_model") or runtime_geometry_residual_model(artifact)
+                )
 
     production_output_runtime_mode = str(merged.get("production_output_runtime_mode") or "").strip()
-    gpu_path_mode = production_output_runtime_mode or "unknown"
-    gpu_path_ready = bool(merged.get("gpu_only_ready")) and gpu_path_mode not in {"unknown", "native-nvenc-unavailable"}
+    input_runtime = str(
+        merged.get("input_runtime")
+        or merged.get("prepared_plan", {}).get("input_runtime")
+        or ""
+    ).strip().lower() if isinstance(merged.get("prepared_plan"), dict) else str(merged.get("input_runtime") or "").strip().lower()
+    input_pipe_format = str(
+        merged.get("input_pipe_format")
+        or merged.get("prepared_plan", {}).get("input_pipe_format")
+        or ""
+    ).strip().lower() if isinstance(merged.get("prepared_plan"), dict) else str(merged.get("input_pipe_format") or "").strip().lower()
+    input_path_mode = "unknown"
+    if input_runtime == "ffmpeg-cuda":
+        input_path_mode = "cuda-decode-cpu-staged"
+    elif input_runtime:
+        input_path_mode = f"{input_runtime}-cpu"
+
+    output_path_mode = production_output_runtime_mode or "unknown"
+    output_path_direct = output_path_mode == "native-nvenc-direct"
+    output_path_bridge = output_path_mode in {"native-nvenc-bridge", "gpu-direct"}
+    zero_copy_blockers: list[str] = []
+    if input_path_mode == "cuda-decode-cpu-staged":
+        zero_copy_blockers.append("reader transfers decoded frames to CPU before stitch input")
+    elif input_path_mode != "unknown":
+        zero_copy_blockers.append(f"input path is {input_path_mode}, not zero-copy")
+    else:
+        zero_copy_blockers.append("input path truth is unavailable")
+    if not output_path_direct:
+        if output_path_mode == "unknown":
+            zero_copy_blockers.append("output path truth is unavailable")
+        elif output_path_mode == "native-nvenc-unavailable":
+            zero_copy_blockers.append("native nvenc output path is unavailable")
+        else:
+            zero_copy_blockers.append(f"output path is {output_path_mode}, not direct")
+    zero_copy_ready = len(zero_copy_blockers) == 0
+    zero_copy_reason = (
+        "end-to-end zero-copy path is active"
+        if zero_copy_ready
+        else "; ".join(zero_copy_blockers)
+    )
+    gpu_path_mode = output_path_mode
+    gpu_path_ready = zero_copy_ready
+    preview_left_url = str(
+        merged.get("preview_left_url")
+        or merged.get("alignment_preview_left_url")
+        or merged.get("start_preview_left_url")
+        or ""
+    ).strip()
+    preview_right_url = str(
+        merged.get("preview_right_url")
+        or merged.get("alignment_preview_right_url")
+        or merged.get("start_preview_right_url")
+        or ""
+    ).strip()
+    preview_stitched_url = str(
+        merged.get("preview_stitched_url")
+        or merged.get("alignment_preview_stitched_url")
+        or merged.get("start_preview_stitched_url")
+        or ""
+    ).strip()
+    preview_ready = any((preview_left_url, preview_right_url, preview_stitched_url)) or bool(
+        merged.get("alignment_preview_ready") or merged.get("start_preview_ready")
+    )
 
     merged.update(
         {
-            "bakeoff_selected_model": selected_candidate_model,
-            "promoted_runtime_model": promoted_candidate_model,
             "runtime_active_model": runtime_active_model or "",
+            "runtime_active_residual_model": runtime_active_residual_model or "",
             "runtime_active_artifact_path": runtime_active_artifact_path,
+            "runtime_artifact_checksum": str(merged.get("geometry_artifact_checksum") or "").strip(),
             "runtime_launch_ready": bool(merged.get("launch_ready")),
             "runtime_launch_ready_reason": str(merged.get("launch_ready_reason") or "").strip(),
+            "fallback_used": bool(merged.get("geometry_fallback_only")),
+            "input_path_mode": input_path_mode,
             "gpu_path_mode": gpu_path_mode,
             "gpu_path_ready": gpu_path_ready,
-            "promotion_attempted": bool(bakeoff.get("promotion_attempted")),
-            "promotion_succeeded": bool(bakeoff.get("promotion_succeeded")),
-            "promotion_blocker_reason": str(bakeoff.get("promotion_blocker_reason") or "").strip(),
+            "output_path_mode": output_path_mode,
+            "output_path_direct": output_path_direct,
+            "output_path_bridge": output_path_bridge,
+            "zero_copy_ready": zero_copy_ready,
+            "zero_copy_reason": zero_copy_reason,
+            "zero_copy_blockers": zero_copy_blockers,
+            "preview_ready": preview_ready,
+            "preview_left_url": preview_left_url,
+            "preview_right_url": preview_right_url,
+            "preview_stitched_url": preview_stitched_url,
         }
     )
     return merged
+
+
+def _public_runtime_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
+    return public_runtime_state_surface(_merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state))
+
+
+def _public_runtime_response(payload: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {"ok": True, "state": _public_runtime_state({}, mesh_refresh_state)}
+    result = dict(payload)
+    if isinstance(result.get("state"), dict):
+        result["state"] = _public_runtime_state(result["state"], mesh_refresh_state)
+    return result
+
+
+def _internal_mesh_refresh(mesh_refresh: MeshRefreshService, body: dict[str, Any] | None = None) -> dict[str, Any]:
+    result = mesh_refresh.run(body)
+    if not isinstance(result, dict):
+        raise ValueError("mesh-refresh did not return a JSON object")
+    return result
 
 
 class _CaptureOptionsEnv:
@@ -461,7 +563,7 @@ class RuntimeService:
         self._start_preview_stitched_jpeg = None
 
     def _start_preview_url(self, name: str) -> str:
-        return f"/api/runtime/start-preview/{name}.jpg"
+        return f"/api/runtime/preview-align/assets/{name}.jpg"
 
     def _render_start_preview_locked(self, plan: RuntimePlan) -> None:
         artifact = load_runtime_geometry_artifact(plan.geometry_artifact_path)
@@ -518,7 +620,7 @@ class RuntimeService:
         if geometry_artifact.exists():
             artifact = load_runtime_geometry_artifact(geometry_artifact)
             rollout = geometry_rollout_metadata(artifact)
-            if bool(rollout["launch_ready"]):
+            if bool(rollout["launch_ready"]) and bool(rollout["geometry_operator_visible"]):
                 return {
                     "calibrated": False,
                     "artifact_path": str(geometry_artifact),
@@ -526,10 +628,15 @@ class RuntimeService:
                     "launch_ready": True,
                     "message": "existing launch-ready geometry artifact reused",
                 }
+            if bool(rollout["launch_ready"]) and not bool(rollout["geometry_operator_visible"]):
+                raise ValueError(
+                    "default runtime geometry artifact resolves to an internal fallback model. "
+                    "Promote a product mesh artifact first, or use an explicit geometry.artifact_path for internal rollback."
+                )
 
         raise ValueError(
             "launch-ready runtime geometry artifact가 없습니다. "
-            "Geometry Bakeoff를 실행하고 winner를 freeze/promote 한 뒤 다시 시도하세요."
+            "내부 mesh-refresh를 먼저 실행해 active mesh artifact를 다시 생성해 주세요."
         )
 
     def _build_plan(self, request: dict[str, Any] | None = None) -> RuntimePlan:
@@ -1226,7 +1333,7 @@ class RuntimeService:
         left_projection = projection.get("left", {}) if isinstance(projection.get("left"), dict) else {}
         should_expose_cylindrical_projection = geometry_mode == "cylindrical-affine"
         return {
-            "geometry_mode": geometry_mode,
+            "geometry_mode": str(rollout["geometry_model"] or geometry_mode),
             "geometry_residual_model": rollout["geometry_residual_model"],
             "alignment_mode": _string(alignment, "model", "-"),
             "seam_mode": seam_mode,
@@ -1237,6 +1344,7 @@ class RuntimeService:
             "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
             "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
             "geometry_compat_only": bool(rollout["geometry_compat_only"]),
+            "fallback_used": bool(rollout["geometry_fallback_only"]),
             "launch_ready": bool(rollout["launch_ready"]),
             "launch_ready_reason": str(rollout["launch_ready_reason"]),
             "cylindrical_focal_px": _float(left_projection, "focal_px") if should_expose_cylindrical_projection else 0.0,
@@ -1563,25 +1671,16 @@ class RuntimeService:
 def create_app(
     *,
     service: RuntimeService | None = None,
-    calibration_service: Any | None = None,
-    geometry_bakeoff_service: GeometryBakeoffService | None = None,
+    mesh_refresh_service: MeshRefreshService | None = None,
     frontend_dist_dir: str | Path | None = None,
 ) -> FastAPI:
     backend = service or RuntimeService()
-    calibration_enabled_env = os.environ.get("HOGAK_ENABLE_LEGACY_CALIBRATION_API", "").strip().lower()
-    legacy_calibration_enabled = calibration_service is not None or calibration_enabled_env in {"1", "true", "yes", "on"}
-    calibration = calibration_service
-    if calibration is None and legacy_calibration_enabled:
-        from stitching.runtime_calibration_service import CalibrationService
-
-        calibration = CalibrationService()
-    geometry_bakeoff = geometry_bakeoff_service or GeometryBakeoffService()
+    mesh_refresh = mesh_refresh_service or MeshRefreshService()
     app = FastAPI(title="Hogak Runtime API", version="2")
     app.state.runtime_service = backend
-    app.state.calibration_service = calibration
-    app.state.geometry_bakeoff_service = geometry_bakeoff
+    app.state.mesh_refresh_service = mesh_refresh
 
-    @app.post("/api/runtime/prepare")
+    @app.post("/_internal/runtime/prepare", include_in_schema=False)
     def prepare_runtime(body: dict[str, Any] | None = None):
         try:
             return backend.prepare(body)
@@ -1591,29 +1690,29 @@ def create_app(
     @app.post("/api/runtime/start")
     def start_runtime(body: dict[str, Any] | None = None):
         try:
-            return backend.start(body)
+            return _public_runtime_response(backend.start(body), mesh_refresh.state())
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/runtime/preview-align")
     def preview_runtime_alignment(body: dict[str, Any] | None = None):
         try:
-            return backend.preview_align(body)
+            return _public_runtime_response(backend.preview_align(body), mesh_refresh.state())
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.post("/api/runtime/stop")
     def stop_runtime():
-        return backend.stop()
+        return _public_runtime_response(backend.stop(), mesh_refresh.state())
 
     @app.post("/api/runtime/validate")
     def validate_runtime(body: dict[str, Any] | None = None):
         try:
-            return backend.validate(body)
+            return _public_runtime_response(backend.validate(body), mesh_refresh.state())
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/runtime/reload")
+    @app.post("/_internal/runtime/reload", include_in_schema=False)
     def reload_runtime(body: dict[str, Any]):
         try:
             return backend.reload(body)
@@ -1624,9 +1723,13 @@ def create_app(
 
     @app.get("/api/runtime/state")
     def runtime_state():
-        return _merge_runtime_and_bakeoff_state(backend.state(), geometry_bakeoff.state())
+        return _public_runtime_state(backend.state(), mesh_refresh.state())
 
-    @app.get("/api/runtime/events")
+    @app.get("/_internal/runtime/state", include_in_schema=False)
+    def internal_runtime_state():
+        return _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
+
+    @app.get("/_internal/runtime/events", include_in_schema=False)
     def runtime_events(last_event_id: int = 0):
         return StreamingResponse(
             backend.stream_events(last_event_id=last_event_id),
@@ -1637,8 +1740,8 @@ def create_app(
             },
         )
 
-    @app.get("/api/runtime/start-preview/{name}.jpg")
-    def runtime_start_preview(name: str):
+    @app.get("/api/runtime/preview-align/assets/{name}.jpg")
+    def runtime_preview_asset(name: str):
         jpeg = backend.start_preview_jpeg(name)
         if jpeg is None:
             raise HTTPException(status_code=503, detail="start preview frame unavailable")
@@ -1655,159 +1758,16 @@ def create_app(
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    @app.get("/api/bakeoff/state")
-    def geometry_bakeoff_state():
-        return geometry_bakeoff.state()
+    @app.get("/_internal/runtime/mesh-refresh/state", include_in_schema=False)
+    def mesh_refresh_state():
+        return mesh_refresh.state()
 
-    @app.post("/api/bakeoff/run")
-    def run_geometry_bakeoff_api(body: dict[str, Any] | None = None):
+    @app.post("/_internal/runtime/mesh-refresh", include_in_schema=False)
+    def refresh_runtime_mesh_api(body: dict[str, Any] | None = None):
         try:
-            return geometry_bakeoff.run(body)
+            return _internal_mesh_refresh(mesh_refresh, body)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/bakeoff/select")
-    def select_geometry_bakeoff_api(body: dict[str, Any]):
-        try:
-            return geometry_bakeoff.select(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/bakeoff/promote")
-    def promote_geometry_bakeoff_api(body: dict[str, Any]):
-        try:
-            return geometry_bakeoff.promote(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.post("/api/bakeoff/use-winner")
-    def use_geometry_bakeoff_winner_api(body: dict[str, Any]):
-        try:
-            return geometry_bakeoff.use_winner(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    @app.get("/api/bakeoff/assets/{session_id}/{candidate_model}/{filename}")
-    def geometry_bakeoff_asset(session_id: str, candidate_model: str, filename: str):
-        try:
-            content = geometry_bakeoff.read_asset(session_id, candidate_model, filename)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        suffix = Path(filename).suffix.lower()
-        media_type = "image/png"
-        if suffix in {".jpg", ".jpeg"}:
-            media_type = "image/jpeg"
-        elif suffix == ".mp4":
-            media_type = "video/mp4"
-        return Response(content=content, media_type=media_type)
-
-    if calibration is not None:
-        @app.post("/api/calibration/session/start")
-        def start_calibration_session(body: dict[str, Any] | None = None):
-            try:
-                return calibration.start_session(body)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.get("/api/calibration/session/state")
-        def get_calibration_session_state():
-            return calibration.state()
-
-        @app.post("/api/calibration/frames/refresh")
-        def refresh_calibration_frames():
-            try:
-                return calibration.refresh_frames()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/pairs")
-        def add_calibration_pair(body: dict[str, Any]):
-            try:
-                return calibration.add_pair(body)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/pairs/select")
-        def select_calibration_pair(body: dict[str, Any]):
-            try:
-                return calibration.select_pair(body)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/pairs/undo")
-        def undo_calibration_pair():
-            try:
-                return calibration.undo_pair()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/pairs/delete")
-        def delete_calibration_pair():
-            try:
-                return calibration.delete_pair()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/pairs/clear")
-        def clear_calibration_pairs():
-            try:
-                return calibration.clear_pairs()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/candidate/compute")
-        def compute_calibration_candidate():
-            try:
-                return calibration.compute_candidate()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.get("/api/calibration/review")
-        def get_calibration_review():
-            try:
-                return calibration.review()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/review/accept")
-        def accept_calibration_review():
-            try:
-                return calibration.accept_review()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/review/cancel")
-        def cancel_calibration_review():
-            try:
-                return calibration.cancel_review()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.get("/api/calibration/stitch-review")
-        def get_stitch_review():
-            try:
-                return calibration.stitch_review()
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.post("/api/calibration/use-current")
-        def use_current_homography(body: dict[str, Any] | None = None):
-            try:
-                return calibration.use_current(body)
-            except Exception as exc:
-                raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        @app.get("/api/calibration/images/{name}")
-        def get_calibration_image(name: str):
-            jpeg = calibration.image(name)
-            if jpeg is None:
-                raise HTTPException(status_code=404, detail="calibration preview unavailable")
-            return Response(content=jpeg, media_type="image/jpeg")
-
-    @app.get("/legacy/calibration", include_in_schema=False)
-    @app.get("/legacy/calibration/", include_in_schema=False)
-    def legacy_calibration_redirect():
-        return RedirectResponse(url="/bakeoff")
 
     if frontend_dist_dir is None:
         frontend_env = os.environ.get("HOGAK_FRONTEND_DIST_DIR", "").strip()
@@ -1824,7 +1784,7 @@ def create_app(
         @app.get("/{full_path:path}", include_in_schema=False)
         def frontend_entrypoint(full_path: str):
             normalized = str(full_path or "").lstrip("/")
-            if normalized.startswith("api/") or normalized.startswith("legacy/"):
+            if normalized.startswith("api/") or normalized.startswith("_internal/") or normalized.startswith("legacy/"):
                 raise HTTPException(status_code=404, detail="not found")
 
             candidate = (frontend_root / normalized).resolve()
@@ -1849,7 +1809,7 @@ def create_app(
         @app.get("/{full_path:path}", include_in_schema=False)
         def frontend_unavailable(full_path: str):
             normalized = str(full_path or "").lstrip("/")
-            if normalized.startswith("api/") or normalized.startswith("legacy/"):
+            if normalized.startswith("api/") or normalized.startswith("_internal/") or normalized.startswith("legacy/"):
                 raise HTTPException(status_code=404, detail="not found")
             return HTMLResponse(content=fallback_html)
 

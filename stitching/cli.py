@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-from pathlib import Path
 import sys
 
 from stitching.runtime_site_config import RuntimeSiteConfigError
@@ -241,59 +239,20 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     operator_server_cmd.add_argument("--host", default="127.0.0.1", help="FastAPI bind host (default: 127.0.0.1)")
     operator_server_cmd.add_argument("--port", type=int, default=8088, help="FastAPI bind port (default: 8088)")
 
-    geometry_bakeoff_cmd = subparsers.add_parser(
-        "geometry-bakeoff",
-        help="Run the quality-first offline geometry bakeoff for four auto-only candidates",
+    mesh_refresh_cmd = subparsers.add_parser(
+        "mesh-refresh",
+        help="Internal path: regenerate the active virtual-center-rectilinear-mesh runtime artifact",
     )
-    _add_native_calibration_args(geometry_bakeoff_cmd)
-    geometry_bakeoff_cmd.add_argument(
-        "--bundle-dir",
-        help="Optional output directory for the bakeoff bundle. Defaults to data/geometry_bakeoff/<timestamp>",
+    _add_native_calibration_args(mesh_refresh_cmd)
+    mesh_refresh_cmd.add_argument(
+        "--refresh-dir",
+        help="Optional internal output directory for mesh-refresh metadata. Defaults to data/mesh_refresh/<timestamp>",
     )
-    geometry_bakeoff_cmd.add_argument(
+    mesh_refresh_cmd.add_argument(
         "--clip-frames",
         type=int,
         default=12,
-        help="Representative synchronized clip length used for the bakeoff bundle",
-    )
-    geometry_bakeoff_cmd.add_argument(
-        "--video-duration-sec",
-        type=int,
-        default=60,
-        help="Output stitched comparison video length per candidate in seconds",
-    )
-    geometry_bakeoff_cmd.add_argument(
-        "--video-fps",
-        type=int,
-        default=15,
-        help="Output stitched comparison video FPS per candidate",
-    )
-
-    geometry_select_cmd = subparsers.add_parser(
-        "geometry-select-winner",
-        help="Freeze a bakeoff winner without changing the active runtime artifact",
-    )
-    geometry_select_cmd.add_argument("--bundle-dir", required=True, help="Bakeoff bundle directory")
-    geometry_select_cmd.add_argument(
-        "--model",
-        required=True,
-        choices=[
-            "left-anchor-homography",
-            "left-anchor-homography-mesh",
-            "virtual-center-rectilinear-rigid",
-            "virtual-center-rectilinear-mesh",
-        ],
-        help="Bakeoff candidate model to freeze as the winner",
-    )
-
-    geometry_promote_cmd = subparsers.add_parser(
-        "geometry-promote-winner",
-        help="Promote a previously selected bakeoff winner into the runtime geometry artifact path",
-    )
-    geometry_promote_cmd.add_argument("--bundle-dir", required=True, help="Bakeoff bundle directory")
-    geometry_promote_cmd.add_argument(
-        "--model",
-        help="Optional explicit candidate model. Defaults to the frozen winner inside the bundle.",
+        help="Representative synchronized clip length used for mesh refresh",
     )
 
     args = parser.parse_args(remaining)
@@ -327,27 +286,10 @@ def main() -> int:
             os.environ["HOGAK_BACKEND_PORT"] = str(int(args.port))
             return int(run_runtime_backend())
 
-        if args.command == "geometry-bakeoff":
-            from stitching.runtime_geometry_bakeoff import run_geometry_bakeoff_from_args
+        if args.command == "mesh-refresh":
+            from stitching.runtime_geometry_bakeoff import run_mesh_refresh_from_args
 
-            return int(run_geometry_bakeoff_from_args(args))
-
-        if args.command == "geometry-select-winner":
-            from stitching.runtime_geometry_bakeoff import select_bakeoff_winner
-
-            result = select_bakeoff_winner(Path(str(args.bundle_dir)).expanduser(), candidate_model=str(args.model))
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-            return 0
-
-        if args.command == "geometry-promote-winner":
-            from stitching.runtime_geometry_bakeoff import promote_bakeoff_winner
-
-            result = promote_bakeoff_winner(
-                Path(str(args.bundle_dir)).expanduser(),
-                candidate_model=str(args.model).strip() if getattr(args, "model", None) else None,
-            )
-            print(json.dumps(result, indent=2, ensure_ascii=False))
-            return 0
+            return int(run_mesh_refresh_from_args(args))
     except RuntimeSiteConfigError as exc:
         print(f"runtime config error: {exc}", file=sys.stderr)
         return 2

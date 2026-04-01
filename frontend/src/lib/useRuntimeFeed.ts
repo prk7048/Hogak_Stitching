@@ -1,32 +1,26 @@
 import { useEffect, useReducer } from "react";
 
 import {
-  fetchGeometryArtifacts,
   fetchRuntimeState,
   normalizeRuntimeState,
   openRuntimeEventStream,
-  type GeometryArtifactSummary,
   type RuntimeEvent,
   type RuntimeState,
 } from "./api";
 
 type FeedState = {
   state: RuntimeState;
-  artifacts: GeometryArtifactSummary[];
-  events: RuntimeEvent[];
   previewVersion: number;
   streamState: "connecting" | "connected" | "offline";
 };
 
 type FeedAction =
-  | { type: "snapshot"; state: RuntimeState; artifacts: GeometryArtifactSummary[] }
+  | { type: "snapshot"; state: RuntimeState }
   | { type: "event"; event: RuntimeEvent }
   | { type: "stream"; streamState: FeedState["streamState"] };
 
 const initialState: FeedState = {
   state: {},
-  artifacts: [],
-  events: [],
   previewVersion: 0,
   streamState: "connecting",
 };
@@ -37,7 +31,6 @@ function reducer(current: FeedState, action: FeedAction): FeedState {
       return {
         ...current,
         state: normalizeRuntimeState(action.state),
-        artifacts: action.artifacts,
         previewVersion: current.previewVersion + 1,
       };
     case "event": {
@@ -48,7 +41,6 @@ function reducer(current: FeedState, action: FeedAction): FeedState {
       return {
         ...current,
         state: nextState,
-        events: [action.event, ...current.events].slice(0, 40),
         previewVersion: shouldRefreshPreview ? current.previewVersion + 1 : current.previewVersion,
       };
     }
@@ -63,8 +55,8 @@ export function useRuntimeFeed() {
   const [feed, dispatch] = useReducer(reducer, initialState);
 
   async function refreshRuntimeSnapshot() {
-    const [nextState, nextArtifacts] = await Promise.all([fetchRuntimeState(), fetchGeometryArtifacts()]);
-    dispatch({ type: "snapshot", state: nextState, artifacts: nextArtifacts });
+    const nextState = await fetchRuntimeState();
+    dispatch({ type: "snapshot", state: nextState });
   }
 
   useEffect(() => {
@@ -110,8 +102,6 @@ export function useRuntimeFeed() {
 
   return {
     state: feed.state,
-    artifacts: feed.artifacts,
-    events: feed.events,
     previewVersion: feed.previewVersion,
     streamState: feed.streamState,
     refreshRuntime: refreshRuntimeSnapshot,
