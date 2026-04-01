@@ -471,7 +471,7 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     elif status == "error" and not status_message:
         status_message = last_error or "Project start failed."
     elif not status_message:
-        status_message = "Start Project refreshes the mesh artifact automatically when needed."
+        status_message = "Start Project recalculates stitch geometry automatically."
 
     can_start = not running and status != "starting" and not config_blocker
     can_stop = running
@@ -547,21 +547,27 @@ def _project_start_response(
     left_rtsp, right_rtsp = _configured_rtsp_urls_for_request(request)
     require_configured_rtsp_urls(left_rtsp, right_rtsp, context="Start Project")
 
+    explicit_artifact_path = backend._resolve_requested_artifact_path(request)
     mesh_refresh_triggered = False
     prepare_result: dict[str, Any] | None = None
+    if explicit_artifact_path is None:
+        backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
+        _internal_mesh_refresh(mesh_refresh, request)
+        mesh_refresh_triggered = True
     try:
         backend.set_project_progress("preparing_runtime", "Preparing runtime.")
         prepare_result = backend.prepare(request)
     except Exception as exc:
         latest_state = _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
-        if not _project_start_needs_mesh_refresh(latest_state, exc):
+        if explicit_artifact_path is not None and _project_start_needs_mesh_refresh(latest_state, exc):
+            backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
+            _internal_mesh_refresh(mesh_refresh, request)
+            mesh_refresh_triggered = True
+            backend.set_project_progress("preparing_runtime", "Preparing runtime.")
+            prepare_result = backend.prepare(request)
+        else:
             backend.set_project_progress("blocked", str(exc))
             raise
-        backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
-        _internal_mesh_refresh(mesh_refresh, request)
-        mesh_refresh_triggered = True
-        backend.set_project_progress("preparing_runtime", "Preparing runtime.")
-        prepare_result = backend.prepare(request)
 
     prepared_project_state = _project_state(backend.state(), mesh_refresh.state())
     if not bool(prepared_project_state.get("runtime_launch_ready")):
@@ -583,9 +589,9 @@ def _project_start_response(
     }
     message = response["message"] or "Project started."
     if mesh_refresh_triggered:
-        response["message"] = f"Mesh refresh ran automatically. {message}".strip()
+        response["message"] = f"Stitch geometry was recalculated automatically. {message}".strip()
     elif prepare_result is not None and bool(prepare_result.get("auto_calibrated")):
-        response["message"] = f"Mesh artifact refreshed automatically. {message}".strip()
+        response["message"] = f"Stitch geometry was recalculated automatically. {message}".strip()
     else:
         response["message"] = message
     return response

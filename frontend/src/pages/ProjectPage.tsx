@@ -105,7 +105,7 @@ export function ProjectPage() {
     text(state.status_message, "") ||
     (state.running
       ? "The project is running. This page reflects the current stitched runtime output."
-      : "Start Project prepares and starts the stitched runtime pipeline automatically.");
+      : "Start Project recalculates stitch geometry and starts the stitched runtime automatically.");
 
   const heading =
     viewMode === "running"
@@ -172,7 +172,7 @@ export function ProjectPage() {
               {viewMode === "ready" ? (
                 <div className="stage-copy">
                   <h2>Start Project runs the stitched runtime</h2>
-                  <p>It checks inputs, refreshes runtime mesh assets when needed, prepares the stitched runtime, and starts output.</p>
+                  <p>It checks inputs, recalculates stitch geometry, prepares the stitched runtime, and starts output.</p>
                   <ul className="stage-list">
                     <li>The active runtime model and artifact shown below are the source of truth after start.</li>
                     <li>The live output follows the stitched runtime pipeline.</li>
