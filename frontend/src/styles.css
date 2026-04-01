@@ -311,6 +311,81 @@ code {
   overflow-wrap: anywhere;
 }
 
+.project-log-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 20px;
+  border: 1px solid rgba(28, 42, 44, 0.08);
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.project-log-header {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.project-log-header strong {
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.project-log-list {
+  display: grid;
+  gap: 10px;
+}
+
+.project-log-item {
+  display: grid;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+  padding: 12px 14px;
+  border-radius: 16px;
+  background: rgba(28, 42, 44, 0.05);
+}
+
+.project-log-item.info {
+  border: 1px solid rgba(28, 42, 44, 0.08);
+}
+
+.project-log-item.success {
+  border: 1px solid rgba(80, 184, 126, 0.18);
+  background: rgba(80, 184, 126, 0.08);
+}
+
+.project-log-item.error {
+  border: 1px solid rgba(226, 159, 68, 0.22);
+  background: rgba(226, 159, 68, 0.12);
+}
+
+.project-log-time {
+  font-size: 0.8rem;
+  color: #6f8687;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.project-log-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.project-log-copy strong {
+  font-size: 0.92rem;
+  text-transform: capitalize;
+}
+
+.project-log-copy p,
+.project-log-empty {
+  margin: 0;
+  color: #5f7474;
+  line-height: 1.6;
+}
+
 .details-panel summary {
   cursor: pointer;
   font-weight: 700;

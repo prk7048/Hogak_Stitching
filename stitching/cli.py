@@ -8,12 +8,11 @@ from stitching.runtime_site_config import RuntimeSiteConfigError
 
 
 CURRENT_MAIN_PATH_NOTE = (
-    "Current Python entrypoints: prepare-runtime/native-calibrate -> run-runtime/native-runtime -> validate-runtime/native-validate, plus operator-server for the FastAPI operator surface."
+    "Current Python entrypoints: operator-server for the product surface, mesh-refresh for internal stitch refresh, and native-calibrate/native-validate for internal maintenance."
 )
 
 COMMAND_ALIASES = {
     "prepare-runtime": "native-calibrate",
-    "run-runtime": "native-runtime",
     "validate-runtime": "native-validate",
 }
 
@@ -183,11 +182,6 @@ def _add_native_calibration_args(
         default="classic",
         help="Calibration match backend. The current path uses the classic matcher only.",
     )
-    cmd.add_argument(
-        "--launch-runtime",
-        action="store_true",
-        help="Launch native runtime immediately after calibration succeeds",
-    )
     cmd.add_argument("--min-matches", type=int, default=40)
     cmd.add_argument("--min-inliers", type=int, default=20)
     # ratio_test : 값이 작을수록 정확도가 높아지고, 매칭되는 점이 적어짐
@@ -213,15 +207,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Current main path: capture RTSP frame pair and save runtime homography",
     )
     _add_native_calibration_args(native_calib_cmd)
-
-    native_cmd = subparsers.add_parser(
-        "native-runtime",
-        aliases=["run-runtime"],
-        help="Current main path: launch native runtime monitor and optional viewers",
-    )
-    from stitching.native_runtime_cli import add_native_runtime_args
-
-    add_native_runtime_args(native_cmd)
 
     native_validate_cmd = subparsers.add_parser(
         "native-validate",
@@ -268,11 +253,6 @@ def main() -> int:
             from stitching.native_calibration import run_native_calibration
 
             return int(run_native_calibration(args))
-
-        if args.command == "native-runtime":
-            from stitching.native_runtime_cli import run_native_runtime_monitor
-
-            return int(run_native_runtime_monitor(args))
 
         if args.command == "native-validate":
             from stitching.native_runtime_validation import run_native_validation

@@ -78,6 +78,17 @@ function directnessLabel(state: ReturnType<typeof useProjectState>["state"]): st
   return "Unknown output path";
 }
 
+function formatLogTime(timestampSec: number | undefined): string {
+  if (!timestampSec || !Number.isFinite(timestampSec)) {
+    return "--:--:--";
+  }
+  return new Date(timestampSec * 1000).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
+
 export function ProjectPage() {
   const { state, loading, refresh } = useProjectState();
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -100,6 +111,7 @@ export function ProjectPage() {
   const zeroCopyBlockers = Array.isArray(state.zero_copy_blockers)
     ? state.zero_copy_blockers.map((item) => String(item ?? "").trim()).filter(Boolean)
     : [];
+  const projectLog = Array.isArray(state.project_log) ? state.project_log : [];
 
   const statusMessage =
     text(state.status_message, "") ||
@@ -246,6 +258,28 @@ export function ProjectPage() {
               <code>{receiveTarget || "Not available until the live runtime is ready."}</code>
               <p>This address is the current stitched runtime output target.</p>
             </div>
+
+            <section className="project-log-panel" aria-label="Project log">
+              <div className="project-log-header">
+                <span className="output-label">Project log</span>
+                <strong>Latest progress</strong>
+              </div>
+              {projectLog.length > 0 ? (
+                <div className="project-log-list">
+                  {projectLog.map((entry, index) => (
+                    <div key={`${entry.id ?? entry.timestamp_sec ?? index}`} className={`project-log-item ${entry.level || "info"}`}>
+                      <span className="project-log-time">{formatLogTime(entry.timestamp_sec)}</span>
+                      <div className="project-log-copy">
+                        <strong>{text(entry.phase, "Info")}</strong>
+                        <p>{text(entry.message, "No message.")}</p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="project-log-empty">Start Project to see the live startup progress and runtime logs here.</p>
+              )}
+            </section>
           </section>
 
           <details className="details-panel" open>

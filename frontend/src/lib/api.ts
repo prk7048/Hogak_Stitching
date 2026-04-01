@@ -1,3 +1,11 @@
+export type ProjectLogEntry = {
+  id?: number;
+  timestamp_sec?: number;
+  phase?: string;
+  level?: string;
+  message?: string;
+};
+
 export type ProjectState = {
   status?: string;
   start_phase?: string;
@@ -24,6 +32,7 @@ export type ProjectState = {
   zero_copy_ready?: boolean;
   zero_copy_reason?: string;
   zero_copy_blockers?: string[];
+  project_log?: ProjectLogEntry[];
 };
 
 export type ProjectActionResponse = {
@@ -83,6 +92,43 @@ function asStringArray(value: unknown): string[] {
   return value.map((item) => asString(item)).filter((item) => item.length > 0);
 }
 
+function asNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function asProjectLogEntry(value: unknown): ProjectLogEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const message = asString(value.message);
+  if (!message) {
+    return null;
+  }
+  return {
+    id: asNumber(value.id, 0),
+    timestamp_sec: asNumber(value.timestamp_sec, 0),
+    phase: asString(value.phase),
+    level: asString(value.level, "info"),
+    message,
+  };
+}
+
+function asProjectLog(value: unknown): ProjectLogEntry[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => asProjectLogEntry(item)).filter((item): item is ProjectLogEntry => item !== null);
+}
+
 function normalizeProjectState(value: unknown): ProjectState {
   if (!isRecord(value)) {
     return {};
@@ -113,6 +159,7 @@ function normalizeProjectState(value: unknown): ProjectState {
     zero_copy_ready: asBoolean(value.zero_copy_ready, false),
     zero_copy_reason: asString(value.zero_copy_reason),
     zero_copy_blockers: asStringArray(value.zero_copy_blockers),
+    project_log: asProjectLog(value.project_log),
   };
 }
 
@@ -174,6 +221,7 @@ export async function fetchProjectState(): Promise<ProjectState> {
       zero_copy_ready: false,
       zero_copy_reason: "Backend unavailable",
       zero_copy_blockers: [],
+      project_log: [],
     };
   }
 }

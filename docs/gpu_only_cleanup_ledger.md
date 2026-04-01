@@ -19,11 +19,11 @@ It intentionally captures only:
 
 The official product geometry is:
 
-- `virtual-center-rectilinear-mesh`
+- `virtual-center-rectilinear-rigid`
 
 The only internal fallback geometry is:
 
-- `virtual-center-rectilinear-rigid`
+- explicit rollback artifacts only
 
 The official operator surface is now:
 
@@ -73,6 +73,7 @@ The following are no longer public product APIs:
 - calibration APIs
 - legacy calibration routes
 - old start-preview endpoints
+- `native-runtime` / `run-runtime` public CLI entrypoint
 
 The only kept internal runtime preparation surface is:
 
@@ -85,7 +86,7 @@ The official operator workflow is:
 
 1. Open `/`.
 2. Press `Start Project`.
-3. Let the system run internal `mesh-refresh` automatically only when needed.
+3. Let the system recompute stitch geometry automatically during start.
 4. Verify `udp://@:24000` from an external player.
 5. Expand `Details` only when you need the active model, checksum, fallback, or GPU path truth.
 6. Press `Stop Project` when finished.
@@ -93,15 +94,16 @@ The official operator workflow is:
 `Start Project` now means only one thing:
 
 - check inputs
-- refresh mesh only when required
+- recompute stitch geometry
 - prepare runtime
+- wait for the first live output frame
 - start transmit
 
 ## Internal Mesh Refresh
 
-`mesh-refresh` replaces bakeoff as the only supported internal preparation path.
+`mesh-refresh` remains as the only supported internal preparation path.
 
-It exists to regenerate the active mesh artifact from the current cameras.
+It exists to regenerate the active rigid runtime artifact from the current cameras.
 
 It is not part of the normal operator flow.
 
@@ -117,15 +119,15 @@ Current internal API:
 POST /_internal/runtime/mesh-refresh
 ```
 
-The output of mesh refresh is expected to become the active mesh artifact used by runtime preparation and validation.
+The output of mesh refresh is expected to become the active rigid runtime artifact used by runtime preparation and validation.
 
 ## Internal Rigid Rollback
 
-The only intended rollback model is:
+The only intended rollback path is:
 
-- `virtual-center-rectilinear-rigid`
+- an explicit internal geometry artifact path
 
-Rigid is not part of the public UI.
+Rollback is not part of the public UI.
 
 It remains available only as an explicit internal rollback path when mesh launch is blocked or mesh artifacts are invalid.
 
@@ -213,15 +215,15 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -strict experimental "udp://
 
 ### Runtime truth
 
-- [ ] `runtime_active_model` reports mesh when mesh is active
-- [ ] `geometry_residual_model` reports `mesh`
+- [ ] `runtime_active_model` reports rigid when the product path is active
+- [ ] `geometry_residual_model` reports `rigid`
 - [ ] `fallback_used` is false for normal operation
 - [ ] checksum and artifact path match the loaded runtime artifact
 
-### Mesh flow
+### Stitch refresh flow
 
-- [ ] `mesh-refresh` can regenerate the active mesh artifact
-- [ ] `Start Project` launches transmit with the active mesh artifact
+- [ ] `mesh-refresh` can regenerate the active rigid artifact
+- [ ] `Start Project` launches transmit with the active rigid artifact
 - [ ] `GET /api/project/state` reports the same active model and artifact
 
 ### Rollback

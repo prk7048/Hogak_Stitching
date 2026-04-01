@@ -5,8 +5,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import subprocess
-import sys
 import time
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Iterator, cast
@@ -2487,41 +2485,4 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         f"score={result['candidate_score']:.3f} "
         f"repr_err={result['mean_reprojection_error']:.2f}"
     )
-    if bool(getattr(args, "launch_runtime", False)):
-        repo_root = Path(__file__).resolve().parent.parent
-        runtime_command = [
-            sys.executable,
-            "-m",
-            "stitching.cli",
-            "native-runtime",
-            "--no-output-ui",
-            "--distortion-mode",
-            "off",
-            "--left-distortion-file",
-            str(args.left_distortion_file),
-            "--right-distortion-file",
-            str(args.right_distortion_file),
-        ]
-        runtime_command.append("--no-use-saved-distortion")
-        runtime_command.append("--no-distortion-auto-save")
-        runtime_command.extend(
-            [
-                "--distortion-lens-model-hint",
-                str(getattr(args, "distortion_lens_model_hint", DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT) or DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT),
-                "--distortion-camera-model",
-                str(getattr(args, "distortion_camera_model", DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL) or DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL),
-            ]
-        )
-        if float(getattr(args, "distortion_horizontal_fov_deg", 0.0) or 0.0) > 0.0:
-            runtime_command.extend(["--distortion-horizontal-fov-deg", str(float(args.distortion_horizontal_fov_deg))])
-        if float(getattr(args, "distortion_vertical_fov_deg", 0.0) or 0.0) > 0.0:
-            runtime_command.extend(["--distortion-vertical-fov-deg", str(float(args.distortion_vertical_fov_deg))])
-        print(f"launching_runtime={' '.join(runtime_command)}")
-        completed = subprocess.run(
-            runtime_command,
-            cwd=str(repo_root),
-            env=os.environ.copy(),
-            check=False,
-        )
-        return int(completed.returncode)
     return 0

@@ -408,6 +408,110 @@ def _project_receive_uri_from_target(target: Any) -> str:
     return f"udp://@:{port}"
 
 
+def _metric_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return bool(value)
+
+
+def _metric_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metrics_indicate_output_ready(metrics: dict[str, Any] | None) -> bool:
+    if not isinstance(metrics, dict):
+        return False
+    runtime_mode = str(metrics.get("production_output_runtime_mode") or "").strip().lower()
+    frames_written = _metric_int(metrics.get("production_output_frames_written"))
+    output_active = _metric_bool(metrics.get("production_output_active"))
+    return output_active and frames_written > 0 and runtime_mode in {"native-nvenc-direct", "native-nvenc-bridge"}
+
+
+def _metrics_output_failure_reason(metrics: dict[str, Any] | None) -> str:
+    if not isinstance(metrics, dict):
+        return ""
+    last_error = str(metrics.get("production_output_last_error") or "").strip()
+    if last_error:
+        return last_error
+    status = str(metrics.get("status") or "").strip().lower()
+    if status in {"gpu_only_output_blocked", "reader_start_failed", "input decode failed", "stitch_failed"}:
+        return status.replace("_", " ")
+    return ""
+
+
+def _project_log_entries(events: Iterable[dict[str, Any]], *, limit: int = 20) -> list[dict[str, Any]]:
+    formatted: list[dict[str, Any]] = []
+    recent_events = list(events)[-max(1, int(limit)) :]
+    for event in recent_events:
+        if not isinstance(event, dict):
+            continue
+        event_type = str(event.get("type") or "").strip().lower()
+        payload = event.get("payload", {})
+        payload = payload if isinstance(payload, dict) else {}
+        phase = str(payload.get("phase") or payload.get("status") or "").strip().lower()
+        timestamp_sec = float(event.get("timestamp_sec") or 0.0)
+        level = "info"
+        message = ""
+        if event_type == "status":
+            message = str(payload.get("message") or "").strip()
+            if not message:
+                status_name = str(payload.get("status") or "").strip().replace("_", " ")
+                if status_name:
+                    message = status_name.capitalize() + "."
+            if phase in {"running", "prepared", "validated"}:
+                level = "success"
+            elif phase in {"blocked", "error"}:
+                level = "error"
+        elif event_type == "hello":
+            phase = phase or "starting_runtime"
+            level = "success"
+            message = "Native runtime process started."
+        elif event_type == "error":
+            phase = phase or "error"
+            level = "error"
+            message = str(payload.get("message") or payload.get("code") or "Runtime error.").strip()
+        elif event_type == "stopped":
+            phase = phase or "idle"
+            message = "Project stopped."
+        elif event_type == "metrics":
+            if _metrics_indicate_output_ready(payload):
+                phase = "running"
+                level = "success"
+                message = "Live output was confirmed."
+            else:
+                failure_reason = _metrics_output_failure_reason(payload)
+                if failure_reason:
+                    phase = phase or "error"
+                    level = "error"
+                    message = failure_reason
+        if not message:
+            continue
+        entry = {
+            "id": int(event.get("id") or 0),
+            "timestamp_sec": timestamp_sec,
+            "phase": phase or event_type or "info",
+            "level": level,
+            "message": message,
+        }
+        if formatted and formatted[-1]["phase"] == entry["phase"] and formatted[-1]["message"] == entry["message"]:
+            formatted[-1]["timestamp_sec"] = entry["timestamp_sec"]
+            formatted[-1]["id"] = entry["id"]
+            continue
+        formatted.append(entry)
+    return formatted[-max(1, int(limit)) :]
+
+
 def _prepare_failure_needs_mesh_refresh(message: str) -> bool:
     normalized = str(message or "").strip().lower()
     if not normalized:
@@ -464,7 +568,7 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     runtime_blocker = ""
     if not needs_mesh_refresh and not bool(merged.get("runtime_launch_ready")):
         runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
-    blocker_reason = config_blocker or merged_blocker or runtime_blocker
+    blocker_reason = config_blocker or merged_blocker or runtime_blocker or last_error
 
     if running:
         status = "running"
@@ -523,6 +627,7 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
         "zero_copy_ready": bool(merged.get("zero_copy_ready")),
         "zero_copy_reason": str(merged.get("zero_copy_reason") or "").strip(),
         "zero_copy_blockers": list(merged.get("zero_copy_blockers") or []),
+        "project_log": _project_log_entries(merged.get("recent_events") or []),
     }
 def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | None = None) -> bool:
     if bool(state.get("running")):
@@ -869,6 +974,8 @@ class RuntimeService:
         }
         self._next_event_id += 1
         self._events.append(record)
+        if len(self._events) > 200:
+            del self._events[:-200]
         self._event_condition.notify_all()
         return record
 
@@ -889,8 +996,23 @@ class RuntimeService:
 
     def set_project_progress(self, phase: str, message: str) -> None:
         with self._lock:
-            self._project_start_phase = str(phase or "idle").strip() or "idle"
-            self._project_status_message = str(message or "").strip()
+            normalized_phase = str(phase or "idle").strip() or "idle"
+            normalized_message = str(message or "").strip()
+            changed = (
+                normalized_phase != self._project_start_phase
+                or normalized_message != self._project_status_message
+            )
+            self._project_start_phase = normalized_phase
+            self._project_status_message = normalized_message
+            if changed:
+                self._record_event(
+                    "status",
+                    {
+                        "status": normalized_phase,
+                        "phase": normalized_phase,
+                        "message": normalized_message,
+                    },
+                )
 
     def project_progress(self) -> tuple[str, str]:
         with self._lock:
@@ -1447,6 +1569,7 @@ class RuntimeService:
             "latest_metrics": self._latest_metrics,
             "latest_validation": self._latest_validation,
             "event_count": len(self._events),
+            "recent_events": [dict(event) for event in self._events[-30:]],
             "gpu_only_mode": True,
             "gpu_only_ready": len(self._gpu_only_blockers) == 0,
             "gpu_only_blockers": list(self._gpu_only_blockers),
@@ -1756,6 +1879,52 @@ class RuntimeService:
                 "state": self._snapshot_locked(),
             }
 
+    def _ingest_runtime_event_locked(self, event: Any) -> None:
+        if event is None:
+            return
+        if event.type == "metrics":
+            self._latest_metrics = event.payload
+        elif event.type == "hello":
+            self._latest_hello = event.payload
+        self._record_event(event.type, event.payload, seq=event.seq)
+
+    def _wait_for_output_ready_locked(self, *, timeout_sec: float = 10.0) -> dict[str, Any]:
+        if self._supervisor is None:
+            raise RuntimeError("runtime supervisor is not available")
+        deadline = time.time() + max(1.0, float(timeout_sec))
+        last_metrics_request_sec = 0.0
+        while time.time() < deadline:
+            if self._supervisor.process.poll() is not None:
+                stderr_tail = self._supervisor.get_stderr_tail().strip()
+                detail = "runtime exited before live output was ready"
+                if stderr_tail:
+                    last_line = stderr_tail.splitlines()[-1].strip()
+                    if last_line:
+                        detail = f"{detail}: {last_line}"
+                raise RuntimeError(detail)
+
+            now = time.time()
+            if now - last_metrics_request_sec >= 1.0:
+                self._supervisor.request_metrics()
+                last_metrics_request_sec = now
+
+            event = self._supervisor.read_event(timeout_sec=min(0.25, max(0.05, deadline - now)))
+            if event is not None:
+                self._ingest_runtime_event_locked(event)
+
+            failure_reason = _metrics_output_failure_reason(self._latest_metrics)
+            if failure_reason:
+                raise RuntimeError(f"runtime output failed before the first frame: {failure_reason}")
+            if _metrics_indicate_output_ready(self._latest_metrics):
+                return dict(self._latest_metrics)
+
+        frames_written = _metric_int(self._latest_metrics.get("production_output_frames_written"))
+        runtime_mode = str(self._latest_metrics.get("production_output_runtime_mode") or "").strip() or "unknown"
+        raise RuntimeError(
+            f"runtime did not confirm live output within {timeout_sec:.1f}s "
+            f"(frames_written={frames_written}, output_path={runtime_mode})"
+        )
+
     def _start_event_pump(self) -> None:
         if self._event_pump_thread is not None:
             return
@@ -1774,11 +1943,7 @@ class RuntimeService:
                     break
                 continue
             with self._lock:
-                if event.type == "metrics":
-                    self._latest_metrics = event.payload
-                elif event.type == "hello":
-                    self._latest_hello = event.payload
-                self._record_event(event.type, event.payload, seq=event.seq)
+                self._ingest_runtime_event_locked(event)
         with self._lock:
             self._event_pump_thread = None
 
@@ -1801,6 +1966,8 @@ class RuntimeService:
                 self._last_error = f"start failed: {' / '.join(blockers)}"
                 self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
                 raise ValueError(" / ".join(blockers))
+            self._last_status = "starting"
+            self._last_error = ""
             self._supervisor = RuntimeSupervisor.launch(plan.launch_spec)
             try:
                 hello = self._supervisor.wait_for_hello(timeout_sec=5.0)
@@ -1809,15 +1976,28 @@ class RuntimeService:
                 self._supervisor.client.reload_config(plan.reload_payload)
                 self._supervisor.request_metrics()
                 self._record_event("status", {"status": "reload_sent", "geometry_artifact_path": str(plan.geometry_artifact_path)})
-            except Exception:
-                self._last_error = "runtime launch handshake failed"
-                self.stop()
-                raise
+                self.set_project_progress("starting_runtime", "Waiting for the first live output frame.")
+                self._wait_for_output_ready_locked(timeout_sec=10.0)
+            except Exception as exc:
+                detail = str(exc).strip() or "runtime launch handshake failed"
+                self._event_pump_stop.set()
+                supervisor = self._supervisor
+                self._supervisor = None
+                try:
+                    if supervisor is not None:
+                        supervisor.close()
+                except Exception:
+                    pass
+                self._last_status = "error"
+                self._last_error = detail
+                self._project_start_phase = "error"
+                self._project_status_message = detail
+                self._record_event("error", {"code": "start_failed", "message": detail})
+                raise ValueError(detail)
             self._start_event_pump()
             self._last_status = "running"
             self._last_error = ""
             self._project_start_phase = "running"
-            self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid})
             transmit_receive_uri = self._receive_uri_from_target(plan.summary.get("transmit_target", ""))
             start_message = (
                 f"런타임을 시작했습니다. 외부 플레이어에서 {transmit_receive_uri or plan.summary.get('transmit_target', '')} 를 여세요."
@@ -1825,6 +2005,7 @@ class RuntimeService:
             receive_uri = transmit_receive_uri or str(plan.summary.get("transmit_target", "")).strip()
             start_message = f"런타임을 시작했습니다. 외부 플레이어에서 {receive_uri} 를 여세요."
             self._project_status_message = start_message
+            self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid, "message": start_message})
             if auto_prepare_result is not None:
                 prepare_message = str(auto_prepare_result.get("message") or "").strip()
                 if prepare_message:
