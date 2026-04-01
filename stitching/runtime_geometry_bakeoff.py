@@ -4,7 +4,7 @@ import argparse
 import json
 import math
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -132,36 +132,83 @@ def _select_best_clip_calibration(
     config: NativeCalibrationConfig,
     clip: list[tuple[np.ndarray, np.ndarray]],
 ) -> tuple[int, np.ndarray, np.ndarray, dict[str, Any]]:
-    successes: list[tuple[tuple[float, int, int], int, np.ndarray, np.ndarray, dict[str, Any]]] = []
-    failures: list[str] = []
-    for index, (left_frame, right_frame) in enumerate(clip):
-        try:
-            result = calibrate_native_homography_from_frames(
-                config,
-                left_frame,
-                right_frame,
-                prompt_for_points=False,
-                review_required=False,
-                save_outputs=False,
+    def _attempt(
+        attempt_name: str,
+        attempt_config: NativeCalibrationConfig,
+    ) -> tuple[
+        list[tuple[tuple[float, int, int], int, np.ndarray, np.ndarray, dict[str, Any]]],
+        list[str],
+    ]:
+        successes: list[tuple[tuple[float, int, int], int, np.ndarray, np.ndarray, dict[str, Any]]] = []
+        failures: list[str] = []
+        for index, (left_frame, right_frame) in enumerate(clip):
+            try:
+                result = calibrate_native_homography_from_frames(
+                    attempt_config,
+                    left_frame,
+                    right_frame,
+                    prompt_for_points=False,
+                    review_required=False,
+                    save_outputs=False,
+                )
+            except StitchingFailure as exc:
+                failures.append(f"frame#{index}:{exc.code.value}:{exc.detail}")
+                continue
+            except Exception as exc:
+                failures.append(f"frame#{index}:{exc}")
+                continue
+            result = dict(result)
+            result["bakeoff_calibration_mode"] = attempt_name
+            result["bakeoff_effective_min_matches"] = int(attempt_config.min_matches)
+            result["bakeoff_effective_min_inliers"] = int(attempt_config.min_inliers)
+            result["bakeoff_effective_min_affine_inliers"] = int(
+                max(
+                    int(getattr(attempt_config, "min_affine_inliers_floor", 12)),
+                    int(attempt_config.min_inliers * 0.6),
+                )
             )
-        except StitchingFailure as exc:
-            failures.append(f"frame#{index}:{exc.code.value}:{exc.detail}")
-            continue
-        except Exception as exc:
-            failures.append(f"frame#{index}:{exc}")
-            continue
-        score = (
-            float(result.get("candidate_score") or 0.0),
-            int(result.get("inliers_count") or 0),
-            int(result.get("matches_count") or 0),
-        )
-        successes.append((score, index, left_frame, right_frame, result))
-    if not successes:
-        detail = " | ".join(failures[:8]) if failures else "unknown"
-        raise ValueError(f"bakeoff calibration failed for all captured frames ({detail})")
-    successes.sort(key=lambda item: item[0], reverse=True)
-    _score, best_index, left_frame, right_frame, result = successes[0]
-    return best_index, left_frame, right_frame, result
+            score = (
+                float(result.get("candidate_score") or 0.0),
+                int(result.get("inliers_count") or 0),
+                int(result.get("matches_count") or 0),
+            )
+            successes.append((score, index, left_frame, right_frame, result))
+        return successes, failures
+
+    relaxed_config = replace(
+        config,
+        min_matches=max(8, min(int(config.min_matches), 12)),
+        min_inliers=max(4, min(int(config.min_inliers), 4)),
+        min_affine_inliers_floor=4,
+        ratio_test=max(float(config.ratio_test), 0.90),
+        ransac_reproj_threshold=max(float(config.ransac_reproj_threshold), 8.0),
+        max_features=max(int(config.max_features), 8000),
+    )
+
+    attempt_records = [("strict", config)]
+    if (
+        relaxed_config.min_matches != config.min_matches
+        or relaxed_config.min_inliers != config.min_inliers
+        or relaxed_config.min_affine_inliers_floor != getattr(config, "min_affine_inliers_floor", 12)
+        or abs(relaxed_config.ratio_test - config.ratio_test) > 1e-9
+        or abs(relaxed_config.ransac_reproj_threshold - config.ransac_reproj_threshold) > 1e-9
+        or relaxed_config.max_features != config.max_features
+    ):
+        attempt_records.append(("relaxed", relaxed_config))
+
+    aggregate_failures: list[str] = []
+    for attempt_name, attempt_config in attempt_records:
+        successes, failures = _attempt(attempt_name, attempt_config)
+        if successes:
+            successes.sort(key=lambda item: item[0], reverse=True)
+            _score, best_index, left_frame, right_frame, result = successes[0]
+            return best_index, left_frame, right_frame, result
+        if failures:
+            joined = " | ".join(failures[:8])
+            aggregate_failures.append(f"{attempt_name}[{joined}]")
+
+    detail = " | ".join(aggregate_failures[:2]) if aggregate_failures else "unknown"
+    raise ValueError(f"bakeoff calibration failed for all captured frames ({detail})")
 
 
 def _warp_right_to_left_canvas(
@@ -1310,6 +1357,16 @@ def run_geometry_bakeoff(
             {
                 "good_match_count": int(calibration_result.get("matches_count") or 0),
                 "inlier_count": int(calibration_result.get("inliers_count") or 0),
+                "bakeoff_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
+                "bakeoff_effective_min_matches": int(calibration_result.get("bakeoff_effective_min_matches") or config.min_matches),
+                "bakeoff_effective_min_inliers": int(calibration_result.get("bakeoff_effective_min_inliers") or config.min_inliers),
+                "bakeoff_effective_min_affine_inliers": int(
+                    calibration_result.get("bakeoff_effective_min_affine_inliers")
+                    or max(
+                        int(getattr(config, "min_affine_inliers_floor", 12)),
+                        int(config.min_inliers * 0.6),
+                    )
+                ),
                 "candidate_dir": str(candidate_dir),
                 "runtime_artifact_path": str(runtime_artifact_path) if runtime_artifact_path is not None else "",
                 "stitched_preview_path": str(candidate_dir / "stitched_preview.png"),
@@ -1341,6 +1398,16 @@ def run_geometry_bakeoff(
         "created_at_epoch_sec": int(time.time()),
         "status": "ready",
         "representative_frame_index": int(representative_index),
+        "bakeoff_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
+        "bakeoff_effective_min_matches": int(calibration_result.get("bakeoff_effective_min_matches") or config.min_matches),
+        "bakeoff_effective_min_inliers": int(calibration_result.get("bakeoff_effective_min_inliers") or config.min_inliers),
+        "bakeoff_effective_min_affine_inliers": int(
+            calibration_result.get("bakeoff_effective_min_affine_inliers")
+            or max(
+                int(getattr(config, "min_affine_inliers_floor", 12)),
+                int(config.min_inliers * 0.6),
+            )
+        ),
         "clip_frame_count": int(len(clip)),
         "video_duration_sec": int(video_duration_sec),
         "video_fps": int(video_fps),

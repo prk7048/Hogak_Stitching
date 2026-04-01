@@ -13,6 +13,7 @@ class StitchConfig:
 
     min_matches: int = 80
     min_inliers: int = 30
+    min_affine_inliers_floor: int = 12
     ratio_test: float = 0.75
     ransac_reproj_threshold: float = 5.0
     max_features: int = 4000

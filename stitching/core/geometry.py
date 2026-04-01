@@ -59,7 +59,8 @@ def _estimate_affine_homography(
         raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "affine fallback estimation returned null")
 
     inliers = int(inlier_mask.ravel().sum())
-    min_affine_inliers = max(12, int(config.min_inliers * 0.6))
+    affine_floor = max(0, int(getattr(config, "min_affine_inliers_floor", 12)))
+    min_affine_inliers = max(affine_floor, int(config.min_inliers * 0.6))
     if inliers < min_affine_inliers:
         raise StitchingFailure(
             ErrorCode.HOMOGRAPHY_FAIL,
