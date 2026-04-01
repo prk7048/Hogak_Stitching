@@ -205,6 +205,7 @@ private:
         int transition_px,
         cv::Mat* stitched_out) const;
     cv::Rect largest_valid_rect_locked(const cv::Mat& valid_mask) const;
+    cv::Rect resolve_runtime_crop_rect_locked(const cv::Mat& valid_mask) const;
     bool compose_stitched_video_quality_locked(
         const cv::Mat& canvas_left,
         const cv::Mat& warped_right,

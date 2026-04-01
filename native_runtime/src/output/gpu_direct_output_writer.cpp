@@ -969,12 +969,26 @@ void GpuDirectOutputWriter::run() {
         last_error_ = std::string(kBridgeWarningPrefix) + reason_text;
     };
 
+    auto fail_direct_only = [&](const std::string& reason) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        runtime_mode_ = "native-nvenc-bridge";
+        command_line_ = upsert_command_line_token(command_line_, "mode", "direct-required-blocked");
+        command_line_ = upsert_command_line_token(
+            command_line_,
+            "bridge-reason",
+            sanitize_runtime_token(reason));
+        last_error_ = "gpu-direct direct-only requirement failed: " + reason;
+        active_.store(false);
+    };
+
     if (impl_->bgra_bridge_active) {
         set_runtime_mode("cuda-hwframes-bgra-bridge", "awaiting first direct-fill attempt");
     } else if (impl_->cuda_hw_frames_active) {
-        set_runtime_mode("cuda-hwframes", "encoder opened with cuda hwframes but not BGRA direct-fill");
+        fail_direct_only("encoder opened with cuda hwframes but BGRA direct-fill is unavailable");
+        return;
     } else {
-        set_runtime_mode("cpu-bridge", "encoder path does not use cuda hwframes");
+        fail_direct_only("encoder path does not use CUDA hwframes");
+        return;
     }
 
     while (active_.load()) {
@@ -1034,74 +1048,23 @@ void GpuDirectOutputWriter::run() {
                     }
                     prepared_gpu_frame_ready = true;
                 } else {
-                    if (current_frame.empty()) {
-                        continue;
-                    }
-                    if (current_frame.cols != width || current_frame.rows != height) {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        last_error_ = "gpu-direct bgra bridge expects frame matching output size";
-                        active_.store(false);
-                        break;
-                    }
-                    if (current_frame.type() == CV_8UC4) {
-                        if (!current_frame.isContinuous()) {
-                            prepared_frame = current_frame.clone();
-                            prepared_frame_view = &prepared_frame;
-                        } else {
-                            prepared_frame_view = &current_frame;
-                        }
-                    } else if (current_frame.type() == CV_8UC3) {
-                        cv::cvtColor(current_frame, prepared_frame, cv::COLOR_BGR2BGRA);
-                        prepared_frame_view = &prepared_frame;
-                    } else {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        last_error_ = "gpu-direct bgra bridge expects BGR/BGRA frame";
-                        active_.store(false);
-                        break;
-                    }
+                    fail_direct_only("writer received CPU-prepared frame, so direct-fill is unavailable");
+                    break;
                 }
 
                 if (!prepared_gpu_frame_ready && (prepared_frame_view == nullptr || prepared_frame_view->empty())) {
-                    continue;
+                    fail_direct_only("direct-fill requires a GPU-resident BGRA frame");
+                    break;
                 }
                 if (!prepared_gpu_frame_ready &&
                     (prepared_frame_view->cols != width || prepared_frame_view->rows != height ||
                      prepared_frame_view->type() != CV_8UC4)) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    last_error_ = "gpu-direct bgra bridge expects BGRA frame matching output size";
-                    active_.store(false);
+                    fail_direct_only("direct-fill requires a BGRA frame matching output size");
                     break;
                 }
             } else {
-                const cv::Mat* source_frame = &current_frame;
-                if (current_frame_on_gpu) {
-                    try {
-                        current_gpu_frame.download(bridge_frame);
-                    } catch (const cv::Exception& e) {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        last_error_ = std::string("gpu-direct cpu bridge download failed: ") + e.what();
-                        active_.store(false);
-                        break;
-                    }
-                    source_frame = &bridge_frame;
-                }
-
-                if (source_frame->empty()) {
-                    continue;
-                }
-                if (source_frame->cols != width || source_frame->rows != height || source_frame->type() != CV_8UC3) {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    last_error_ = "gpu-direct writer expects contiguous BGR frame matching output size";
-                    active_.store(false);
-                    break;
-                }
-
-                if (!source_frame->isContinuous()) {
-                    prepared_frame = source_frame->clone();
-                    prepared_frame_view = &prepared_frame;
-                } else {
-                    prepared_frame_view = source_frame;
-                }
+                fail_direct_only("writer would need a CPU bridge submission path");
+                break;
             }
         }
         if (!prepared_gpu_frame_ready && (prepared_frame_view == nullptr || prepared_frame_view->empty())) {
@@ -1199,35 +1162,29 @@ void GpuDirectOutputWriter::run() {
                     bridge_reason = direct_fill_error.empty()
                         ? "direct-fill copy into hw frame failed"
                         : ("direct-fill unavailable: " + direct_fill_error);
+                    fail_direct_only(bridge_reason);
+                    av_frame_free(&hw_frame);
+                    break;
                 }
             } else if (impl_->bgra_bridge_active && prepared_gpu_frame_ready && !direct_fill_retry_due) {
                 impl_->bgra_direct_fill_active = false;
-                bridge_reason = "awaiting direct-fill retry window";
+                fail_direct_only("direct-fill retry window would require bridge buffering");
+                av_frame_free(&hw_frame);
+                break;
             } else if (impl_->bgra_bridge_active && !prepared_gpu_frame_ready) {
                 impl_->bgra_direct_fill_active = false;
-                bridge_reason = "writer received CPU-prepared frame, so direct-fill is unavailable";
+                fail_direct_only("writer received non-GPU content, so direct-fill is unavailable");
+                av_frame_free(&hw_frame);
+                break;
             }
 
             if (!hw_frame_filled_directly) {
-                if (impl_->bgra_bridge_active) {
-                    set_runtime_mode("cuda-hwframes-bgra-bridge", bridge_reason.c_str());
-                } else {
-                    set_runtime_mode(
-                        "cuda-hwframes",
-                        "encoder opened with cuda hwframes but requires software bridge submission");
-                }
-                if (!ensure_software_frame_ready()) {
-                    av_frame_free(&hw_frame);
-                    break;
-                }
-                result = av_hwframe_transfer_data(hw_frame, impl_->frame, 0);
-                if (result < 0) {
-                    av_frame_free(&hw_frame);
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    last_error_ = "gpu-direct av_hwframe_transfer_data failed: " + ffmpeg_error_text(result);
-                    active_.store(false);
-                    break;
-                }
+                fail_direct_only(
+                    bridge_reason.empty()
+                        ? "encoder path would require software bridge submission"
+                        : bridge_reason);
+                av_frame_free(&hw_frame);
+                break;
             }
             frame_to_send = hw_frame;
         } else if (!ensure_software_frame_ready()) {

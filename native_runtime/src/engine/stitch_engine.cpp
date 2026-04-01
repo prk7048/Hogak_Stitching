@@ -2099,6 +2099,21 @@ cv::Rect StitchEngine::largest_valid_rect_locked(const cv::Mat& valid_mask) cons
     return best_rect;
 }
 
+cv::Rect StitchEngine::resolve_runtime_crop_rect_locked(const cv::Mat& valid_mask) const {
+    cv::Rect crop_rect = runtime_geometry_.crop_enabled ? runtime_geometry_.crop_rect : cv::Rect();
+    const bool crop_rect_valid =
+        crop_rect.width > 0 &&
+        crop_rect.height > 0 &&
+        crop_rect.x >= 0 &&
+        crop_rect.y >= 0 &&
+        crop_rect.x + crop_rect.width <= valid_mask.cols &&
+        crop_rect.y + crop_rect.height <= valid_mask.rows;
+    if (crop_rect_valid) {
+        return crop_rect;
+    }
+    return largest_valid_rect_locked(valid_mask);
+}
+
 bool StitchEngine::compose_stitched_video_quality_locked(
     const cv::Mat& canvas_left,
     const cv::Mat& warped_right,
@@ -3670,16 +3685,17 @@ std::string StitchEngine::runtime_alignment_truth_locked() const {
 }
 
 std::string StitchEngine::runtime_seam_truth_locked() const {
-    if (runtime_geometry_.model == "cylindrical-affine" ||
-        runtime_geometry_.model == "virtual-center-rectilinear") {
+    if (runtime_geometry_.model == "virtual-center-rectilinear") {
+        return "fixed-seam";
+    }
+    if (runtime_geometry_.model == "cylindrical-affine") {
         return "min-cost-seam";
     }
     return "seam_feather";
 }
 
 std::string StitchEngine::runtime_exposure_truth_locked() const {
-    return ((runtime_geometry_.model == "cylindrical-affine" ||
-             runtime_geometry_.model == "virtual-center-rectilinear") &&
+    return (runtime_geometry_.model == "cylindrical-affine" &&
             runtime_geometry_.exposure_enabled)
         ? "gain-bias"
         : "off";
@@ -3966,7 +3982,8 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
     metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
     metrics_.exposure_gain = last_exposure_gain_;
     metrics_.exposure_bias = last_exposure_bias_;
-    metrics_.blend_mode = metrics_.seam_mode;
+    metrics_.blend_mode =
+        runtime_geometry_.model == "virtual-center-rectilinear" ? "simple-feather" : metrics_.seam_mode;
     return true;
 }
 
@@ -3984,7 +4001,8 @@ void StitchEngine::apply_runtime_geometry_to_metrics_locked() {
     metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
     metrics_.exposure_gain = last_exposure_gain_;
     metrics_.exposure_bias = last_exposure_bias_;
-    metrics_.blend_mode = metrics_.seam_mode;
+    metrics_.blend_mode =
+        runtime_geometry_.model == "virtual-center-rectilinear" ? "simple-feather" : metrics_.seam_mode;
 }
 
 bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv::Size& right_size) {
@@ -4538,6 +4556,14 @@ bool StitchEngine::stitch_pair_locked(
                 return !cpu_frame->empty();
             };
             auto upload_cpu_frame = [&](const cv::Mat* cpu_frame, cv::cuda::GpuMat* gpu_frame, const char* label) {
+                if (gpu_only_mode || rectilinear_runtime) {
+                    throw cv::Exception(
+                        cv::Error::StsError,
+                        std::string(label) + " input would require CPU upload in a GPU-only stitch path",
+                        __FUNCTION__,
+                        __FILE__,
+                        __LINE__);
+                }
                 if (cpu_frame == nullptr || cpu_frame->empty()) {
                     throw cv::Exception(cv::Error::StsError, std::string(label) + " input frame unavailable", __FUNCTION__, __FILE__, __LINE__);
                 }
@@ -4551,10 +4577,18 @@ bool StitchEngine::stitch_pair_locked(
                                                      cv::cuda::GpuMat* decoded_bgr_gpu,
                                                      cv::cuda::GpuMat* final_bgr_gpu,
                                                      const char* label,
-                                                     std::int64_t input_seq,
-                                                     cv::Mat* cached_frame,
-                                                     std::int64_t* cached_seq) {
+                                                      std::int64_t input_seq,
+                                                      cv::Mat* cached_frame,
+                                                      std::int64_t* cached_seq) {
                 if (raw_input == nullptr) {
+                    if (gpu_only_mode || rectilinear_runtime) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            std::string(label) + " input would require CPU staging in a GPU-only stitch path",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
                     if (!ensure_cpu_frame(cpu_frame, raw_input, stream_config, input_seq, cached_frame, cached_seq)) {
                         throw cv::Exception(cv::Error::StsError, std::string(label) + " input frame unavailable", __FUNCTION__, __FILE__, __LINE__);
                     }
@@ -4580,10 +4614,10 @@ bool StitchEngine::stitch_pair_locked(
                     }
                     gpu_nv12_input_supported_ = false;
                     metrics_.gpu_reason = std::string("cuda nv12 input unsupported: ") + e.what();
-                    if (gpu_only_mode) {
+                    if (gpu_only_mode || rectilinear_runtime) {
                         throw cv::Exception(
                             cv::Error::StsError,
-                            "gpu-only nv12 upload path unavailable",
+                            "gpu-only rectilinear stitch path requires NV12 GPU upload without CPU fallback",
                             __FUNCTION__,
                             __FILE__,
                             __LINE__);
@@ -4614,6 +4648,14 @@ bool StitchEngine::stitch_pair_locked(
                         &cached_left_cpu_frame_,
                         &cached_left_cpu_seq_);
                 } else {
+                    if (gpu_only_mode || rectilinear_runtime) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "left input would require CPU staging in a GPU-only stitch path",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
                     if (!ensure_cpu_frame(
                             &left_cpu_frame,
                             left_raw_input,
@@ -4725,6 +4767,14 @@ bool StitchEngine::stitch_pair_locked(
                         &cached_right_cpu_frame_,
                         &cached_right_cpu_seq_);
                 } else {
+                    if (gpu_only_mode || rectilinear_runtime) {
+                        throw cv::Exception(
+                            cv::Error::StsError,
+                            "right input would require CPU staging in a GPU-only stitch path",
+                            __FUNCTION__,
+                            __FILE__,
+                            __LINE__);
+                    }
                     if (!ensure_cpu_frame(
                             &right_cpu_frame,
                             right_raw_input,
@@ -4811,102 +4861,77 @@ bool StitchEngine::stitch_pair_locked(
                         homography_adjusted_,
                         output_size_);
                 }
-                if (rectilinear_runtime && runtime_geometry_.mesh_enabled) {
-                    if (runtime_geometry_.mesh_map_x_gpu.empty() || runtime_geometry_.mesh_map_y_gpu.empty()) {
-                        throw cv::Exception(
-                            cv::Error::StsError,
-                            "right virtual-center mesh gpu map unavailable",
-                            __FUNCTION__,
-                            __FILE__,
-                            __LINE__);
-                    }
-                    cv::cuda::remap(
-                        gpu_right_aligned_,
-                        gpu_right_warped_,
-                        runtime_geometry_.mesh_map_x_gpu,
-                        runtime_geometry_.mesh_map_y_gpu,
-                        cv::INTER_LINEAR,
-                        cv::BORDER_CONSTANT,
-                        cv::Scalar());
-                } else if (rectilinear_runtime) {
+                if (rectilinear_runtime) {
                     gpu_right_aligned_.copyTo(gpu_right_warped_);
                 }
                 metrics_.gpu_warp_count += 1;
                 cached_right_warped_seq_ = selected_pair.right_seq;
             }
             used_gpu_geometry = true;
-            if (rectilinear_runtime) {
-                gpu_left_canvas_.download(canvas_left);
+            if (sample_heavy_metrics) {
                 gpu_right_warped_.download(warped_right);
-                if (!compose_stitched_video_quality_locked(
-                        canvas_left,
-                        warped_right,
-                        &stitched,
-                        &used_exposure_compensation,
-                        &used_dynamic_seam)) {
-                    throw cv::Exception(
-                        cv::Error::StsError,
-                        "virtual-center stitched-video quality compose failed",
-                        __FUNCTION__,
-                        __FILE__,
-                        __LINE__);
-                }
-                try {
-                    gpu_stitched_.upload(stitched);
-                    gpu_output_frame_ready = !gpu_stitched_.empty();
-                } catch (const cv::Exception& upload_error) {
-                    metrics_.gpu_errors += 1;
-                    metrics_.gpu_reason =
-                        std::string("virtual-center cropped stitch upload failed: ") + upload_error.what();
-                    gpu_stitched_.release();
-                    gpu_output_frame_ready = false;
-                }
-            } else {
-                if (sample_heavy_metrics) {
-                    gpu_right_warped_.download(warped_right);
-                    metrics_.warped_mean_luma = mean_luma(warped_right);
-                }
-
-                gpu_stitched_.create(output_size_, CV_8UC3);
-                gpu_stitched_.setTo(cv::Scalar::all(0));
-                gpu_left_canvas_.copyTo(gpu_stitched_, gpu_only_left_mask_);
-                gpu_right_warped_.copyTo(gpu_stitched_, gpu_only_right_mask_);
-
-                if (overlap_roi_.area() > 0) {
-                    cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
-                    cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
-                    cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
-
-                    cv::cuda::GpuMat left_overlap_f;
-                    cv::cuda::GpuMat right_overlap_f;
-                    left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
-                    right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
-
-                    std::vector<cv::cuda::GpuMat> left_channels;
-                    std::vector<cv::cuda::GpuMat> right_channels;
-                    std::vector<cv::cuda::GpuMat> blended_channels(3);
-                    cv::cuda::split(left_overlap_f, left_channels);
-                    cv::cuda::split(right_overlap_f, right_channels);
-                    for (int channel = 0; channel < 3; ++channel) {
-                        cv::cuda::GpuMat left_part;
-                        cv::cuda::GpuMat right_part;
-                        cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
-                        cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
-                        cv::cuda::add(left_part, right_part, blended_channels[channel]);
-                    }
-
-                    cv::cuda::merge(blended_channels, gpu_overlap_f_);
-                    gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
-                    gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
-                }
-
-                if (need_cpu_stitched) {
-                    gpu_stitched_.download(stitched);
-                }
-                metrics_.gpu_blend_count += 1;
-                metrics_.overlap_diff_mean = 0.0;
-                used_gpu_blend = true;
+                metrics_.warped_mean_luma = mean_luma(warped_right);
             }
+
+            gpu_stitched_.create(output_size_, CV_8UC3);
+            gpu_stitched_.setTo(cv::Scalar::all(0));
+            gpu_left_canvas_.copyTo(gpu_stitched_, gpu_only_left_mask_);
+            gpu_right_warped_.copyTo(gpu_stitched_, gpu_only_right_mask_);
+
+            if (overlap_roi_.area() > 0) {
+                cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
+                cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
+                cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
+
+                cv::cuda::GpuMat left_overlap_f;
+                cv::cuda::GpuMat right_overlap_f;
+                left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
+                right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
+
+                std::vector<cv::cuda::GpuMat> left_channels;
+                std::vector<cv::cuda::GpuMat> right_channels;
+                std::vector<cv::cuda::GpuMat> blended_channels(3);
+                cv::cuda::split(left_overlap_f, left_channels);
+                cv::cuda::split(right_overlap_f, right_channels);
+                for (int channel = 0; channel < 3; ++channel) {
+                    cv::cuda::GpuMat left_part;
+                    cv::cuda::GpuMat right_part;
+                    cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
+                    cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
+                    cv::cuda::add(left_part, right_part, blended_channels[channel]);
+                }
+
+                cv::cuda::merge(blended_channels, gpu_overlap_f_);
+                gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
+                gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
+            }
+
+            if (rectilinear_runtime) {
+                cv::Mat valid_mask;
+                cv::bitwise_or(left_mask_template_, right_mask_template_, valid_mask);
+                const cv::Rect crop_rect = resolve_runtime_crop_rect_locked(valid_mask);
+                const bool crop_valid =
+                    crop_rect.width > 0 &&
+                    crop_rect.height > 0 &&
+                    crop_rect.x >= 0 &&
+                    crop_rect.y >= 0 &&
+                    crop_rect.x + crop_rect.width <= gpu_stitched_.cols &&
+                    crop_rect.y + crop_rect.height <= gpu_stitched_.rows;
+                if (crop_valid &&
+                    (crop_rect.width != gpu_stitched_.cols || crop_rect.height != gpu_stitched_.rows)) {
+                    cv::cuda::GpuMat cropped_view(gpu_stitched_, crop_rect);
+                    cv::cuda::GpuMat cropped_copy;
+                    cropped_view.copyTo(cropped_copy);
+                    gpu_stitched_ = cropped_copy;
+                }
+            }
+
+            if (need_cpu_stitched) {
+                gpu_stitched_.download(stitched);
+            }
+            metrics_.gpu_blend_count += 1;
+            metrics_.overlap_diff_mean = 0.0;
+            used_gpu_blend = true;
         } catch (const cv::Exception& e) {
             if (rectilinear_runtime) {
                 metrics_.gpu_errors += 1;
@@ -4922,11 +4947,15 @@ bool StitchEngine::stitch_pair_locked(
     }
 
     if (!used_gpu_blend && stitched.empty()) {
-        if (gpu_only_mode) {
-            metrics_.status = "gpu_only_path_unavailable";
+        if (gpu_only_mode || rectilinear_runtime) {
+            metrics_.status = rectilinear_runtime
+                ? "virtual_center_rectilinear_cpu_fallback_blocked"
+                : "gpu_only_path_unavailable";
             metrics_.stitch_fps = 0.0;
             metrics_.gpu_feature_enabled = false;
-            metrics_.gpu_feature_reason = "gpu-only mode could not keep the stitch path on GPU";
+            metrics_.gpu_feature_reason = rectilinear_runtime
+                ? "virtual-center-rectilinear requires a fully GPU-resident stitch path"
+                : "gpu-only mode could not keep the stitch path on GPU";
             return false;
         }
         if (runtime_geometry_.model == "cylindrical-affine") {
@@ -5136,6 +5165,22 @@ bool StitchEngine::stitch_pair_locked(
         }
 
         metrics_.cpu_blend_count += 1;
+        if (rectilinear_runtime) {
+            cv::Mat valid_mask;
+            cv::bitwise_or(left_mask_template_, right_mask_template_, valid_mask);
+            const cv::Rect crop_rect = resolve_runtime_crop_rect_locked(valid_mask);
+            const bool crop_valid =
+                crop_rect.width > 0 &&
+                crop_rect.height > 0 &&
+                crop_rect.x >= 0 &&
+                crop_rect.y >= 0 &&
+                crop_rect.x + crop_rect.width <= stitched.cols &&
+                crop_rect.y + crop_rect.height <= stitched.rows;
+            if (crop_valid &&
+                (crop_rect.width != stitched.cols || crop_rect.height != stitched.rows)) {
+                stitched = stitched(crop_rect).clone();
+            }
+        }
         }
     }
 
@@ -5163,9 +5208,15 @@ bool StitchEngine::stitch_pair_locked(
         metrics_.exposure_gain = 1.0;
         metrics_.exposure_bias = 0.0;
     }
-    metrics_.seam_mode = used_dynamic_seam ? "min-cost-seam" : "seam_feather";
-    metrics_.blend_mode = used_dynamic_seam ? "narrow-seam-feather" : "seam_feather";
-    metrics_.exposure_mode = used_exposure_compensation ? "gain-bias" : "off";
+    if (rectilinear_runtime) {
+        metrics_.seam_mode = "fixed-seam";
+        metrics_.blend_mode = "simple-feather";
+        metrics_.exposure_mode = "off";
+    } else {
+        metrics_.seam_mode = used_dynamic_seam ? "min-cost-seam" : "seam_feather";
+        metrics_.blend_mode = used_dynamic_seam ? "narrow-seam-feather" : "seam_feather";
+        metrics_.exposure_mode = used_exposure_compensation ? "gain-bias" : "off";
+    }
     metrics_.gpu_feature_enabled = used_gpu_blend || used_gpu_geometry || gpu_output_frame_ready;
     if (used_dynamic_seam && (used_gpu_geometry || gpu_output_frame_ready)) {
         metrics_.gpu_feature_reason = "gpu remap with stitched-video postprocess active";

@@ -127,7 +127,7 @@ npm run build</pre>
         <ul>
           <li>제품용 public API 는 <code>/api/runtime/*</code> 와 <code>/api/artifacts/geometry*</code> 만 유지됩니다.</li>
           <li>Bakeoff, calibration, debug 경로는 public surface에서 제거되었고 내부 경로로만 유지됩니다.</li>
-          <li>이 브랜치의 기본 truth 는 <code>virtual-center-rectilinear-mesh</code> 이며, launch-ready 확인 전에는 시작이 차단됩니다.</li>
+          <li>이 브랜치의 기본 truth 는 <code>virtual-center-rectilinear-rigid</code> 이며, launch-ready 확인 전에는 시작이 차단됩니다.</li>
           <li>React 번들이 준비되면 대시보드에서 <code>정렬 미리보기</code>, <code>시작</code>, <code>검증</code> 흐름만 노출됩니다.</li>
         </ul>
       </div>
@@ -221,7 +221,8 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
 
     output_path_mode = production_output_runtime_mode or "unknown"
     output_path_direct = output_path_mode == "native-nvenc-direct"
-    output_path_bridge = output_path_mode in {"native-nvenc-bridge", "gpu-direct"}
+    output_path_bridge = output_path_mode == "native-nvenc-bridge"
+    output_path_requested_direct = output_path_mode == "gpu-direct"
     zero_copy_blockers: list[str] = []
     if input_path_mode == "cuda-decode-cpu-staged":
         zero_copy_blockers.append("reader transfers decoded frames to CPU before stitch input")
@@ -229,7 +230,7 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         zero_copy_blockers.append(f"input path is {input_path_mode}, not zero-copy")
     else:
         zero_copy_blockers.append("input path truth is unavailable")
-    if not output_path_direct:
+    if not output_path_direct and not output_path_requested_direct:
         if output_path_mode == "unknown":
             zero_copy_blockers.append("output path truth is unavailable")
         elif output_path_mode == "native-nvenc-unavailable":
@@ -298,16 +299,21 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     ]
     needs_mesh_refresh = (
         not runtime_active_artifact_path
-        or str(runtime_active_residual_model or "").strip().lower() != "mesh"
+        or str(runtime_active_residual_model or "").strip().lower() != "rigid"
         or fallback_used
         or not runtime_launch_ready
     )
 
-    blocker_reason = ""
+    blocker_reasons: list[str] = []
     if gpu_only_blockers:
-        blocker_reason = " / ".join(gpu_only_blockers)
-    elif not runtime_launch_ready and not needs_mesh_refresh:
-        blocker_reason = runtime_launch_ready_reason or "runtime geometry is not launch-ready"
+        blocker_reasons.extend(gpu_only_blockers)
+    if not zero_copy_ready:
+        blocker_reasons.extend(zero_copy_blockers)
+    if not output_receive_uri:
+        blocker_reasons.append("output receive URI is unavailable")
+    if not runtime_launch_ready and not needs_mesh_refresh:
+        blocker_reasons.append(runtime_launch_ready_reason or "runtime geometry is not launch-ready")
+    blocker_reason = " / ".join(item for item in blocker_reasons if str(item).strip())
 
     running = bool(merged.get("running"))
     status = str(merged.get("status") or "idle").strip() or "idle"
@@ -323,7 +329,7 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         status_message = blocker_reason
     elif needs_mesh_refresh:
         start_phase = "refreshing_mesh"
-        status_message = "Start Project will refresh the runtime mesh automatically."
+        status_message = "Start Project will recompute rigid stitch geometry automatically."
     else:
         start_phase = "ready"
         status_message = "Project is ready to start."
@@ -408,7 +414,7 @@ def _prepare_failure_needs_mesh_refresh(message: str) -> bool:
             "mesh-refresh",
             "launch-ready runtime geometry artifact",
             "internal fallback model",
-            "active mesh artifact",
+            "active rigid artifact",
         )
     )
 
@@ -449,13 +455,14 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
 
     start_phase = str(merged.get("project_start_phase") or "").strip().lower()
     status_message = str(merged.get("project_status_message") or "").strip()
-    blocker_reason = config_blocker or str(merged.get("runtime_launch_ready_reason") or "").strip()
+    merged_blocker = str(merged.get("blocker_reason") or "").strip()
+    blocker_reason = config_blocker or merged_blocker or str(merged.get("runtime_launch_ready_reason") or "").strip()
 
     if running:
         status = "running"
     elif start_phase in {"checking_inputs", "refreshing_mesh", "preparing_runtime", "starting_runtime"}:
         status = "starting"
-    elif config_blocker:
+    elif blocker_reason:
         status = "blocked"
     elif last_error:
         status = "error"
@@ -473,7 +480,7 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     elif not status_message:
         status_message = "Start Project recalculates stitch geometry automatically."
 
-    can_start = not running and status != "starting" and not config_blocker
+    can_start = not running and status != "starting" and not blocker_reason
     can_stop = running
     output_target = str(merged.get("production_output_target") or "").strip()
 
@@ -511,7 +518,7 @@ def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | No
     residual = str(state.get("geometry_residual_model") or "").strip().lower()
     if not str(state.get("runtime_active_artifact_path") or "").strip():
         return True
-    if residual and residual != "mesh":
+    if residual and residual != "rigid":
         return True
     if bool(state.get("fallback_used")):
         return True
@@ -522,7 +529,7 @@ def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | No
         token in message
         for token in (
             "mesh-refresh",
-            "mesh artifact",
+            "rigid artifact",
             "launch-ready runtime geometry artifact",
             "internal fallback model",
         )
@@ -551,7 +558,7 @@ def _project_start_response(
     mesh_refresh_triggered = False
     prepare_result: dict[str, Any] | None = None
     if explicit_artifact_path is None:
-        backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
+        backend.set_project_progress("refreshing_mesh", "Refreshing stitch geometry.")
         _internal_mesh_refresh(mesh_refresh, request)
         mesh_refresh_triggered = True
     try:
@@ -560,7 +567,7 @@ def _project_start_response(
     except Exception as exc:
         latest_state = _merge_runtime_and_mesh_refresh_state(backend.state(), mesh_refresh.state())
         if explicit_artifact_path is not None and _project_start_needs_mesh_refresh(latest_state, exc):
-            backend.set_project_progress("refreshing_mesh", "Refreshing mesh.")
+            backend.set_project_progress("refreshing_mesh", "Refreshing stitch geometry.")
             _internal_mesh_refresh(mesh_refresh, request)
             mesh_refresh_triggered = True
             backend.set_project_progress("preparing_runtime", "Preparing runtime.")
@@ -570,6 +577,10 @@ def _project_start_response(
             raise
 
     prepared_project_state = _project_state(backend.state(), mesh_refresh.state())
+    prepared_blocker = str(prepared_project_state.get("blocker_reason") or "").strip()
+    if prepared_blocker:
+        backend.set_project_progress("blocked", prepared_blocker)
+        raise ValueError(prepared_blocker)
     if not bool(prepared_project_state.get("runtime_launch_ready")):
         reason = str(prepared_project_state.get("runtime_launch_ready_reason") or "Runtime launch is blocked.")
         backend.set_project_progress("blocked", reason)
@@ -830,7 +841,7 @@ class RuntimeService:
         self._last_status = "idle"
         self._gpu_only_blockers: list[str] = []
         self._project_start_phase = "idle"
-        self._project_status_message = "Start Project will refresh the mesh artifact automatically when needed."
+        self._project_status_message = "Start Project will recompute rigid stitch geometry automatically."
         self._start_preview_pending_confirmation = False
         self._start_preview_left_jpeg: bytes | None = None
         self._start_preview_right_jpeg: bytes | None = None
@@ -948,12 +959,12 @@ class RuntimeService:
             if bool(rollout["launch_ready"]) and not bool(rollout["geometry_operator_visible"]):
                 raise ValueError(
                     "default runtime geometry artifact resolves to an internal fallback model. "
-                    "Promote a product mesh artifact first, or use an explicit geometry.artifact_path for internal rollback."
+                    "Regenerate the launch-ready rigid geometry artifact first, or use an explicit geometry.artifact_path for internal rollback."
                 )
 
         raise ValueError(
             "No launch-ready runtime geometry artifact is available. "
-            "Run mesh-refresh first to regenerate the active mesh artifact."
+            "Run mesh-refresh first to regenerate the active rigid artifact."
         )
     def _build_plan(self, request: dict[str, Any] | None = None) -> RuntimePlan:
         site_config = load_runtime_site_config()

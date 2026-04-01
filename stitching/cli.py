@@ -241,18 +241,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     mesh_refresh_cmd = subparsers.add_parser(
         "mesh-refresh",
-        help="Internal path: regenerate the active virtual-center-rectilinear-mesh runtime artifact",
+        help="Internal path: regenerate the active virtual-center-rectilinear-rigid runtime artifact",
     )
     _add_native_calibration_args(mesh_refresh_cmd)
     mesh_refresh_cmd.add_argument(
         "--refresh-dir",
-        help="Optional internal output directory for mesh-refresh metadata. Defaults to data/mesh_refresh/<timestamp>",
+        help="Optional internal output directory for stitch-refresh metadata. Defaults to data/mesh_refresh/<timestamp>",
     )
     mesh_refresh_cmd.add_argument(
         "--clip-frames",
         type=int,
         default=12,
-        help="Representative synchronized clip length used for mesh refresh",
+        help="Representative synchronized clip length used for stitch geometry refresh",
     )
 
     args = parser.parse_args(remaining)

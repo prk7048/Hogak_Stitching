@@ -14,7 +14,7 @@ const STATUS_LABELS: Record<string, string> = {
 const PHASE_LABELS: Record<string, string> = {
   idle: "Ready",
   checking_inputs: "Checking inputs",
-  refreshing_mesh: "Refreshing runtime mesh",
+  refreshing_mesh: "Recomputing stitch geometry",
   preparing_runtime: "Preparing runtime",
   starting_runtime: "Starting output",
   running: "Running",
@@ -24,7 +24,7 @@ const PHASE_LABELS: Record<string, string> = {
 
 const START_FLOW = [
   { id: "checking_inputs", label: "Check inputs" },
-  { id: "refreshing_mesh", label: "Refresh runtime mesh" },
+  { id: "refreshing_mesh", label: "Recompute stitch geometry" },
   { id: "preparing_runtime", label: "Prepare runtime" },
   { id: "starting_runtime", label: "Start output" },
   { id: "running", label: "Running" },
@@ -127,7 +127,7 @@ export function ProjectPage() {
           ? "Review the blocker and runtime truth below before trying again."
           : viewMode === "error"
             ? "Review the error and runtime truth below, then try Start Project again."
-            : "This page starts the project directly and shows the active stitched runtime state.";
+      : "This page starts the project directly and shows the active stitched runtime state.";
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
@@ -172,10 +172,10 @@ export function ProjectPage() {
               {viewMode === "ready" ? (
                 <div className="stage-copy">
                   <h2>Start Project runs the stitched runtime</h2>
-                  <p>It checks inputs, recalculates stitch geometry, prepares the stitched runtime, and starts output.</p>
+                  <p>It checks inputs, recalculates rigid stitch geometry, prepares the stitched runtime, and starts output.</p>
                   <ul className="stage-list">
                     <li>The active runtime model and artifact shown below are the source of truth after start.</li>
-                    <li>The live output follows the stitched runtime pipeline.</li>
+                    <li>The live output follows the rigid virtual-center stitch pipeline.</li>
                     <li>The external player address appears only for live runtime output.</li>
                   </ul>
                 </div>

@@ -49,7 +49,7 @@ BAKEOFF_CANDIDATE_MODELS = (
     "virtual-center-rectilinear-rigid",
     "virtual-center-rectilinear-mesh",
 )
-DEFAULT_BAKEOFF_WINNER_MODEL = "virtual-center-rectilinear-mesh"
+DEFAULT_BAKEOFF_WINNER_MODEL = "virtual-center-rectilinear-rigid"
 DEFAULT_BAKEOFF_ROOT = Path("data/geometry_bakeoff")
 DEFAULT_MESH_REFRESH_ROOT = Path("data/mesh_refresh")
 DEFAULT_CLIP_FRAMES = 12
@@ -57,7 +57,7 @@ DEFAULT_VIDEO_DURATION_SEC = 60
 DEFAULT_VIDEO_FPS = 15
 DEFAULT_GRID_COLS = 16
 DEFAULT_GRID_ROWS = 8
-INTERNAL_MESH_REFRESH_MODEL = "virtual-center-rectilinear-mesh"
+INTERNAL_MESH_REFRESH_MODEL = "virtual-center-rectilinear-rigid"
 
 
 @dataclass(slots=True)
@@ -88,7 +88,7 @@ def _preferred_bakeoff_winner(candidates: list[dict[str, Any]]) -> str:
     preferred_order = (
         DEFAULT_BAKEOFF_WINNER_MODEL,
         "left-anchor-homography-mesh",
-        "virtual-center-rectilinear-rigid",
+        "virtual-center-rectilinear-mesh",
         "left-anchor-homography",
     )
     for model in preferred_order:
@@ -765,40 +765,62 @@ def _compose_candidate_outputs(
     transition_px: int = 36,
 ) -> dict[str, Any]:
     overlap = (left_mask > 0) & (right_mask > 0)
-    right_adjusted, gain, bias = _compensate_exposure(
-        left_canvas,
-        right_canvas,
-        overlap,
-        right_mask,
-        StitchConfig(seam_transition_px=transition_px),
-    )
-    cost_map = _compute_seam_cost_map(left_canvas, right_adjusted, overlap)
+    right_adjusted = right_canvas
+    gain = 1.0
+    bias = 0.0
+    stitched_uncropped = np.zeros_like(left_canvas)
+    stitched_uncropped[left_mask > 0] = left_canvas[left_mask > 0]
+    stitched_uncropped[(right_mask > 0) & ~overlap] = right_adjusted[(right_mask > 0) & ~overlap]
+
+    seam_path = np.full(left_canvas.shape[0], left_canvas.shape[1] // 2, dtype=np.int32)
+    seam_visibility = 0.0
     if np.any(overlap):
-        cost_map = cost_map + (0.16 * _center_bias(overlap))
-    if instability is not None and instability.shape[:2] == cost_map.shape[:2]:
-        cost_map = cost_map + (0.35 * instability.astype(np.float32))
-    seam_path = _find_seam_path(overlap, cost_map, smoothness_penalty=4.0, temporal_penalty=0.0)
-    stitched_uncropped = _blend_seam_path(
-        left_canvas,
-        right_adjusted,
-        left_mask,
-        right_mask,
-        seam_path,
-        transition_px=max(24, int(transition_px)),
-    )
+        overlap_u8 = overlap.astype(np.uint8)
+        x, y, width, height = cv2.boundingRect(overlap_u8)
+        seam_center_x = int(x + (width // 2))
+        seam_path[:] = seam_center_x
+        band_width = int(np.clip(round(float(width) * 0.14), 48, max(48, min(192, width))))
+        half_band = max(1, band_width // 2)
+        transition_start_x = max(x, seam_center_x - half_band)
+        transition_end_x = min(x + width - 1, seam_center_x + half_band)
+        denom = max(1.0, float(transition_end_x - transition_start_x))
+
+        roi = np.s_[y : y + height, x : x + width]
+        overlap_roi = overlap[roi]
+        left_roi = left_canvas[roi].astype(np.float32)
+        right_roi = right_adjusted[roi].astype(np.float32)
+        roi_width = left_roi.shape[1]
+        weights = np.zeros((left_roi.shape[0], roi_width), dtype=np.float32)
+        for offset_x in range(roi_width):
+            absolute_x = x + offset_x
+            if absolute_x <= transition_start_x:
+                alpha = 0.0
+            elif absolute_x >= transition_end_x:
+                alpha = 1.0
+            else:
+                alpha = float(absolute_x - transition_start_x) / denom
+            weights[:, offset_x] = alpha
+        weights = np.where(overlap_roi, weights, 0.0)
+        left_weights = (1.0 - weights)[..., None]
+        right_weights = weights[..., None]
+        blended_roi = np.clip(left_roi * left_weights + right_roi * right_weights, 0.0, 255.0).astype(np.uint8)
+        stitched_roi = stitched_uncropped[roi]
+        stitched_roi[overlap_roi] = blended_roi[overlap_roi]
+        stitched_uncropped[roi] = stitched_roi
+
+        left_gray = cv2.cvtColor(left_canvas, cv2.COLOR_BGR2GRAY)
+        right_gray = cv2.cvtColor(right_adjusted, cv2.COLOR_BGR2GRAY)
+        abs_diff = cv2.absdiff(left_gray, right_gray)
+        seam_band = np.zeros_like(overlap, dtype=bool)
+        seam_band[:, max(0, transition_start_x) : min(stitched_uncropped.shape[1], transition_end_x + 1)] = True
+        seam_values = abs_diff[overlap & seam_band]
+        seam_visibility = float(np.mean(seam_values)) if seam_values.size > 0 else 0.0
+
     valid_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8)
     crop_x, crop_y, crop_w, crop_h = _largest_valid_rect(valid_mask)
     stitched_cropped = stitched_uncropped[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w].copy()
     overlap_crop = _extract_overlap_crop(stitched_uncropped, overlap)
     seam_debug = _draw_seam_debug(stitched_uncropped, seam_path, overlap)
-    seam_visibility = 0.0
-    valid_rows = np.where(np.any(overlap, axis=1))[0]
-    if valid_rows.size > 0:
-        samples = [
-            float(cost_map[int(row), int(np.clip(seam_path[int(row)], 0, cost_map.shape[1] - 1))])
-            for row in valid_rows.tolist()
-        ]
-        seam_visibility = float(np.mean(samples)) if samples else 0.0
     crop_ratio = float((crop_w * crop_h) / max(1, stitched_uncropped.shape[0] * stitched_uncropped.shape[1]))
     return {
         "stitched_uncropped": stitched_uncropped,
@@ -1794,6 +1816,7 @@ def _build_active_mesh_runtime_artifact(
     active_homography_path.parent.mkdir(parents=True, exist_ok=True)
     active_geometry_path.parent.mkdir(parents=True, exist_ok=True)
 
+    requested_residual_model = _requested_residual_model(INTERNAL_MESH_REFRESH_MODEL)
     artifact_metadata = _build_artifact_metadata(
         dict(calibration_result.get("metadata") or {}),
         candidate_model=INTERNAL_MESH_REFRESH_MODEL,
@@ -1824,8 +1847,8 @@ def _build_active_mesh_runtime_artifact(
         warp_model="virtual-center-remap",
         alignment_model="rigid",
         alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
-        residual_model="mesh",
-        mesh=_mesh_payload(mesh_field),
+        residual_model=requested_residual_model,
+        mesh=_mesh_payload(mesh_field) if requested_residual_model == "mesh" else None,
         projection_model="rectilinear",
         projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
         projection_left_center=tuple(virtual_solution.left_projection_center),
@@ -1840,6 +1863,8 @@ def _build_active_mesh_runtime_artifact(
             "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
             "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
         },
+        seam_mode="fixed-seam",
+        exposure_enabled=False,
         crop_rect=crop_rect,
     )
     save_runtime_geometry_artifact(active_geometry_path, artifact)
@@ -1907,7 +1932,7 @@ def run_mesh_refresh(
         output_resolution=output_resolution,
     )
     spec = _prepare_virtual_center_spec(
-        candidate_model="virtual-center-rectilinear-mesh",
+        candidate_model=INTERNAL_MESH_REFRESH_MODEL,
         left_frame=left_frame,
         right_frame=right_frame,
         left_inlier_points=left_inlier_points,

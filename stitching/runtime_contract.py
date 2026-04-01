@@ -69,13 +69,15 @@ SCHEMA_V2_INPUT_SIDE_KEYS = (
 )
 SCHEMA_V2_GEOMETRY_KEYS = ("artifact_path",)
 DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL = "virtual-center-rectilinear"
-DEFAULT_OPERATOR_GEOMETRY_MODEL = "virtual-center-rectilinear-mesh"
+DEFAULT_OPERATOR_GEOMETRY_MODEL = "virtual-center-rectilinear-rigid"
 INTERNAL_FALLBACK_GEOMETRY_MODEL = "virtual-center-rectilinear-rigid"
+INTERNAL_NON_PRODUCT_GEOMETRY_MODELS = ("virtual-center-rectilinear-mesh",)
 LEGACY_FALLBACK_GEOMETRY_MODELS = ("cylindrical-affine",)
 LEGACY_COMPAT_GEOMETRY_MODELS = ("planar-homography",)
 SUPPORTED_RUNTIME_GEOMETRY_MODELS = (
     DEFAULT_OPERATOR_GEOMETRY_MODEL,
     INTERNAL_FALLBACK_GEOMETRY_MODEL,
+    *INTERNAL_NON_PRODUCT_GEOMETRY_MODELS,
     *LEGACY_FALLBACK_GEOMETRY_MODELS,
     *LEGACY_COMPAT_GEOMETRY_MODELS,
 )
@@ -275,50 +277,43 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         effective_residual = requested_residual
         mesh_requested = requested_residual == "mesh"
         mesh_contract_ready = mesh_requested
-    mesh_default = (
+    mesh_non_product = model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL and mesh_requested
+    rigid_default = (
         model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
-        and effective_residual == "mesh"
-        and mesh_contract_ready
+        and requested_residual == "rigid"
+        and effective_residual == "rigid"
         and crop_ready
     )
-    mesh_requested_but_not_launch_ready = (
+    rigid_missing_crop = (
         model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
-        and mesh_requested
-        and not mesh_default
+        and requested_residual == "rigid"
+        and effective_residual == "rigid"
+        and not crop_ready
     )
-    internal_default_fallback = (
-        model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
-        and not mesh_requested_but_not_launch_ready
-        and not mesh_default
-    )
-    operator_visible = mesh_default
-    fallback_only = (
-        mesh_requested_but_not_launch_ready
-        or internal_default_fallback
-        or model in LEGACY_FALLBACK_GEOMETRY_MODELS
-    )
+    operator_visible = rigid_default
+    fallback_only = rigid_missing_crop or mesh_non_product or model in LEGACY_FALLBACK_GEOMETRY_MODELS
     compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
 
-    if mesh_default:
+    if rigid_default:
         public_model = DEFAULT_OPERATOR_GEOMETRY_MODEL
         rollout_status = "default"
         launch_ready = True
-        launch_ready_reason = "default launch-ready mesh geometry artifact"
-    elif mesh_requested_but_not_launch_ready:
-        public_model = INTERNAL_FALLBACK_GEOMETRY_MODEL
-        rollout_status = "internal-fallback"
+        launch_ready_reason = "default launch-ready rigid geometry artifact"
+    elif rigid_missing_crop:
+        public_model = DEFAULT_OPERATOR_GEOMETRY_MODEL
+        rollout_status = "blocked"
+        launch_ready = False
+        launch_ready_reason = "rigid geometry artifact is missing a fixed runtime crop; regenerate a valid rigid artifact before launch"
+    elif mesh_non_product:
+        public_model = "virtual-center-rectilinear-mesh"
+        rollout_status = "internal-only"
         launch_ready = False
         if mesh_fallback_used:
-            launch_ready_reason = "mesh artifact degraded to rigid fallback; regenerate a valid mesh artifact before launch"
+            launch_ready_reason = "mesh artifact degraded during solve; regenerate the rigid runtime artifact before launch"
         elif not crop_ready:
-            launch_ready_reason = "mesh artifact is missing a fixed runtime crop; regenerate a valid mesh artifact before launch"
+            launch_ready_reason = "mesh artifact is missing a fixed runtime crop; regenerate the rigid runtime artifact before launch"
         else:
-            launch_ready_reason = "mesh artifact is incomplete for runtime launch; regenerate a valid mesh artifact before launch"
-    elif internal_default_fallback:
-        public_model = INTERNAL_FALLBACK_GEOMETRY_MODEL
-        rollout_status = "internal-fallback"
-        launch_ready = True
-        launch_ready_reason = "internal rigid fallback geometry artifact; product surface targets mesh artifacts"
+            launch_ready_reason = "mesh artifacts are no longer product launch targets; regenerate the rigid runtime artifact before launch"
     elif model in LEGACY_FALLBACK_GEOMETRY_MODELS:
         public_model = model or "-"
         rollout_status = "fallback"

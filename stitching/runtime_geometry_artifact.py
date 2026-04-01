@@ -452,6 +452,7 @@ def build_runtime_geometry_artifact(
     virtual_camera: dict[str, Any] | None = None,
     residual_model: str | None = None,
     mesh: dict[str, Any] | None = None,
+    seam_mode: str | None = None,
     seam_transition_px: int = 64,
     seam_smoothness_penalty: float = 4.0,
     seam_temporal_penalty: float = 2.0,
@@ -505,7 +506,14 @@ def build_runtime_geometry_artifact(
     right_virtual_to_source_rotation = _matrix_3x3_inverse_list(
         virtual_camera_payload.get("right_to_virtual_rotation")
     )
-    seam_mode = "dynamic-path" if geometry_model == "cylindrical-affine" else "feather"
+    resolved_seam_mode = str(
+        seam_mode
+        or (
+            "dynamic-path"
+            if geometry_model == "cylindrical-affine"
+            else ("fixed-seam" if geometry_model == "virtual-center-rectilinear" and resolved_residual_model == "rigid" else "feather")
+        )
+    ).strip()
     return {
         "artifact_type": RUNTIME_GEOMETRY_ARTIFACT_TYPE,
         "schema_version": RUNTIME_GEOMETRY_SCHEMA_VERSION,
@@ -568,7 +576,7 @@ def build_runtime_geometry_artifact(
             "height": output_resolution[1],
         },
         "seam": {
-            "mode": seam_mode,
+            "mode": resolved_seam_mode,
             "transition_px": int(seam_transition_px),
             "smoothness_penalty": float(seam_smoothness_penalty),
             "temporal_penalty": float(seam_temporal_penalty),
