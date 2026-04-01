@@ -1788,6 +1788,7 @@ def _build_active_mesh_runtime_artifact(
     mesh_field: MeshField | None,
     fallback_used: bool = False,
     status_detail: str = "",
+    crop_rect: tuple[int, int, int, int] | None = None,
 ) -> dict[str, Any]:
     active_homography_path, active_geometry_path = _resolve_active_runtime_paths()
     active_homography_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1839,6 +1840,7 @@ def _build_active_mesh_runtime_artifact(
             "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
             "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
         },
+        crop_rect=crop_rect,
     )
     save_runtime_geometry_artifact(active_geometry_path, artifact)
 
@@ -1913,6 +1915,7 @@ def run_mesh_refresh(
         output_resolution=output_resolution,
         virtual_solution=virtual_solution,
     )
+    outputs = _render_virtual_center_from_spec(spec, left_frame, right_frame)
 
     refresh_dir = Path(session_dir).expanduser() if session_dir is not None else _mesh_refresh_session_dir()
     refresh_dir.mkdir(parents=True, exist_ok=True)
@@ -1927,6 +1930,7 @@ def run_mesh_refresh(
         mesh_field=spec.get("mesh_field"),
         fallback_used=bool(spec.get("fallback_used")),
         status_detail=str(spec.get("status") or ""),
+        crop_rect=tuple(int(value) for value in outputs.get("crop_rect") or [0, 0, output_resolution[0], output_resolution[1]]),
     )
     rollout = dict(artifact_info["rollout"])
     rollout_truth = _rollout_truth_fields(
@@ -1957,6 +1961,7 @@ def run_mesh_refresh(
         "right_edge_scale_drift": float(spec.get("right_edge_scale_drift") or 0.0),
         "fallback_used": bool(spec.get("fallback_used")),
         "status_detail": str(spec.get("status") or "ready"),
+        "crop_rect": [int(value) for value in outputs.get("crop_rect") or [0, 0, output_resolution[0], output_resolution[1]]],
         "active_homography_path": str(artifact_info["active_homography_path"]),
         "snapshot_homography_path": str(artifact_info["snapshot_homography_path"]),
         "snapshot_geometry_path": str(artifact_info["snapshot_geometry_path"]),

@@ -94,6 +94,8 @@ private:
         double exposure_gain_min = 0.7;
         double exposure_gain_max = 1.4;
         double exposure_bias_abs_max = 35.0;
+        bool crop_enabled = false;
+        cv::Rect crop_rect{};
     };
 
     struct DistortionState {

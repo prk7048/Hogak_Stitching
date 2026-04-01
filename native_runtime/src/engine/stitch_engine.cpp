@@ -830,6 +830,8 @@ struct RuntimeGeometryArtifactData {
     double exposure_gain_min = 0.7;
     double exposure_gain_max = 1.4;
     double exposure_bias_abs_max = 35.0;
+    bool crop_enabled = false;
+    cv::Rect crop_rect{};
 };
 
 bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGeometryArtifactData* artifact_out) {
@@ -905,6 +907,31 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         }
         if (*virtual_center_y <= 0.0 || *virtual_center_y >= static_cast<double>(std::max(1, input_size.height))) {
             *virtual_center_y = static_cast<double>(std::max(1, input_size.height)) * 0.5;
+        }
+    };
+    auto sanitize_crop_rect = [&]() {
+        if (!artifact_out->crop_enabled) {
+            artifact_out->crop_rect = cv::Rect();
+            return;
+        }
+        const int canvas_width = std::max(0, artifact_out->output_size.width);
+        const int canvas_height = std::max(0, artifact_out->output_size.height);
+        int x = std::max(0, artifact_out->crop_rect.x);
+        int y = std::max(0, artifact_out->crop_rect.y);
+        int width = std::max(0, artifact_out->crop_rect.width);
+        int height = std::max(0, artifact_out->crop_rect.height);
+        if (canvas_width > 0) {
+            x = std::min(x, canvas_width);
+            width = std::min(width, std::max(0, canvas_width - x));
+        }
+        if (canvas_height > 0) {
+            y = std::min(y, canvas_height);
+            height = std::min(height, std::max(0, canvas_height - y));
+        }
+        artifact_out->crop_rect = cv::Rect(x, y, width, height);
+        if (width <= 0 || height <= 0) {
+            artifact_out->crop_enabled = false;
+            artifact_out->crop_rect = cv::Rect();
         }
     };
     auto normalize_projection_model = [](std::string model) {
@@ -1142,6 +1169,22 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             exposure_node["gain_max"] >> artifact_out->exposure_gain_max;
             exposure_node["bias_abs_max"] >> artifact_out->exposure_bias_abs_max;
         }
+        cv::FileNode crop_node = fs["crop"];
+        if (!crop_node.empty()) {
+            crop_node["enabled"] >> artifact_out->crop_enabled;
+            cv::FileNode rect_node = crop_node["rect"];
+            if (!rect_node.empty() && rect_node.isSeq()) {
+                std::vector<double> crop_rect_values;
+                rect_node >> crop_rect_values;
+                if (crop_rect_values.size() >= 4) {
+                    artifact_out->crop_rect = cv::Rect(
+                        static_cast<int>(std::llround(crop_rect_values[0])),
+                        static_cast<int>(std::llround(crop_rect_values[1])),
+                        static_cast<int>(std::llround(crop_rect_values[2])),
+                        static_cast<int>(std::llround(crop_rect_values[3])));
+                }
+            }
+        }
         cv::FileNode calibration_node = fs["calibration"];
         if (!calibration_node.empty()) {
             cv::FileNode metrics_node = calibration_node["metrics"];
@@ -1218,6 +1261,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         if (artifact_out->alignment_matrix.empty()) {
             artifact_out->alignment_matrix = cv::Mat::eye(3, 3, CV_64F);
         }
+        sanitize_crop_rect();
         return true;
     } catch (const cv::Exception&) {
         // Fall through to permissive parsing below.
@@ -1303,6 +1347,21 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (extract_json_object_for_key(text, "\"exposure\"", &exposure_block_text) &&
         extract_json_bool(exposure_block_text, "\"enabled\"", &exposure_enabled)) {
         artifact_out->exposure_enabled = exposure_enabled;
+    }
+    std::string crop_block_text;
+    if (extract_json_object_for_key(text, "\"crop\"", &crop_block_text)) {
+        extract_json_bool(crop_block_text, "\"enabled\"", &artifact_out->crop_enabled);
+        std::string crop_rect_text;
+        if (extract_json_array_for_key(crop_block_text, "\"rect\"", &crop_rect_text)) {
+            std::vector<double> crop_rect_values;
+            if (parse_numeric_vector(crop_rect_text, &crop_rect_values) && crop_rect_values.size() >= 4) {
+                artifact_out->crop_rect = cv::Rect(
+                    static_cast<int>(std::llround(crop_rect_values[0])),
+                    static_cast<int>(std::llround(crop_rect_values[1])),
+                    static_cast<int>(std::llround(crop_rect_values[2])),
+                    static_cast<int>(std::llround(crop_rect_values[3])));
+            }
+        }
     }
     if (extract_json_number_for_key(text, "\"mean_reprojection_error\"", &numeric_value)) {
         artifact_out->residual_alignment_error_px = numeric_value;
@@ -1467,6 +1526,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (artifact_out->right_virtual_to_source_rotation.empty()) {
         artifact_out->right_virtual_to_source_rotation = cv::Mat::eye(3, 3, CV_64F);
     }
+    sanitize_crop_rect();
     return true;
 }
 
@@ -2098,7 +2158,17 @@ bool StitchEngine::compose_stitched_video_quality_locked(
 
     cv::Mat valid_mask;
     cv::bitwise_or(left_mask_template_, right_mask_template_, valid_mask);
-    const cv::Rect crop_rect = largest_valid_rect_locked(valid_mask);
+    cv::Rect crop_rect = runtime_geometry_.crop_enabled ? runtime_geometry_.crop_rect : cv::Rect();
+    const bool crop_rect_valid =
+        crop_rect.width > 0 &&
+        crop_rect.height > 0 &&
+        crop_rect.x >= 0 &&
+        crop_rect.y >= 0 &&
+        crop_rect.x + crop_rect.width <= stitched_uncropped.cols &&
+        crop_rect.y + crop_rect.height <= stitched_uncropped.rows;
+    if (!crop_rect_valid) {
+        crop_rect = largest_valid_rect_locked(valid_mask);
+    }
     if (crop_rect.width > 0 &&
         crop_rect.height > 0 &&
         crop_rect.x >= 0 &&
@@ -3558,6 +3628,8 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
     state->exposure_gain_min = std::max(0.0, artifact.exposure_gain_min);
     state->exposure_gain_max = std::max(state->exposure_gain_min, artifact.exposure_gain_max);
     state->exposure_bias_abs_max = std::max(0.0, artifact.exposure_bias_abs_max);
+    state->crop_enabled = artifact.crop_enabled;
+    state->crop_rect = artifact.crop_rect;
     return true;
 }
 

@@ -5,6 +5,7 @@ import json
 from typing import Any, Literal
 
 from stitching.runtime_geometry_artifact import (
+    runtime_geometry_fixed_crop_ready,
     runtime_geometry_effective_residual_model,
     runtime_geometry_mesh_contract_ready,
     runtime_geometry_mesh_fallback_used,
@@ -258,6 +259,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
     mesh_requested = False
     mesh_contract_ready = False
     mesh_fallback_used = False
+    crop_ready = False
     if isinstance(geometry_model, dict):
         artifact = geometry_model
         model = runtime_geometry_model(artifact)
@@ -266,6 +268,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         mesh_requested = requested_residual == "mesh"
         mesh_contract_ready = runtime_geometry_mesh_contract_ready(artifact)
         mesh_fallback_used = runtime_geometry_mesh_fallback_used(artifact)
+        crop_ready = runtime_geometry_fixed_crop_ready(artifact)
     else:
         model = "" if geometry_model is None else str(geometry_model).strip()
         requested_residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
@@ -276,6 +279,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
         and effective_residual == "mesh"
         and mesh_contract_ready
+        and crop_ready
     )
     mesh_requested_but_not_launch_ready = (
         model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
@@ -306,6 +310,8 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         launch_ready = False
         if mesh_fallback_used:
             launch_ready_reason = "mesh artifact degraded to rigid fallback; regenerate a valid mesh artifact before launch"
+        elif not crop_ready:
+            launch_ready_reason = "mesh artifact is missing a fixed runtime crop; regenerate a valid mesh artifact before launch"
         else:
             launch_ready_reason = "mesh artifact is incomplete for runtime launch; regenerate a valid mesh artifact before launch"
     elif internal_default_fallback:
@@ -344,6 +350,7 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         "geometry_compat_only": compat_only,
         "geometry_mesh_contract_ready": mesh_contract_ready,
         "geometry_mesh_fallback_used": mesh_fallback_used,
+        "geometry_crop_ready": crop_ready,
         "launch_ready": launch_ready,
         "launch_ready_reason": launch_ready_reason,
     }

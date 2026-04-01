@@ -244,6 +244,40 @@ def _normalize_mesh_payload(
     return mesh_payload
 
 
+def _normalize_crop_payload(
+    crop: dict[str, Any] | None,
+    *,
+    canvas_resolution: tuple[int, int] | list[int] | None = None,
+) -> dict[str, Any]:
+    crop_payload = dict(crop or {})
+    if not crop_payload:
+        return {}
+    canvas_width = 0
+    canvas_height = 0
+    if isinstance(canvas_resolution, (tuple, list)) and len(canvas_resolution) >= 2:
+        canvas_width = max(0, int(canvas_resolution[0]))
+        canvas_height = max(0, int(canvas_resolution[1]))
+    rect = crop_payload.get("rect")
+    if not isinstance(rect, (list, tuple)) or len(rect) < 4:
+        rect = [0, 0, canvas_width, canvas_height]
+    x = max(0, int(rect[0]))
+    y = max(0, int(rect[1]))
+    width = max(0, int(rect[2]))
+    height = max(0, int(rect[3]))
+    if canvas_width > 0:
+        x = min(x, canvas_width)
+        width = min(width, max(0, canvas_width - x))
+    if canvas_height > 0:
+        y = min(y, canvas_height)
+        height = min(height, max(0, canvas_height - y))
+    crop_payload["enabled"] = bool(crop_payload.get("enabled", width > 0 and height > 0))
+    crop_payload["mode"] = str(crop_payload.get("mode") or "fixed-rect")
+    crop_payload["rect"] = [x, y, width, height]
+    if canvas_width > 0 and canvas_height > 0:
+        crop_payload["canvas_resolution"] = [canvas_width, canvas_height]
+    return crop_payload
+
+
 def _legacy_geometry_model(geometry: dict[str, Any]) -> str:
     return _normalize_geometry_model(geometry.get("model") or geometry.get("warp_model") or "planar-homography")
 
@@ -361,6 +395,7 @@ def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("canvas", {})
     payload.setdefault("seam", {})
     payload.setdefault("exposure", {})
+    payload.setdefault("crop", {})
     payload.setdefault("calibration", {})
     payload["geometry"]["model"] = _normalize_geometry_model(payload["geometry"].get("model"))
     payload["geometry"]["residual_model"] = _normalize_residual_model(
@@ -371,6 +406,7 @@ def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
     calibration = payload.get("calibration", {}) if isinstance(payload.get("calibration"), dict) else {}
     output_resolution = geometry.get("output_resolution") or calibration.get("output_resolution") or [0, 0]
     payload["mesh"] = _normalize_mesh_payload(payload.get("mesh"), canvas_resolution=output_resolution)
+    payload["crop"] = _normalize_crop_payload(payload.get("crop"), canvas_resolution=output_resolution)
     projection = payload.get("projection")
     if isinstance(projection, dict):
         left_resolution = calibration.get("left_resolution") or [0, 0]
@@ -423,6 +459,7 @@ def build_runtime_geometry_artifact(
     exposure_gain_min: float = 0.7,
     exposure_gain_max: float = 1.4,
     exposure_bias_abs_max: float = 35.0,
+    crop_rect: tuple[int, int, int, int] | list[int] | None = None,
 ) -> dict[str, Any]:
     left_resolution = (int(left_resolution[0]), int(left_resolution[1]))
     right_resolution = (int(right_resolution[0]), int(right_resolution[1]))
@@ -452,6 +489,10 @@ def build_runtime_geometry_artifact(
     ).strip()
     virtual_camera_payload = dict(virtual_camera or {})
     mesh_payload = _normalize_mesh_payload(mesh, canvas_resolution=output_resolution)
+    crop_payload = _normalize_crop_payload(
+        {"enabled": crop_rect is not None, "mode": "fixed-rect", "rect": list(crop_rect or [0, 0, output_resolution[0], output_resolution[1]])},
+        canvas_resolution=output_resolution,
+    )
     projection_left_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or left_focal_px)
     projection_right_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or right_focal_px)
     projection_virtual_center = _pair(
@@ -538,6 +579,7 @@ def build_runtime_geometry_artifact(
             "gain_max": float(exposure_gain_max),
             "bias_abs_max": float(exposure_bias_abs_max),
         },
+        "crop": crop_payload,
         "calibration": {
             "distortion_reference": str(distortion_reference or "raw"),
             "left_resolution": [int(left_resolution[0]), int(left_resolution[1])],
@@ -607,6 +649,39 @@ def runtime_geometry_mesh_payload(artifact: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(mesh, dict):
         return {}
     return _normalize_mesh_payload(mesh, canvas_resolution=_artifact_canvas_resolution(artifact))
+
+
+def runtime_geometry_crop_payload(artifact: dict[str, Any]) -> dict[str, Any]:
+    crop = artifact.get("crop", {})
+    if not isinstance(crop, dict):
+        return {}
+    return _normalize_crop_payload(crop, canvas_resolution=_artifact_canvas_resolution(artifact))
+
+
+def runtime_geometry_fixed_crop_ready(artifact: dict[str, Any]) -> bool:
+    crop_payload = runtime_geometry_crop_payload(artifact)
+    if not crop_payload or not bool(crop_payload.get("enabled")):
+        return False
+    rect = crop_payload.get("rect")
+    if not isinstance(rect, list) or len(rect) < 4:
+        return False
+    x = int(rect[0])
+    y = int(rect[1])
+    width = int(rect[2])
+    height = int(rect[3])
+    canvas_resolution = crop_payload.get("canvas_resolution")
+    if not isinstance(canvas_resolution, list) or len(canvas_resolution) < 2:
+        return False
+    canvas_width = int(canvas_resolution[0])
+    canvas_height = int(canvas_resolution[1])
+    return (
+        x >= 0
+        and y >= 0
+        and width > 0
+        and height > 0
+        and x + width <= canvas_width
+        and y + height <= canvas_height
+    )
 
 
 def runtime_geometry_mesh_fallback_used(artifact: dict[str, Any]) -> bool:
