@@ -840,6 +840,108 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     }
     *artifact_out = RuntimeGeometryArtifactData{};
     artifact_out->artifact_path = path;
+    struct ProjectionFieldPresence {
+        bool focal = false;
+        bool center = false;
+        bool virtual_focal = false;
+        bool virtual_center = false;
+    };
+    ProjectionFieldPresence left_projection_presence{};
+    ProjectionFieldPresence right_projection_presence{};
+    bool crop_enabled_present = false;
+    bool crop_rect_present = false;
+
+    auto projection_reference_size = [&](const cv::Size& input_size) {
+        return (input_size.width > 0 && input_size.height > 0)
+            ? input_size
+            : artifact_out->output_size;
+    };
+    auto projection_center_out_of_bounds = [&](double center_x, double center_y, const cv::Size& input_size) {
+        const cv::Size reference_size = projection_reference_size(input_size);
+        const int reference_width = std::max(1, reference_size.width);
+        const int reference_height = std::max(1, reference_size.height);
+        return center_x <= 0.0 ||
+               center_x >= static_cast<double>(reference_width) ||
+               center_y <= 0.0 ||
+               center_y >= static_cast<double>(reference_height);
+    };
+    auto validate_projection_side_if_present = [&](const ProjectionFieldPresence& presence,
+                                                   double focal_px,
+                                                   double center_x,
+                                                   double center_y,
+                                                   double virtual_focal_px,
+                                                   double virtual_center_x,
+                                                   double virtual_center_y,
+                                                   const cv::Size& input_size) {
+        if (presence.focal && focal_px <= 0.0) {
+            return false;
+        }
+        if (presence.center && projection_center_out_of_bounds(center_x, center_y, input_size)) {
+            return false;
+        }
+        if (presence.virtual_focal && virtual_focal_px <= 0.0) {
+            return false;
+        }
+        if (presence.virtual_center && projection_center_out_of_bounds(virtual_center_x, virtual_center_y, input_size)) {
+            return false;
+        }
+        return true;
+    };
+    auto normalized_crop_rect = [&]() {
+        const int canvas_width = std::max(0, artifact_out->output_size.width);
+        const int canvas_height = std::max(0, artifact_out->output_size.height);
+        int x = std::max(0, artifact_out->crop_rect.x);
+        int y = std::max(0, artifact_out->crop_rect.y);
+        int width = std::max(0, artifact_out->crop_rect.width);
+        int height = std::max(0, artifact_out->crop_rect.height);
+        if (canvas_width > 0) {
+            x = std::min(x, canvas_width);
+            width = std::min(width, std::max(0, canvas_width - x));
+        }
+        if (canvas_height > 0) {
+            y = std::min(y, canvas_height);
+            height = std::min(height, std::max(0, canvas_height - y));
+        }
+        return cv::Rect(x, y, width, height);
+    };
+    auto validate_rectilinear_operator_geometry_or_fail = [&]() {
+        if (artifact_out->model != "virtual-center-rectilinear" &&
+            artifact_out->model != "virtual_center_rectilinear") {
+            return true;
+        }
+        if (!validate_projection_side_if_present(
+                left_projection_presence,
+                artifact_out->left_focal_px,
+                artifact_out->left_center_x,
+                artifact_out->left_center_y,
+                artifact_out->left_virtual_focal_px,
+                artifact_out->left_virtual_center_x,
+                artifact_out->left_virtual_center_y,
+                artifact_out->left_input_size)) {
+            return false;
+        }
+        if (!validate_projection_side_if_present(
+                right_projection_presence,
+                artifact_out->right_focal_px,
+                artifact_out->right_center_x,
+                artifact_out->right_center_y,
+                artifact_out->right_virtual_focal_px,
+                artifact_out->right_virtual_center_x,
+                artifact_out->right_virtual_center_y,
+                artifact_out->right_input_size)) {
+            return false;
+        }
+        if (artifact_out->crop_enabled || crop_enabled_present || crop_rect_present) {
+            if (!artifact_out->crop_enabled) {
+                return false;
+            }
+            const cv::Rect normalized_rect = normalized_crop_rect();
+            if (normalized_rect.width <= 0 || normalized_rect.height <= 0) {
+                return false;
+            }
+        }
+        return true;
+    };
 
     auto sanitize_projection_side = [&](double* focal_px,
                                         double* center_x,
@@ -946,6 +1048,18 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         }
         if (model.empty()) {
             return std::string("cylindrical");
+        }
+        return model;
+    };
+    auto normalize_runtime_geometry_model = [](std::string model) {
+        std::transform(model.begin(), model.end(), model.begin(), [](unsigned char ch) {
+            return static_cast<char>(std::tolower(ch));
+        });
+        if (model == "cylindrical_affine" || model == "cylindrical-affine") {
+            return std::string("cylindrical-affine");
+        }
+        if (model == "virtual_center_rectilinear" || model == "virtual-center-rectilinear") {
+            return std::string("virtual-center-rectilinear");
         }
         return model;
     };
@@ -1092,6 +1206,10 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             std::vector<double> left_output_resolution;
             std::vector<double> right_output_resolution;
             if (!left_projection.empty()) {
+                left_projection_presence.focal = !left_projection["focal_px"].empty();
+                left_projection_presence.center = !left_projection["center"].empty();
+                left_projection_presence.virtual_focal = !left_projection["virtual_focal_px"].empty();
+                left_projection_presence.virtual_center = !left_projection["virtual_center"].empty();
                 left_projection["model"] >> artifact_out->left_projection_model;
                 left_projection["focal_px"] >> artifact_out->left_focal_px;
                 left_projection["center"] >> left_center;
@@ -1102,6 +1220,10 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                 left_projection["output_resolution"] >> left_output_resolution;
             }
             if (!right_projection.empty()) {
+                right_projection_presence.focal = !right_projection["focal_px"].empty();
+                right_projection_presence.center = !right_projection["center"].empty();
+                right_projection_presence.virtual_focal = !right_projection["virtual_focal_px"].empty();
+                right_projection_presence.virtual_center = !right_projection["virtual_center"].empty();
                 right_projection["model"] >> artifact_out->right_projection_model;
                 right_projection["focal_px"] >> artifact_out->right_focal_px;
                 right_projection["center"] >> right_center;
@@ -1171,8 +1293,10 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         }
         cv::FileNode crop_node = fs["crop"];
         if (!crop_node.empty()) {
+            crop_enabled_present = !crop_node["enabled"].empty();
             crop_node["enabled"] >> artifact_out->crop_enabled;
             cv::FileNode rect_node = crop_node["rect"];
+            crop_rect_present = !rect_node.empty();
             if (!rect_node.empty() && rect_node.isSeq()) {
                 std::vector<double> crop_rect_values;
                 rect_node >> crop_rect_values;
@@ -1197,6 +1321,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                 }
             }
         }
+        artifact_out->model = normalize_runtime_geometry_model(artifact_out->model);
 
         if (artifact_out->output_size.width <= 0 || artifact_out->output_size.height <= 0) {
             const int base_width = std::max(
@@ -1210,6 +1335,11 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                     artifact_out->left_input_size.height,
                     artifact_out->right_input_size.height));
             artifact_out->output_size = cv::Size(base_width, base_height);
+        }
+        artifact_out->left_projection_model = normalize_projection_model(artifact_out->left_projection_model);
+        artifact_out->right_projection_model = normalize_projection_model(artifact_out->right_projection_model);
+        if (!validate_rectilinear_operator_geometry_or_fail()) {
+            return false;
         }
         if (artifact_out->left_focal_px <= 0.0) {
             artifact_out->left_focal_px = artifact_out->right_focal_px;
@@ -1225,8 +1355,6 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             artifact_out->right_center_x = artifact_out->left_center_x;
             artifact_out->right_center_y = artifact_out->left_center_y;
         }
-        artifact_out->left_projection_model = normalize_projection_model(artifact_out->left_projection_model);
-        artifact_out->right_projection_model = normalize_projection_model(artifact_out->right_projection_model);
         if (artifact_out->residual_model.empty()) {
             if (artifact_out->model == "virtual-center-rectilinear") {
                 artifact_out->residual_model = "rigid";
@@ -1285,9 +1413,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (artifact_out->model.empty()) {
         artifact_out->model = "planar-homography";
     }
-    if (artifact_out->model == "cylindrical_affine") {
-        artifact_out->model = "cylindrical-affine";
-    }
+    artifact_out->model = normalize_runtime_geometry_model(artifact_out->model);
 
     std::string alignment_text;
     if (extract_json_array_for_key(text, "\"alignment\"", &alignment_text)) {
@@ -1323,6 +1449,8 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     if (extract_json_number_for_key(text, "\"focal_px\"", &numeric_value)) {
         artifact_out->left_focal_px = numeric_value;
         artifact_out->right_focal_px = numeric_value;
+        left_projection_presence.focal = true;
+        right_projection_presence.focal = true;
     }
     if (extract_json_number_for_key(text, "\"transition_px\"", &numeric_value)) {
         artifact_out->seam_transition_px = static_cast<int>(std::llround(numeric_value));
@@ -1350,9 +1478,14 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
     }
     std::string crop_block_text;
     if (extract_json_object_for_key(text, "\"crop\"", &crop_block_text)) {
-        extract_json_bool(crop_block_text, "\"enabled\"", &artifact_out->crop_enabled);
+        bool parsed_crop_enabled = false;
+        if (extract_json_bool(crop_block_text, "\"enabled\"", &parsed_crop_enabled)) {
+            artifact_out->crop_enabled = parsed_crop_enabled;
+            crop_enabled_present = true;
+        }
         std::string crop_rect_text;
         if (extract_json_array_for_key(crop_block_text, "\"rect\"", &crop_rect_text)) {
+            crop_rect_present = true;
             std::vector<double> crop_rect_values;
             if (parse_numeric_vector(crop_rect_text, &crop_rect_values) && crop_rect_values.size() >= 4) {
                 artifact_out->crop_rect = cv::Rect(
@@ -1429,6 +1562,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         extract_json_string_for_key(left_projection_text, "\"model\"", &artifact_out->left_projection_model);
         if (extract_json_number_for_key(left_projection_text, "\"focal_px\"", &numeric_value)) {
             artifact_out->left_focal_px = numeric_value;
+            left_projection_presence.focal = true;
         }
         std::string center_text;
         if (extract_json_array_for_key(left_projection_text, "\"center\"", &center_text)) {
@@ -1436,16 +1570,19 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
                 artifact_out->left_center_x = center_values[0];
                 artifact_out->left_center_y = center_values[1];
+                left_projection_presence.center = true;
             }
         }
         if (extract_json_number_for_key(left_projection_text, "\"virtual_focal_px\"", &numeric_value)) {
             artifact_out->left_virtual_focal_px = numeric_value;
+            left_projection_presence.virtual_focal = true;
         }
         if (extract_json_array_for_key(left_projection_text, "\"virtual_center\"", &center_text)) {
             std::vector<double> center_values;
             if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
                 artifact_out->left_virtual_center_x = center_values[0];
                 artifact_out->left_virtual_center_y = center_values[1];
+                left_projection_presence.virtual_center = true;
             }
         }
         if (extract_json_array_for_key(left_projection_text, "\"virtual_to_source_rotation\"", &center_text)) {
@@ -1461,6 +1598,7 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         extract_json_string_for_key(right_projection_text, "\"model\"", &artifact_out->right_projection_model);
         if (extract_json_number_for_key(right_projection_text, "\"focal_px\"", &numeric_value)) {
             artifact_out->right_focal_px = numeric_value;
+            right_projection_presence.focal = true;
         }
         std::string center_text;
         if (extract_json_array_for_key(right_projection_text, "\"center\"", &center_text)) {
@@ -1468,16 +1606,19 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
             if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
                 artifact_out->right_center_x = center_values[0];
                 artifact_out->right_center_y = center_values[1];
+                right_projection_presence.center = true;
             }
         }
         if (extract_json_number_for_key(right_projection_text, "\"virtual_focal_px\"", &numeric_value)) {
             artifact_out->right_virtual_focal_px = numeric_value;
+            right_projection_presence.virtual_focal = true;
         }
         if (extract_json_array_for_key(right_projection_text, "\"virtual_center\"", &center_text)) {
             std::vector<double> center_values;
             if (parse_numeric_vector(center_text, &center_values) && center_values.size() >= 2) {
                 artifact_out->right_virtual_center_x = center_values[0];
                 artifact_out->right_virtual_center_y = center_values[1];
+                right_projection_presence.virtual_center = true;
             }
         }
         if (extract_json_array_for_key(right_projection_text, "\"virtual_to_source_rotation\"", &center_text)) {
@@ -1487,6 +1628,11 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
                     cv::Mat(3, 3, CV_64F, rotation_values.data()).clone();
             }
         }
+    }
+    artifact_out->left_projection_model = normalize_projection_model(artifact_out->left_projection_model);
+    artifact_out->right_projection_model = normalize_projection_model(artifact_out->right_projection_model);
+    if (!validate_rectilinear_operator_geometry_or_fail()) {
+        return false;
     }
     if (artifact_out->left_focal_px <= 0.0) {
         artifact_out->left_focal_px = artifact_out->right_focal_px;
@@ -1502,8 +1648,6 @@ bool load_runtime_geometry_artifact_from_file(const std::string& path, RuntimeGe
         artifact_out->right_center_x = artifact_out->left_center_x;
         artifact_out->right_center_y = artifact_out->left_center_y;
     }
-    artifact_out->left_projection_model = normalize_projection_model(artifact_out->left_projection_model);
-    artifact_out->right_projection_model = normalize_projection_model(artifact_out->right_projection_model);
     sanitize_virtual_projection_side(
         &artifact_out->left_focal_px,
         &artifact_out->left_center_x,
@@ -3378,6 +3522,8 @@ bool StitchEngine::start(const EngineConfig& config) {
     const bool right_ok = !config.right.url.empty() &&
         g_right_reader.start(config.right, ffmpeg_bin, config.input_runtime);
     if (!left_ok || !right_ok) {
+        g_left_reader.stop();
+        g_right_reader.stop();
         metrics_.status = "reader_start_failed";
         running_.store(false);
         return false;
@@ -3388,9 +3534,6 @@ bool StitchEngine::start(const EngineConfig& config) {
 
 void StitchEngine::stop() {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!running_.load()) {
-        return;
-    }
     running_.store(false);
     if (output_writer_ != nullptr) {
         output_writer_->stop();
@@ -3522,6 +3665,8 @@ bool StitchEngine::reload_config(const EngineConfig& config) {
         const bool right_ok = !config.right.url.empty() &&
             g_right_reader.start(config.right, ffmpeg_bin, config.input_runtime);
         if (!left_ok || !right_ok) {
+            g_left_reader.stop();
+            g_right_reader.stop();
             metrics_.status = "reader_restart_failed";
             return false;
         }
@@ -4234,7 +4379,10 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         }
     };
 
-    if (runtime_geometry_.model == "cylindrical-affine" && prepare_runtime_geometry_locked(left_size, right_size)) {
+    const bool runtime_geometry_prepare_requested =
+        runtime_geometry_.model == "cylindrical-affine" ||
+        runtime_geometry_.model == "virtual-center-rectilinear";
+    if (runtime_geometry_prepare_requested && prepare_runtime_geometry_locked(left_size, right_size)) {
         configure_distortion_state(
             config_.left_distortion_file,
             config_.left_distortion_source_hint,
@@ -4514,6 +4662,7 @@ bool StitchEngine::stitch_pair_locked(
     cv::Mat canvas_left;
     cv::Mat left_corrected_cpu;
     cv::Mat right_corrected_cpu;
+    cv::Mat right_aligned_cpu;
     bool used_gpu_blend = false;
     bool used_gpu_geometry = false;
     bool gpu_output_frame_ready = false;
@@ -4885,7 +5034,27 @@ bool StitchEngine::stitch_pair_locked(
                         output_size_);
                 }
                 if (rectilinear_runtime) {
-                    gpu_right_aligned_.copyTo(gpu_right_warped_);
+                    if (runtime_geometry_.mesh_enabled) {
+                        if (runtime_geometry_.mesh_map_x_gpu.empty() ||
+                            runtime_geometry_.mesh_map_y_gpu.empty()) {
+                            throw cv::Exception(
+                                cv::Error::StsError,
+                                "right rectilinear mesh gpu map unavailable",
+                                __FUNCTION__,
+                                __FILE__,
+                                __LINE__);
+                        }
+                        cv::cuda::remap(
+                            gpu_right_aligned_,
+                            gpu_right_warped_,
+                            runtime_geometry_.mesh_map_x_gpu,
+                            runtime_geometry_.mesh_map_y_gpu,
+                            cv::INTER_LINEAR,
+                            cv::BORDER_CONSTANT,
+                            cv::Scalar());
+                    } else {
+                        gpu_right_aligned_.copyTo(gpu_right_warped_);
+                    }
                 }
                 metrics_.gpu_warp_count += 1;
                 cached_right_warped_seq_ = selected_pair.right_seq;
@@ -5145,11 +5314,35 @@ bool StitchEngine::stitch_pair_locked(
         if (cached_right_warped_seq_ == selected_pair.right_seq && !cached_right_warped_cpu_.empty()) {
             warped_right = cached_right_warped_cpu_;
         } else {
-            cv::warpPerspective(
-                *right_cpu_for_stitch,
-                warped_right,
-                homography_adjusted_,
-                output_size_);
+            if (rectilinear_runtime) {
+                cv::warpPerspective(
+                    *right_cpu_for_stitch,
+                    right_aligned_cpu,
+                    homography_adjusted_,
+                    output_size_);
+                if (runtime_geometry_.mesh_enabled) {
+                    if (runtime_geometry_.mesh_map_x.empty() || runtime_geometry_.mesh_map_y.empty()) {
+                        metrics_.status = "virtual_center_rectilinear_mesh_map_missing";
+                        metrics_.stitch_fps = 0.0;
+                        return false;
+                    }
+                    cv::remap(
+                        right_aligned_cpu,
+                        warped_right,
+                        runtime_geometry_.mesh_map_x,
+                        runtime_geometry_.mesh_map_y,
+                        cv::INTER_LINEAR,
+                        cv::BORDER_CONSTANT);
+                } else {
+                    warped_right = right_aligned_cpu;
+                }
+            } else {
+                cv::warpPerspective(
+                    *right_cpu_for_stitch,
+                    warped_right,
+                    homography_adjusted_,
+                    output_size_);
+            }
             metrics_.cpu_warp_count += 1;
             cached_right_warped_cpu_ = warped_right;
             cached_right_warped_seq_ = selected_pair.right_seq;
