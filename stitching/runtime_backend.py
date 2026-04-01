@@ -223,6 +223,10 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     output_path_direct = output_path_mode == "native-nvenc-direct"
     output_path_bridge = output_path_mode == "native-nvenc-bridge"
     output_path_requested_direct = output_path_mode == "gpu-direct"
+    production_output_last_error = str(merged.get("production_output_last_error") or "").strip()
+    production_output_command_line = str(merged.get("production_output_command_line") or "").strip()
+    output_bridge_reason = _command_line_token(production_output_command_line, "bridge-reason")
+    output_writer_mode = _command_line_token(production_output_command_line, "mode")
     zero_copy_blockers: list[str] = []
     zero_copy_truth_pending: list[str] = []
     if input_path_mode == "cuda-decode-cpu-staged":
@@ -236,6 +240,10 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
             zero_copy_truth_pending.append("output path truth will be resolved during prepare")
         elif output_path_mode == "native-nvenc-unavailable":
             zero_copy_blockers.append("native NVENC output path is unavailable")
+        elif production_output_last_error:
+            zero_copy_blockers.append(production_output_last_error)
+        elif output_path_mode == "native-nvenc-bridge" and output_bridge_reason:
+            zero_copy_blockers.append(f"direct output unavailable: {output_bridge_reason}")
         else:
             zero_copy_blockers.append(f"output path is {output_path_mode}, not direct")
     zero_copy_ready = len(zero_copy_blockers) == 0
@@ -342,6 +350,10 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
             "can_stop": running,
             "blocker_reason": blocker_reason,
             "output_receive_uri": output_receive_uri,
+            "production_output_last_error": production_output_last_error,
+            "production_output_command_line": production_output_command_line,
+            "output_bridge_reason": output_bridge_reason,
+            "output_writer_mode": output_writer_mode,
             "runtime_active_model": runtime_active_model or "",
             "runtime_requested_residual_model": runtime_requested_residual_model or "",
             "runtime_active_residual_model": runtime_active_residual_model or "",
@@ -403,6 +415,18 @@ def _project_receive_uri_from_target(target: Any) -> str:
     return f"udp://@:{port}"
 
 
+def _command_line_token(command_line: Any, key: str) -> str:
+    text = str(command_line or "").strip()
+    key_text = str(key or "").strip()
+    if not text or not key_text:
+        return ""
+    key_prefix = f"{key_text}="
+    for part in text.split():
+        if part.startswith(key_prefix):
+            return part[len(key_prefix) :].strip()
+    return ""
+
+
 def _metric_bool(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -439,6 +463,14 @@ def _metrics_output_failure_reason(metrics: dict[str, Any] | None) -> str:
     last_error = str(metrics.get("production_output_last_error") or "").strip()
     if last_error:
         return last_error
+    runtime_mode = str(metrics.get("production_output_runtime_mode") or "").strip().lower()
+    command_line = str(metrics.get("production_output_command_line") or "").strip()
+    bridge_reason = _command_line_token(command_line, "bridge-reason")
+    mode_token = _command_line_token(command_line, "mode")
+    if runtime_mode == "native-nvenc-bridge" and bridge_reason:
+        if mode_token == "direct-required-blocked":
+            return f"gpu-direct direct-only requirement failed: {bridge_reason}"
+        return f"gpu-direct bridge active: {bridge_reason}"
     status = str(metrics.get("status") or "").strip().lower()
     if status in {"gpu_only_output_blocked", "reader_start_failed", "input decode failed", "stitch_failed"}:
         return status.replace("_", " ")
@@ -607,6 +639,8 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     can_start = not running and status != "starting" and not blocker_reason
     can_stop = running
     output_target = str(merged.get("production_output_target") or "").strip()
+    output_bridge_reason = str(merged.get("output_bridge_reason") or "").strip()
+    production_output_last_error = str(merged.get("production_output_last_error") or "").strip()
 
     return {
         "status": status,
@@ -618,6 +652,8 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
         "blocker_reason": blocker_reason if status in {"blocked", "error"} else "",
         "output_receive_uri": _project_receive_uri_from_target(output_target) or "udp://@:24000",
         "production_output_target": output_target,
+        "production_output_last_error": production_output_last_error,
+        "output_bridge_reason": output_bridge_reason,
         "runtime_active_model": str(merged.get("runtime_active_model") or "").strip(),
         "runtime_active_residual_model": str(merged.get("runtime_active_residual_model") or "").strip(),
         "runtime_active_artifact_path": str(merged.get("runtime_active_artifact_path") or "").strip(),
@@ -1703,6 +1739,10 @@ class RuntimeService:
             "production_output_runtime_mode": _string("production_output_runtime_mode"),
             "output_target": _string("output_target"),
             "production_output_target": _string("production_output_target"),
+            "output_command_line": _string("output_command_line"),
+            "production_output_command_line": _string("production_output_command_line"),
+            "output_last_error": _string("output_last_error"),
+            "production_output_last_error": _string("production_output_last_error"),
             "output_effective_codec": _string("output_effective_codec"),
             "production_output_effective_codec": _string("production_output_effective_codec"),
             "output_frames_written": _int("output_frames_written"),
@@ -1928,9 +1968,11 @@ class RuntimeService:
 
         frames_written = _metric_int(self._latest_metrics.get("production_output_frames_written"))
         runtime_mode = str(self._latest_metrics.get("production_output_runtime_mode") or "").strip() or "unknown"
+        failure_reason = _metrics_output_failure_reason(self._latest_metrics)
         raise RuntimeError(
             f"runtime did not confirm live output within {timeout_sec:.1f}s "
-            f"(frames_written={frames_written}, output_path={runtime_mode})"
+            f"(frames_written={frames_written}, output_path={runtime_mode}"
+            f"{', reason=' + failure_reason if failure_reason else ''})"
         )
 
     def _start_event_pump(self) -> None:

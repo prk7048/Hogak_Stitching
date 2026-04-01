@@ -16,6 +16,8 @@ export type ProjectState = {
   blocker_reason?: string;
   output_receive_uri?: string;
   production_output_target?: string;
+  production_output_last_error?: string;
+  output_bridge_reason?: string;
   runtime_active_model?: string;
   runtime_active_residual_model?: string;
   runtime_active_artifact_path?: string;
@@ -143,6 +145,8 @@ function normalizeProjectState(value: unknown): ProjectState {
     blocker_reason: asString(value.blocker_reason),
     output_receive_uri: asString(value.output_receive_uri),
     production_output_target: asString(value.production_output_target),
+    production_output_last_error: asString(value.production_output_last_error),
+    output_bridge_reason: asString(value.output_bridge_reason),
     runtime_active_model: asString(value.runtime_active_model),
     runtime_active_residual_model: asString(value.runtime_active_residual_model || value.geometry_residual_model),
     runtime_active_artifact_path: asString(value.runtime_active_artifact_path),
@@ -205,6 +209,8 @@ export async function fetchProjectState(): Promise<ProjectState> {
       blocker_reason: "Backend unavailable",
       output_receive_uri: "",
       production_output_target: "",
+      production_output_last_error: "",
+      output_bridge_reason: "",
       runtime_active_model: "",
       runtime_active_residual_model: "",
       runtime_active_artifact_path: "",

@@ -101,6 +101,8 @@ export function ProjectPage() {
   const phaseLabel = PHASE_LABELS[startPhase] || text(state.start_phase, "Ready");
   const receiveUri = text(state.output_receive_uri, "");
   const receiveTarget = receiveUri || text(state.production_output_target, "");
+  const outputFailure = text(state.production_output_last_error, "");
+  const outputBridgeReason = text(state.output_bridge_reason, "");
   const activeModel = text(state.runtime_active_model, "Not active");
   const activeResidual = text(state.runtime_active_residual_model, "Unknown");
   const activeArtifactPath = text(state.runtime_active_artifact_path, "Not available");
@@ -230,6 +232,8 @@ export function ProjectPage() {
                 <div className="stage-copy">
                   <h2>{viewMode === "blocked" ? "Current blocker" : "Current error"}</h2>
                   <p>{text(state.blocker_reason || state.status_message, "No reason was provided.")}</p>
+                  {outputFailure ? <p className="stage-detail">Writer: {outputFailure}</p> : null}
+                  {!outputFailure && outputBridgeReason ? <p className="stage-detail">Bridge reason: {outputBridgeReason}</p> : null}
                 </div>
               ) : null}
             </div>
@@ -300,6 +304,14 @@ export function ProjectPage() {
               <div>
                 <dt>Output path</dt>
                 <dd>{directness}</dd>
+              </div>
+              <div>
+                <dt>Bridge reason</dt>
+                <dd>{text(state.output_bridge_reason, "Not available")}</dd>
+              </div>
+              <div>
+                <dt>Writer error</dt>
+                <dd>{text(state.production_output_last_error, "Not available")}</dd>
               </div>
               <div>
                 <dt>Zero-copy</dt>

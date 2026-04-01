@@ -971,7 +971,7 @@ void GpuDirectOutputWriter::run() {
 
     auto fail_direct_only = [&](const std::string& reason) {
         std::lock_guard<std::mutex> lock(mutex_);
-        runtime_mode_ = "native-nvenc-bridge";
+        runtime_mode_ = "native-nvenc-direct-blocked";
         command_line_ = upsert_command_line_token(command_line_, "mode", "direct-required-blocked");
         command_line_ = upsert_command_line_token(
             command_line_,
