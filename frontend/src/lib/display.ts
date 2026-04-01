@@ -1,4 +1,4 @@
-function text(value: unknown, fallback = "알 수 없음"): string {
+function text(value: unknown, fallback = "정보 없음"): string {
   const normalized = String(value ?? "").trim();
   return normalized || fallback;
 }
@@ -6,7 +6,7 @@ function text(value: unknown, fallback = "알 수 없음"): string {
 export function displayRuntimeStatus(value: unknown): string {
   switch (String(value ?? "").trim()) {
     case "running":
-      return "실행 중";
+      return "송출 중";
     case "prepared":
       return "준비됨";
     case "preview_ready":
@@ -19,9 +19,9 @@ export function displayRuntimeStatus(value: unknown): string {
     case "reloaded":
       return "재적용됨";
     case "backend unavailable":
-      return "백엔드 연결 안 됨";
+      return "백엔드 연결 불가";
     case "gpu_only_blocked":
-      return "GPU-only 차단";
+      return "GPU 전용 실행 차단";
     case "gpu_only_input_unavailable":
       return "GPU 입력 불가";
     case "gpu_only_output_blocked":
@@ -76,7 +76,7 @@ export function displayExposureMode(value: unknown): string {
       return "Gain/Bias";
     case "none":
     case "off":
-      return "꺼짐";
+      return "비활성";
     default:
       return text(value);
   }
@@ -121,7 +121,7 @@ export function displayBooleanState(value: unknown): string {
   if (value === false) {
     return "아니오";
   }
-  return "알 수 없음";
+  return "정보 없음";
 }
 
 export function displayEventType(value: unknown): string {
@@ -131,7 +131,7 @@ export function displayEventType(value: unknown): string {
     case "status":
       return "상태";
     case "hello":
-      return "런타임 시작";
+      return "초기 상태";
     case "stopped":
       return "중지";
     case "error":
@@ -169,5 +169,5 @@ export function displayGpuOnlyState(ready: unknown): string {
   if (ready === false) {
     return "차단됨";
   }
-  return "알 수 없음";
+  return "정보 없음";
 }

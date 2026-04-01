@@ -4,7 +4,11 @@ from dataclasses import asdict, dataclass, field, is_dataclass
 import json
 from typing import Any, Literal
 
-from stitching.runtime_geometry_artifact import load_runtime_geometry_artifact
+from stitching.runtime_geometry_artifact import (
+    load_runtime_geometry_artifact,
+    runtime_geometry_model,
+    runtime_geometry_residual_model,
+)
 
 
 InputRuntime = Literal["ffmpeg-cpu", "ffmpeg-cuda", "opencv"]
@@ -222,13 +226,23 @@ def _require_int(value: Any, *, field_name: str) -> int:
     return int(value)
 
 
-def geometry_rollout_metadata(geometry_model: Any) -> dict[str, Any]:
-    model = "" if geometry_model is None else str(geometry_model).strip()
+def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = None) -> dict[str, Any]:
+    if isinstance(geometry_model, dict):
+        artifact = geometry_model
+        model = runtime_geometry_model(artifact)
+        residual = runtime_geometry_residual_model(artifact)
+    else:
+        model = "" if geometry_model is None else str(geometry_model).strip()
+        residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
     operator_visible = model == DEFAULT_OPERATOR_GEOMETRY_MODEL
     fallback_only = model in LEGACY_FALLBACK_GEOMETRY_MODELS
     compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
 
-    if model == DEFAULT_OPERATOR_GEOMETRY_MODEL:
+    if model == DEFAULT_OPERATOR_GEOMETRY_MODEL and residual == "mesh":
+        rollout_status = "candidate"
+        launch_ready = False
+        launch_ready_reason = "mesh residual geometry artifact is compare-ready, but runtime mesh rendering is not wired yet"
+    elif model == DEFAULT_OPERATOR_GEOMETRY_MODEL:
         rollout_status = "default"
         launch_ready = True
         launch_ready_reason = "default launch-ready geometry model"
@@ -251,6 +265,7 @@ def geometry_rollout_metadata(geometry_model: Any) -> dict[str, Any]:
 
     return {
         "geometry_model": model or "-",
+        "geometry_residual_model": residual or "-",
         "geometry_rollout_status": rollout_status,
         "geometry_operator_visible": operator_visible,
         "geometry_fallback_only": fallback_only,

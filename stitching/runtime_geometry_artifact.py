@@ -169,6 +169,20 @@ def _normalize_geometry_model(model: Any) -> str:
     return text
 
 
+def _normalize_residual_model(model: Any, *, geometry_model: str = "") -> str:
+    text = str(model or "").strip().lower().replace("_", "-")
+    if text in {"mesh", "rigid", "affine", "homography", "none"}:
+        return text
+    normalized_geometry = _normalize_geometry_model(geometry_model)
+    if normalized_geometry == "virtual-center-rectilinear":
+        return "rigid"
+    if normalized_geometry == "cylindrical-affine":
+        return "affine"
+    if normalized_geometry == "planar-homography":
+        return "homography"
+    return "none"
+
+
 def _legacy_geometry_model(geometry: dict[str, Any]) -> str:
     return _normalize_geometry_model(geometry.get("model") or geometry.get("warp_model") or "planar-homography")
 
@@ -282,11 +296,17 @@ def _ensure_v2_shape(payload: dict[str, Any]) -> dict[str, Any]:
     payload.setdefault("projection", {})
     payload.setdefault("virtual_camera", {})
     payload.setdefault("alignment", {})
+    payload.setdefault("mesh", {})
     payload.setdefault("canvas", {})
     payload.setdefault("seam", {})
     payload.setdefault("exposure", {})
     payload.setdefault("calibration", {})
     payload["geometry"]["model"] = _normalize_geometry_model(payload["geometry"].get("model"))
+    payload["geometry"]["residual_model"] = _normalize_residual_model(
+        payload["geometry"].get("residual_model"),
+        geometry_model=payload["geometry"].get("model"),
+    )
+    payload["mesh"] = dict(payload.get("mesh") or {})
     projection = payload.get("projection")
     if isinstance(projection, dict):
         geometry = payload.get("geometry", {}) if isinstance(payload.get("geometry"), dict) else {}
@@ -333,6 +353,8 @@ def build_runtime_geometry_artifact(
     projection_right_center: tuple[float, float] | list[float] | None = None,
     projection_model: str | None = None,
     virtual_camera: dict[str, Any] | None = None,
+    residual_model: str | None = None,
+    mesh: dict[str, Any] | None = None,
     seam_transition_px: int = 64,
     seam_smoothness_penalty: float = 4.0,
     seam_temporal_penalty: float = 2.0,
@@ -362,11 +384,13 @@ def build_runtime_geometry_artifact(
     )
     alignment = _matrix_2x3(alignment_matrix if alignment_matrix is not None else homography)
     geometry_model = _normalize_geometry_model(geometry_model or "cylindrical-affine")
+    resolved_residual_model = _normalize_residual_model(residual_model, geometry_model=geometry_model)
     resolved_projection_model = str(
         projection_model
         or ("rectilinear" if geometry_model == "virtual-center-rectilinear" else "cylindrical")
     ).strip()
     virtual_camera_payload = dict(virtual_camera or {})
+    mesh_payload = dict(mesh or {})
     projection_left_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or left_focal_px)
     projection_right_virtual_focal_px = float(virtual_camera_payload.get("focal_px") or right_focal_px)
     projection_virtual_center = _pair(
@@ -391,6 +415,7 @@ def build_runtime_geometry_artifact(
         },
         "geometry": {
             "model": geometry_model,
+            "residual_model": resolved_residual_model,
             "warp_model": str(warp_model),
             "homography": _matrix_3x3(homography),
             "output_resolution": [output_resolution[0], output_resolution[1]],
@@ -435,6 +460,7 @@ def build_runtime_geometry_artifact(
             "model": str(alignment_model),
             "matrix": alignment,
         },
+        "mesh": mesh_payload,
         "canvas": {
             "width": output_resolution[0],
             "height": output_resolution[1],
@@ -482,6 +508,19 @@ def runtime_geometry_model(artifact: dict[str, Any]) -> str:
     if not isinstance(geometry, dict):
         return "planar-homography"
     return _normalize_geometry_model(geometry.get("model") or "planar-homography")
+
+
+def runtime_geometry_residual_model(artifact: dict[str, Any]) -> str:
+    geometry = artifact.get("geometry", {})
+    if isinstance(geometry, dict):
+        residual_model = geometry.get("residual_model")
+        if residual_model is not None:
+            return _normalize_residual_model(residual_model, geometry_model=geometry.get("model"))
+    geometry_model = runtime_geometry_model(artifact)
+    alignment = artifact.get("alignment", {})
+    if isinstance(alignment, dict):
+        return _normalize_residual_model(alignment.get("model"), geometry_model=geometry_model)
+    return _normalize_residual_model(None, geometry_model=geometry_model)
 
 
 def runtime_geometry_alignment_matrix(artifact: dict[str, Any]) -> np.ndarray:

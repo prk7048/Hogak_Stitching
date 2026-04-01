@@ -1,4 +1,73 @@
-export type RuntimeState = Record<string, unknown>;
+export type PreparedPlanSummary = {
+  geometry_artifact_path?: string;
+  geometry_artifact_model?: string;
+  geometry_residual_model?: string;
+  geometry_rollout_status?: string;
+  output_runtime_mode?: string;
+  production_output_runtime_mode?: string;
+  sync_pair_mode?: string;
+  transmit_target?: string;
+  probe_target?: string;
+  [key: string]: unknown;
+};
+
+export type RuntimeState = {
+  running?: boolean;
+  prepared?: boolean;
+  status?: string;
+  last_error?: string;
+  prepared_plan?: PreparedPlanSummary | null;
+  latest_metrics?: Record<string, unknown>;
+  latest_validation?: Record<string, unknown>;
+  geometry_mode?: string;
+  geometry_artifact_model?: string;
+  geometry_artifact_path?: string;
+  geometry_residual_model?: string;
+  geometry_rollout_status?: string;
+  geometry_operator_visible?: boolean;
+  geometry_fallback_only?: boolean;
+  geometry_compat_only?: boolean;
+  launch_ready?: boolean;
+  launch_ready_reason?: string;
+  runtime_launch_ready?: boolean;
+  runtime_launch_ready_reason?: string;
+  bakeoff_selected_model?: string;
+  promoted_runtime_model?: string;
+  runtime_active_model?: string;
+  runtime_active_artifact_path?: string;
+  promotion_attempted?: boolean;
+  promotion_succeeded?: boolean;
+  promotion_blocker_reason?: string;
+  alignment_preview_ready?: boolean;
+  alignment_preview_left_url?: string;
+  alignment_preview_right_url?: string;
+  alignment_preview_stitched_url?: string;
+  start_preview_ready?: boolean;
+  start_preview_left_url?: string;
+  start_preview_right_url?: string;
+  start_preview_stitched_url?: string;
+  seam_mode?: string;
+  exposure_mode?: string;
+  output_runtime_mode?: string;
+  production_output_runtime_mode?: string;
+  output_target?: string;
+  production_output_target?: string;
+  production_output_frames_dropped?: number;
+  output_frames_dropped?: number;
+  reused_count?: number;
+  wait_paired_fresh_count?: number;
+  gpu_only_mode?: boolean;
+  gpu_only_ready?: boolean;
+  gpu_only_blockers?: string[];
+  gpu_path_mode?: string;
+  gpu_path_ready?: boolean;
+  gpu_reason?: string;
+  strict_fresh?: boolean;
+  validation_mode?: string;
+  geometry_artifact_checksum?: string;
+  event_count?: number;
+  [key: string]: unknown;
+};
 
 export type RuntimeEvent = {
   seq?: number;
@@ -15,6 +84,7 @@ export type GeometryArtifactSummary = {
   schema_version?: number;
   model?: string;
   geometry_model?: string;
+  geometry_residual_model?: string;
   geometry_rollout_status?: string;
   operator_visible?: boolean;
   fallback_only?: boolean;
@@ -27,7 +97,18 @@ export type GeometryArtifactSummary = {
   raw?: unknown;
 };
 
-export type RuntimeActionResponse = Record<string, unknown>;
+export type RuntimeActionResponse = {
+  ok?: boolean;
+  message?: string;
+  detail?: string;
+  error?: string;
+  preview_ready?: boolean;
+  auto_prepared?: boolean;
+  auto_calibrated?: boolean;
+  state?: RuntimeState;
+  prepared?: PreparedPlanSummary | Record<string, unknown>;
+  [key: string]: unknown;
+};
 
 export type GeometryBakeoffCandidate = {
   model: string;
@@ -53,6 +134,9 @@ export type GeometryBakeoffCandidate = {
   fallback_used: boolean;
   selected: boolean;
   runtime_artifact_path?: string;
+  runtime_launch_ready?: boolean;
+  runtime_launch_ready_reason?: string;
+  geometry_rollout_status?: string;
   stitched_preview_url?: string;
   stitched_video_url?: string;
   overlap_crop_url?: string;
@@ -69,60 +153,10 @@ export type GeometryBakeoffState = {
   selected_candidate_model: string;
   promoted_candidate_model: string;
   runtime_active_artifact_path: string;
+  promotion_attempted: boolean;
+  promotion_succeeded: boolean;
+  promotion_blocker_reason: string;
   candidates: GeometryBakeoffCandidate[];
-};
-
-export type CalibrationPair = {
-  index: number;
-  label: string;
-  left: number[];
-  right: number[];
-  selected: boolean;
-};
-
-export type CalibrationState = {
-  current_step: string;
-  route: string;
-  workflow: {
-    current_step: string;
-    manual_pair_count: number;
-    homography_reference: string;
-    show_inliers: boolean;
-    bridge_mode: string;
-  };
-  output_standard_options: string[];
-  start: {
-    output_standard: string;
-    run_calibration_first: boolean;
-    open_vlc_low_latency: boolean;
-    use_current_homography_enabled: boolean;
-    homography: Record<string, unknown>;
-  };
-  assisted: {
-    left_image_url: string;
-    right_image_url: string;
-    pair_count: number;
-    pending_side: string;
-    pending_left_point: number[] | null;
-    selected_pair_index: number | null;
-    pairs: CalibrationPair[];
-    compute_enabled: boolean;
-  };
-  review: {
-    preview_image_url: string;
-    inlier_image_url: string;
-    candidate: Record<string, unknown> | null;
-  };
-  stitch_review: {
-    preview_image_url: string;
-    probe_sender_target: string;
-    transmit_sender_target: string;
-    probe_receive_uri: string;
-    transmit_receive_uri: string;
-    probe_loopback_only: boolean;
-    transmit_loopback_only: boolean;
-  };
-  recent_events: string[];
 };
 
 const apiBaseUrl = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.trim() || "";
@@ -158,6 +192,55 @@ function pickString(...values: unknown[]): string {
   return "";
 }
 
+function asNumber(value: unknown, fallback = 0): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    if (Number.isFinite(parsed)) {
+      return parsed;
+    }
+  }
+  return fallback;
+}
+
+function asBoolean(value: unknown, fallback = false): boolean {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["1", "true", "yes", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["0", "false", "no", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => asString(item)).filter((item) => item.length > 0);
+}
+
+function asNumberArray(value: unknown): number[] | undefined {
+  if (!Array.isArray(value)) {
+    return undefined;
+  }
+  const numbers = value
+    .map((item) => asNumber(item, Number.NaN))
+    .filter((item) => Number.isFinite(item));
+  return numbers.length > 0 ? numbers : undefined;
+}
+
 function normalizeRuntimeStateShape(value: unknown): RuntimeState {
   if (!isRecord(value)) {
     return {};
@@ -174,285 +257,185 @@ function normalizeRuntimeStateShape(value: unknown): RuntimeState {
     value.hello,
     value.payload,
   ];
+
+  Object.assign(flattened, value);
   for (const candidate of candidates) {
     if (isRecord(candidate)) {
       Object.assign(flattened, candidate);
     }
   }
 
-  Object.assign(flattened, value);
+  flattened.status = pickString(flattened.status, value.status);
+  flattened.last_error = pickString(flattened.last_error, value.last_error);
+  flattened.geometry_mode = pickString(flattened.geometry_mode, value.geometry_mode);
+  flattened.geometry_artifact_model = pickString(flattened.geometry_artifact_model, value.geometry_artifact_model);
+  flattened.geometry_artifact_path = pickString(flattened.geometry_artifact_path, value.geometry_artifact_path);
+  flattened.geometry_residual_model = pickString(flattened.geometry_residual_model, value.geometry_residual_model);
+  flattened.geometry_rollout_status = pickString(flattened.geometry_rollout_status, value.geometry_rollout_status);
+  flattened.launch_ready_reason = pickString(flattened.launch_ready_reason, value.launch_ready_reason);
+  flattened.runtime_launch_ready_reason = pickString(
+    flattened.runtime_launch_ready_reason,
+    value.runtime_launch_ready_reason,
+  );
+  flattened.bakeoff_selected_model = pickString(flattened.bakeoff_selected_model, value.bakeoff_selected_model);
+  flattened.promoted_runtime_model = pickString(flattened.promoted_runtime_model, value.promoted_runtime_model);
+  flattened.runtime_active_model = pickString(flattened.runtime_active_model, value.runtime_active_model);
+  flattened.runtime_active_artifact_path = pickString(
+    flattened.runtime_active_artifact_path,
+    value.runtime_active_artifact_path,
+  );
+  flattened.promotion_blocker_reason = pickString(
+    flattened.promotion_blocker_reason,
+    value.promotion_blocker_reason,
+  );
+  flattened.seam_mode = pickString(flattened.seam_mode, value.seam_mode);
+  flattened.exposure_mode = pickString(flattened.exposure_mode, value.exposure_mode);
+  flattened.output_runtime_mode = pickString(flattened.output_runtime_mode, value.output_runtime_mode);
+  flattened.production_output_runtime_mode = pickString(
+    flattened.production_output_runtime_mode,
+    value.production_output_runtime_mode,
+  );
+  flattened.output_target = pickString(flattened.output_target, value.output_target);
+  flattened.production_output_target = pickString(
+    flattened.production_output_target,
+    value.production_output_target,
+  );
+  flattened.gpu_reason = pickString(flattened.gpu_reason, value.gpu_reason);
+  flattened.validation_mode = pickString(flattened.validation_mode, value.validation_mode);
+  flattened.geometry_artifact_checksum = pickString(
+    flattened.geometry_artifact_checksum,
+    value.geometry_artifact_checksum,
+  );
+  flattened.gpu_path_mode = pickString(flattened.gpu_path_mode, value.gpu_path_mode, "unknown");
 
-  if (!("status" in flattened)) {
-    const running = Boolean(flattened.running);
-    const prepared = Boolean(flattened.prepared);
-    flattened.status = running ? "running" : prepared ? "prepared" : "idle";
-  }
+  flattened.running = asBoolean(flattened.running, false);
+  flattened.prepared = asBoolean(flattened.prepared, false);
+  flattened.geometry_operator_visible = asBoolean(flattened.geometry_operator_visible, false);
+  flattened.geometry_fallback_only = asBoolean(flattened.geometry_fallback_only, false);
+  flattened.geometry_compat_only = asBoolean(flattened.geometry_compat_only, false);
+  flattened.launch_ready = asBoolean(flattened.launch_ready, false);
+  flattened.runtime_launch_ready = asBoolean(flattened.runtime_launch_ready, flattened.launch_ready);
+  flattened.promotion_attempted = asBoolean(flattened.promotion_attempted, false);
+  flattened.promotion_succeeded = asBoolean(flattened.promotion_succeeded, false);
+  flattened.alignment_preview_ready = asBoolean(
+    flattened.alignment_preview_ready,
+    asBoolean(flattened.start_preview_ready, false),
+  );
+  flattened.start_preview_ready = asBoolean(flattened.start_preview_ready, false);
+  flattened.gpu_only_mode = asBoolean(flattened.gpu_only_mode, false);
+  flattened.gpu_only_ready = asBoolean(flattened.gpu_only_ready, false);
+  flattened.gpu_path_ready = asBoolean(flattened.gpu_path_ready, false);
+  flattened.strict_fresh = asBoolean(flattened.strict_fresh, false);
 
-  if (!("geometry_mode" in flattened)) {
-    const preparedPlan = isRecord(flattened.prepared_plan) ? flattened.prepared_plan : null;
-    const preparedGeometry = preparedPlan && isRecord(preparedPlan.geometry) ? preparedPlan.geometry : null;
-    flattened.geometry_mode = pickString(
-      flattened.geometry_mode,
-      isRecord(flattened.geometry) ? flattened.geometry.model : "",
-      flattened.latest_geometry_mode,
-      preparedPlan?.geometry_model,
-      preparedGeometry?.model,
-      "planar-homography",
-    );
-  }
+  flattened.production_output_frames_dropped = asNumber(flattened.production_output_frames_dropped, 0);
+  flattened.output_frames_dropped = asNumber(flattened.output_frames_dropped, 0);
+  flattened.reused_count = asNumber(flattened.reused_count, 0);
+  flattened.wait_paired_fresh_count = asNumber(flattened.wait_paired_fresh_count, 0);
+  flattened.event_count = asNumber(flattened.event_count, 0);
+  flattened.gpu_only_blockers = asStringArray(flattened.gpu_only_blockers);
 
-  if (!("seam_mode" in flattened)) {
-    const seam = isRecord(flattened.seam) ? flattened.seam : null;
-    flattened.seam_mode = pickString(flattened.latest_seam_mode, seam?.mode, "feather");
+  if (isRecord(flattened.prepared_plan)) {
+    flattened.prepared_plan = flattened.prepared_plan as PreparedPlanSummary;
+  } else {
+    flattened.prepared_plan = null;
   }
+  flattened.latest_metrics = isRecord(flattened.latest_metrics) ? flattened.latest_metrics : undefined;
+  flattened.latest_validation = isRecord(flattened.latest_validation) ? flattened.latest_validation : undefined;
 
-  if (!("exposure_mode" in flattened)) {
-    const exposure = isRecord(flattened.exposure) ? flattened.exposure : null;
-    flattened.exposure_mode = pickString(flattened.latest_exposure_mode, exposure?.mode, "none");
-  }
-
-  if (!("output_runtime_mode" in flattened)) {
-    const preparedPlan = isRecord(flattened.prepared_plan) ? flattened.prepared_plan : null;
-    flattened.output_runtime_mode = pickString(
-      flattened.latest_output_runtime_mode,
-      flattened.prepared_output_runtime_mode,
-      preparedPlan?.output_runtime_mode,
-      "unknown",
-    );
-  }
-
-  if (!("production_output_runtime_mode" in flattened)) {
-    const preparedPlan = isRecord(flattened.prepared_plan) ? flattened.prepared_plan : null;
-    flattened.production_output_runtime_mode = pickString(
-      flattened.latest_production_output_runtime_mode,
-      flattened.prepared_production_output_runtime_mode,
-      preparedPlan?.production_output_runtime_mode,
-      "unknown",
-    );
-  }
-
-  if (!("output_target" in flattened)) {
-    const preparedPlan = isRecord(flattened.prepared_plan) ? flattened.prepared_plan : null;
-    flattened.output_target = pickString(preparedPlan?.probe_target, preparedPlan?.output_target, "n/a");
-  }
-
-  if (!("production_output_target" in flattened)) {
-    const preparedPlan = isRecord(flattened.prepared_plan) ? flattened.prepared_plan : null;
-    flattened.production_output_target = pickString(
-      preparedPlan?.transmit_target,
-      preparedPlan?.production_output_target,
-      "n/a",
-    );
-  }
+  flattened.alignment_preview_left_url = pickString(
+    flattened.alignment_preview_left_url,
+    flattened.start_preview_left_url,
+    value.alignment_preview_left_url,
+    value.start_preview_left_url,
+  );
+  flattened.alignment_preview_right_url = pickString(
+    flattened.alignment_preview_right_url,
+    flattened.start_preview_right_url,
+    value.alignment_preview_right_url,
+    value.start_preview_right_url,
+  );
+  flattened.alignment_preview_stitched_url = pickString(
+    flattened.alignment_preview_stitched_url,
+    flattened.start_preview_stitched_url,
+    value.alignment_preview_stitched_url,
+    value.start_preview_stitched_url,
+  );
 
   return flattened;
 }
 
-function emptyCalibrationState(): CalibrationState {
-  return {
-    current_step: "start",
-    route: "/calibration/start",
-    workflow: {
-      current_step: "start",
-      manual_pair_count: 0,
-      homography_reference: "raw",
-      show_inliers: true,
-      bridge_mode: "react-single-surface",
-    },
-    output_standard_options: [],
-    start: {
-      output_standard: "",
-      run_calibration_first: true,
-      open_vlc_low_latency: false,
-      use_current_homography_enabled: false,
-      homography: {},
-    },
-    assisted: {
-      left_image_url: "",
-      right_image_url: "",
-      pair_count: 0,
-      pending_side: "left",
-      pending_left_point: null,
-      selected_pair_index: null,
-      pairs: [],
-      compute_enabled: false,
-    },
-    review: {
-      preview_image_url: "",
-      inlier_image_url: "",
-      candidate: null,
-    },
-    stitch_review: {
-      preview_image_url: "",
-      probe_sender_target: "",
-      transmit_sender_target: "",
-      probe_receive_uri: "",
-      transmit_receive_uri: "",
-      probe_loopback_only: false,
-      transmit_loopback_only: false,
-    },
-    recent_events: [],
-  };
-}
-
-function normalizeCalibrationPair(value: unknown): CalibrationPair | null {
+function normalizeGeometryArtifact(value: unknown, index: number): GeometryArtifactSummary | null {
   if (!isRecord(value)) {
     return null;
   }
-  const index = Number(value.index);
-  if (!Number.isFinite(index)) {
-    return null;
-  }
   return {
-    index,
-    label: pickString(value.label, `쌍 ${index + 1}`).replace(/^Pair\s+(\d+)$/i, "쌍 $1"),
-    left: Array.isArray(value.left) ? value.left.map((item) => Number(item)) : [],
-    right: Array.isArray(value.right) ? value.right.map((item) => Number(item)) : [],
-    selected: Boolean(value.selected),
+    name: pickString(value.name, `artifact-${index + 1}`),
+    path: pickString(value.path),
+    artifact_type: pickString(value.artifact_type),
+    schema_version: asNumber(value.schema_version, 0) || undefined,
+    model: pickString(value.model),
+    geometry_model: pickString(value.geometry_model),
+    geometry_residual_model: pickString(value.geometry_residual_model),
+    geometry_rollout_status: pickString(value.geometry_rollout_status),
+    operator_visible: asBoolean(value.operator_visible, false),
+    fallback_only: asBoolean(value.fallback_only, false),
+    compat_only: asBoolean(value.compat_only, false),
+    launch_ready: asBoolean(value.launch_ready, false),
+    launch_ready_reason: pickString(value.launch_ready_reason),
+    output_resolution: asNumberArray(value.output_resolution),
+    calibration: isRecord(value.calibration) ? value.calibration : undefined,
+    source: isRecord(value.source) ? value.source : undefined,
+    raw: value.raw,
   };
 }
 
-function normalizeCalibrationState(value: unknown): CalibrationState {
-  const fallback = emptyCalibrationState();
+function normalizeBakeoffCandidate(value: unknown): GeometryBakeoffCandidate | null {
   if (!isRecord(value)) {
-    return fallback;
-  }
-
-  const workflow = isRecord(value.workflow) ? value.workflow : {};
-  const start = isRecord(value.start) ? value.start : {};
-  const assisted = isRecord(value.assisted) ? value.assisted : {};
-  const review = isRecord(value.review) ? value.review : {};
-  const stitchReview = isRecord(value.stitch_review) ? value.stitch_review : {};
-
-  return {
-    current_step: pickString(value.current_step, fallback.current_step),
-    route: pickString(value.route, fallback.route),
-    workflow: {
-      current_step: pickString(workflow.current_step, fallback.workflow.current_step),
-      manual_pair_count: Number(workflow.manual_pair_count ?? fallback.workflow.manual_pair_count),
-      homography_reference: pickString(workflow.homography_reference, fallback.workflow.homography_reference),
-      show_inliers: Boolean(workflow.show_inliers ?? fallback.workflow.show_inliers),
-      bridge_mode: pickString(workflow.bridge_mode, fallback.workflow.bridge_mode),
-    },
-    output_standard_options: Array.isArray(value.output_standard_options)
-      ? value.output_standard_options.map((item) => pickString(item)).filter(Boolean)
-      : fallback.output_standard_options,
-    start: {
-      output_standard: pickString(start.output_standard, fallback.start.output_standard),
-      run_calibration_first: Boolean(start.run_calibration_first ?? fallback.start.run_calibration_first),
-      open_vlc_low_latency: Boolean(start.open_vlc_low_latency ?? fallback.start.open_vlc_low_latency),
-      use_current_homography_enabled: Boolean(
-        start.use_current_homography_enabled ?? fallback.start.use_current_homography_enabled,
-      ),
-      homography: isRecord(start.homography) ? start.homography : fallback.start.homography,
-    },
-    assisted: {
-      left_image_url: pickString(assisted.left_image_url),
-      right_image_url: pickString(assisted.right_image_url),
-      pair_count: Number(assisted.pair_count ?? fallback.assisted.pair_count),
-      pending_side: pickString(assisted.pending_side, fallback.assisted.pending_side),
-      pending_left_point: Array.isArray(assisted.pending_left_point)
-        ? assisted.pending_left_point.map((item) => Number(item))
-        : null,
-      selected_pair_index:
-        assisted.selected_pair_index === null || assisted.selected_pair_index === undefined
-          ? null
-          : Number(assisted.selected_pair_index),
-      pairs: Array.isArray(assisted.pairs)
-        ? assisted.pairs
-            .map((item) => normalizeCalibrationPair(item))
-            .filter((item): item is CalibrationPair => item !== null)
-        : [],
-      compute_enabled: Boolean(assisted.compute_enabled ?? fallback.assisted.compute_enabled),
-    },
-    review: {
-      preview_image_url: pickString(review.preview_image_url),
-      inlier_image_url: pickString(review.inlier_image_url),
-      candidate: isRecord(review.candidate) ? review.candidate : null,
-    },
-    stitch_review: {
-      preview_image_url: pickString(stitchReview.preview_image_url),
-      probe_sender_target: pickString(stitchReview.probe_sender_target),
-      transmit_sender_target: pickString(stitchReview.transmit_sender_target),
-      probe_receive_uri: pickString(stitchReview.probe_receive_uri),
-      transmit_receive_uri: pickString(stitchReview.transmit_receive_uri),
-      probe_loopback_only: Boolean(stitchReview.probe_loopback_only),
-      transmit_loopback_only: Boolean(stitchReview.transmit_loopback_only),
-    },
-    recent_events: Array.isArray(value.recent_events) ? value.recent_events.map((item) => pickString(item)).filter(Boolean) : [],
-  };
-}
-
-function normalizeGeometryArtifact(item: unknown, index: number): GeometryArtifactSummary | null {
-  if (!isRecord(item)) {
     return null;
   }
-
-  const name = pickString(item.name, item.path, item.artifact_name, item.file_name, `artifact-${index + 1}`);
-  const geometry = isRecord(item.geometry) ? item.geometry : null;
-  const calibration = isRecord(item.calibration) ? item.calibration : undefined;
-  const source = isRecord(item.source) ? item.source : undefined;
-
-  return {
-    name,
-    path: asString(item.path, ""),
-    artifact_type: asString(item.artifact_type, ""),
-    schema_version: typeof item.schema_version === "number" ? item.schema_version : undefined,
-    model: pickString(item.model, geometry?.model),
-    geometry_model: pickString(item.geometry_model, geometry?.model),
-    geometry_rollout_status: pickString(item.geometry_rollout_status),
-    operator_visible: typeof item.operator_visible === "boolean" ? item.operator_visible : undefined,
-    fallback_only: typeof item.fallback_only === "boolean" ? item.fallback_only : undefined,
-    compat_only: typeof item.compat_only === "boolean" ? item.compat_only : undefined,
-    launch_ready: typeof item.launch_ready === "boolean" ? item.launch_ready : undefined,
-    launch_ready_reason: pickString(item.launch_ready_reason),
-    output_resolution: Array.isArray(item.output_resolution) ? item.output_resolution.map((value) => Number(value)) : undefined,
-    calibration,
-    source,
-    raw: item,
-  };
-}
-
-function normalizeBakeoffCandidate(item: unknown): GeometryBakeoffCandidate | null {
-  if (!isRecord(item)) {
+  const model = pickString(value.model);
+  if (!model) {
     return null;
   }
   return {
-    model: pickString(item.model),
-    global_model: pickString(item.global_model),
-    residual_model: pickString(item.residual_model),
-    projection_model: pickString(item.projection_model),
-    exposure_model: pickString(item.exposure_model),
-    seam_model: pickString(item.seam_model),
-    blend_model: pickString(item.blend_model),
-    crop_model: pickString(item.crop_model),
-    good_match_count: Number(item.good_match_count ?? 0),
-    inlier_count: Number(item.inlier_count ?? 0),
-    mean_reprojection_error_px: Number(item.mean_reprojection_error_px ?? 0),
-    vertical_misalignment_p90_px: Number(item.vertical_misalignment_p90_px ?? 0),
-    overlap_luma_diff: Number(item.overlap_luma_diff ?? 0),
-    seam_visibility_score: Number(item.seam_visibility_score ?? 0),
-    right_edge_scale_drift: Number(item.right_edge_scale_drift ?? 0),
-    crop_ratio: Number(item.crop_ratio ?? 0),
-    mesh_max_displacement_px: Number(item.mesh_max_displacement_px ?? 0),
-    mesh_max_local_scale_drift: Number(item.mesh_max_local_scale_drift ?? 0),
-    mesh_max_local_rotation_drift: Number(item.mesh_max_local_rotation_drift ?? 0),
-    status: pickString(item.status, "unknown"),
-    fallback_used: Boolean(item.fallback_used),
-    selected: Boolean(item.selected),
-    runtime_artifact_path: pickString(item.runtime_artifact_path),
-    stitched_preview_url: pickString(item.stitched_preview_url),
-    stitched_video_url: pickString(item.stitched_video_url),
-    overlap_crop_url: pickString(item.overlap_crop_url),
-    seam_debug_url: pickString(item.seam_debug_url),
-    video_duration_sec: Number(item.video_duration_sec ?? 0),
-    video_fps: Number(item.video_fps ?? 0),
-    video_frame_count: Number(item.video_frame_count ?? 0),
+    model,
+    global_model: pickString(value.global_model),
+    residual_model: pickString(value.residual_model),
+    projection_model: pickString(value.projection_model),
+    exposure_model: pickString(value.exposure_model),
+    seam_model: pickString(value.seam_model),
+    blend_model: pickString(value.blend_model),
+    crop_model: pickString(value.crop_model),
+    good_match_count: asNumber(value.good_match_count, 0),
+    inlier_count: asNumber(value.inlier_count, 0),
+    mean_reprojection_error_px: asNumber(value.mean_reprojection_error_px, 0),
+    vertical_misalignment_p90_px: asNumber(value.vertical_misalignment_p90_px, 0),
+    overlap_luma_diff: asNumber(value.overlap_luma_diff, 0),
+    seam_visibility_score: asNumber(value.seam_visibility_score, 0),
+    right_edge_scale_drift: asNumber(value.right_edge_scale_drift, 0),
+    crop_ratio: asNumber(value.crop_ratio, 0),
+    mesh_max_displacement_px: asNumber(value.mesh_max_displacement_px, 0),
+    mesh_max_local_scale_drift: asNumber(value.mesh_max_local_scale_drift, 0),
+    mesh_max_local_rotation_drift: asNumber(value.mesh_max_local_rotation_drift, 0),
+    status: pickString(value.status, "unknown"),
+    fallback_used: asBoolean(value.fallback_used, false),
+    selected: asBoolean(value.selected, false),
+    runtime_artifact_path: pickString(value.runtime_artifact_path),
+    runtime_launch_ready: asBoolean(value.runtime_launch_ready, false),
+    runtime_launch_ready_reason: pickString(value.runtime_launch_ready_reason),
+    geometry_rollout_status: pickString(value.geometry_rollout_status),
+    stitched_preview_url: pickString(value.stitched_preview_url),
+    stitched_video_url: pickString(value.stitched_video_url),
+    overlap_crop_url: pickString(value.overlap_crop_url),
+    seam_debug_url: pickString(value.seam_debug_url),
+    video_duration_sec: asNumber(value.video_duration_sec, 0),
+    video_fps: asNumber(value.video_fps, 0),
+    video_frame_count: asNumber(value.video_frame_count, 0),
   };
 }
 
-function normalizeBakeoffState(item: unknown): GeometryBakeoffState {
-  if (!isRecord(item)) {
+function normalizeBakeoffState(value: unknown): GeometryBakeoffState {
+  if (!isRecord(value)) {
     return {
       status: "idle",
       session_id: "",
@@ -460,38 +443,47 @@ function normalizeBakeoffState(item: unknown): GeometryBakeoffState {
       selected_candidate_model: "",
       promoted_candidate_model: "",
       runtime_active_artifact_path: "",
+      promotion_attempted: false,
+      promotion_succeeded: false,
+      promotion_blocker_reason: "",
       candidates: [],
     };
   }
+  const candidates = Array.isArray(value.candidates)
+    ? value.candidates
+        .map((candidate) => normalizeBakeoffCandidate(candidate))
+        .filter((candidate): candidate is GeometryBakeoffCandidate => candidate !== null)
+    : [];
   return {
-    status: pickString(item.status, "idle"),
-    session_id: pickString(item.session_id),
-    bundle_dir: pickString(item.bundle_dir),
-    selected_candidate_model: pickString(item.selected_candidate_model),
-    promoted_candidate_model: pickString(item.promoted_candidate_model),
-    runtime_active_artifact_path: pickString(item.runtime_active_artifact_path),
-    candidates: Array.isArray(item.candidates)
-      ? item.candidates.map((candidate) => normalizeBakeoffCandidate(candidate)).filter((candidate): candidate is GeometryBakeoffCandidate => candidate !== null)
-      : [],
+    status: pickString(value.status, "idle"),
+    session_id: pickString(value.session_id),
+    bundle_dir: pickString(value.bundle_dir),
+    selected_candidate_model: pickString(value.selected_candidate_model),
+    promoted_candidate_model: pickString(value.promoted_candidate_model),
+    runtime_active_artifact_path: pickString(value.runtime_active_artifact_path),
+    promotion_attempted: asBoolean(value.promotion_attempted, false),
+    promotion_succeeded: asBoolean(value.promotion_succeeded, false),
+    promotion_blocker_reason: pickString(value.promotion_blocker_reason),
+    candidates,
   };
 }
 
-function parseRuntimeEvent(raw: string, fallbackType = "message"): RuntimeEvent {
-  const parsed = JSON.parse(raw) as unknown;
-  if (!isRecord(parsed)) {
+function parseRuntimeEvent(data: string, fallbackType: string): RuntimeEvent {
+  try {
+    const parsed = JSON.parse(data);
+    if (!isRecord(parsed)) {
+      return { type: fallbackType, raw: parsed };
+    }
     return {
-      type: fallbackType,
+      seq: asNumber(parsed.seq, 0) || undefined,
+      type: pickString(parsed.type, fallbackType),
+      timestamp_sec: asNumber(parsed.timestamp_sec, 0) || undefined,
+      payload: isRecord(parsed.payload) ? parsed.payload : undefined,
       raw: parsed,
     };
+  } catch {
+    return { type: fallbackType, raw: data };
   }
-  const payload = isRecord(parsed.payload) ? parsed.payload : undefined;
-  return {
-    seq: typeof parsed.seq === "number" ? parsed.seq : undefined,
-    type: asString(parsed.type, fallbackType) || fallbackType,
-    timestamp_sec: typeof parsed.timestamp_sec === "number" ? parsed.timestamp_sec : undefined,
-    payload,
-    raw: parsed,
-  };
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
@@ -502,23 +494,23 @@ async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
   if (init?.body !== undefined && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  const response = await fetch(joinPath(path), {
-    ...init,
-    headers,
-  });
+
+  const response = await fetch(joinPath(path), { ...init, headers });
+  const text = await response.text();
+  const payload = text ? JSON.parse(text) : null;
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    throw new Error(detail ? `${response.status}: ${detail}` : `request failed: ${response.status}`);
+    const detail =
+      (isRecord(payload) && pickString(payload.detail, payload.error, payload.message)) || `${response.status}`;
+    throw new Error(detail);
   }
-  return (await response.json()) as T;
+  return payload as T;
 }
 
 async function postJson<T>(path: string, body?: unknown): Promise<T> {
-  const init: RequestInit = {
+  return requestJson<T>(path, {
     method: "POST",
     body: body === undefined ? "{}" : JSON.stringify(body),
-  };
-  return requestJson<T>(path, init);
+  });
 }
 
 export function apiUrl(path: string): string {
@@ -533,15 +525,14 @@ export async function fetchRuntimeState(): Promise<RuntimeState> {
   try {
     const payload = await requestJson<unknown>("/api/runtime/state");
     return normalizeRuntimeState(payload);
-  } catch (error) {
+  } catch {
     return {
       status: "backend unavailable",
-      geometry_mode: "planar-homography",
-      seam_mode: "feather",
-      exposure_mode: "none",
-      output_runtime_mode: "unknown",
-      production_output_runtime_mode: "unknown",
-      error: String(error),
+      geometry_mode: "virtual-center-rectilinear-rigid",
+      seam_mode: "unknown",
+      exposure_mode: "unknown",
+      gpu_path_mode: "unknown",
+      gpu_path_ready: false,
     };
   }
 }
@@ -558,41 +549,24 @@ export async function fetchGeometryArtifacts(): Promise<GeometryArtifactSummary[
   }
 }
 
-export async function fetchGeometryArtifact(name: string): Promise<GeometryArtifactSummary | null> {
-  try {
-    const payload = await requestJson<unknown>(`/api/artifacts/geometry/${encodeURIComponent(name)}`);
-    return normalizeGeometryArtifact(payload, 0);
-  } catch {
-    return null;
-  }
-}
-
 export async function fetchGeometryBakeoffState(): Promise<GeometryBakeoffState> {
   try {
-    const payload = await requestJson<unknown>("/api/bakeoff/state");
-    return normalizeBakeoffState(payload);
+    return normalizeBakeoffState(await requestJson<unknown>("/api/bakeoff/state"));
   } catch {
     return normalizeBakeoffState({});
   }
 }
 
 export async function runGeometryBakeoff(body?: unknown): Promise<GeometryBakeoffState> {
-  const payload = await postJson<unknown>("/api/bakeoff/run", body ?? {});
-  return normalizeBakeoffState(payload);
+  return normalizeBakeoffState(await postJson<unknown>("/api/bakeoff/run", body ?? {}));
 }
 
-export async function selectGeometryBakeoffWinner(body: { bundle_dir: string; model: string }): Promise<GeometryBakeoffState> {
-  const payload = await postJson<unknown>("/api/bakeoff/select", body);
-  return normalizeBakeoffState(payload);
+export async function useGeometryBakeoffWinner(body: { bundle_dir: string; model: string }): Promise<GeometryBakeoffState> {
+  return normalizeBakeoffState(await postJson<unknown>("/api/bakeoff/use-winner", body));
 }
 
-export async function promoteGeometryBakeoffWinner(body: { bundle_dir: string; model?: string }): Promise<GeometryBakeoffState> {
-  const payload = await postJson<unknown>("/api/bakeoff/promote", body);
-  return normalizeBakeoffState(payload);
-}
-
-export async function prepareRuntime(body?: unknown): Promise<RuntimeActionResponse> {
-  return postJson<RuntimeActionResponse>("/api/runtime/prepare", body ?? {});
+export async function previewAlignRuntime(body?: unknown): Promise<RuntimeActionResponse> {
+  return postJson<RuntimeActionResponse>("/api/runtime/preview-align", body ?? {});
 }
 
 export async function startRuntime(body?: unknown): Promise<RuntimeActionResponse> {
@@ -607,123 +581,33 @@ export async function validateRuntime(body?: unknown): Promise<RuntimeActionResp
   return postJson<RuntimeActionResponse>("/api/runtime/validate", body ?? {});
 }
 
-export async function reloadRuntime(body: unknown): Promise<RuntimeActionResponse> {
-  return postJson<RuntimeActionResponse>("/api/runtime/reload", body);
-}
-
-async function calibrationAction(path: string, body?: unknown): Promise<CalibrationState> {
-  const payload = await postJson<Record<string, unknown>>(path, body ?? {});
-  const state = isRecord(payload.state) ? payload.state : payload;
-  return normalizeCalibrationState(state);
-}
-
-export async function fetchCalibrationState(): Promise<CalibrationState> {
-  try {
-    return normalizeCalibrationState(await requestJson<unknown>("/api/calibration/session/state"));
-  } catch {
-    return emptyCalibrationState();
-  }
-}
-
-export async function startCalibrationSession(body: {
-  output_standard?: string;
-  run_calibration_first?: boolean;
-  open_vlc_low_latency?: boolean;
-}): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/session/start", body);
-}
-
-export async function refreshCalibrationFrames(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/frames/refresh");
-}
-
-export async function addCalibrationPair(body: { slot: "left" | "right"; x: number; y: number }): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/pairs", body);
-}
-
-export async function selectCalibrationPair(index: number): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/pairs/select", { index });
-}
-
-export async function undoCalibrationPair(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/pairs/undo");
-}
-
-export async function deleteCalibrationPair(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/pairs/delete");
-}
-
-export async function clearCalibrationPairs(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/pairs/clear");
-}
-
-export async function computeCalibrationCandidate(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/candidate/compute");
-}
-
-export async function fetchCalibrationReview(): Promise<CalibrationState> {
-  const payload = await requestJson<Record<string, unknown>>("/api/calibration/review");
-  const state = isRecord(payload.state) ? payload.state : payload;
-  return normalizeCalibrationState(state);
-}
-
-export async function acceptCalibrationReview(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/review/accept");
-}
-
-export async function cancelCalibrationReview(): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/review/cancel");
-}
-
-export async function fetchStitchReview(): Promise<CalibrationState> {
-  const payload = await requestJson<Record<string, unknown>>("/api/calibration/stitch-review");
-  const state = isRecord(payload.state) ? payload.state : payload;
-  return normalizeCalibrationState(state);
-}
-
-export async function useCurrentHomography(body: {
-  output_standard?: string;
-  run_calibration_first?: boolean;
-  open_vlc_low_latency?: boolean;
-}): Promise<CalibrationState> {
-  return calibrationAction("/api/calibration/use-current", body);
-}
-
-export function calibrationImageUrl(path: string): string {
-  return path ? joinPath(path) : "";
-}
-
 export function describeRuntimeActionResult(result: unknown): string {
   if (!isRecord(result)) {
-    return "작업을 완료했습니다.";
+    return "작업이 완료되었습니다.";
   }
   const message = pickString(result.message, result.detail, result.error);
   if (message) {
     return message;
   }
   if (result.ok === false) {
-    return "요청에 실패했습니다.";
+    return "요청이 실패했습니다.";
   }
   if (result.ok === true) {
     const state = isRecord(result.state) ? result.state : null;
     if (state) {
-      return `정상 처리: ${pickString(state.status, state.state, "상태가 업데이트되었습니다.")}`;
+      return `정상 처리: ${pickString(state.status, state.state, "상태가 갱신되었습니다.")}`;
     }
-    const plan = isRecord(result.plan) ? result.plan : null;
+    const plan = isRecord(result.prepared) ? result.prepared : null;
     if (plan) {
-      return `정상 처리: ${pickString(plan.geometry_artifact_path, plan.output_runtime_mode, "계획이 업데이트되었습니다.")}`;
+      return `정상 처리: ${pickString(plan.geometry_artifact_path, plan.output_runtime_mode, "계획이 갱신되었습니다.")}`;
     }
     return "정상 처리";
   }
-  return "작업을 완료했습니다.";
+  return "작업이 완료되었습니다.";
 }
 
 export function runtimeEventsUrl(): string {
   return joinPath("/api/runtime/events");
-}
-
-export function previewUrl(version: number): string {
-  return joinPath(`/api/runtime/preview.jpg?ts=${version}`);
 }
 
 export function outputReceiveUri(target: unknown): string {
@@ -731,17 +615,17 @@ export function outputReceiveUri(target: unknown): string {
   if (!text) {
     return "";
   }
-  if (text.startsWith("udp://")) {
-    const endpoint = text.split("?", 1)[0].slice("udp://".length);
-    const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
-    const separator = hostPort.lastIndexOf(":");
-    if (separator < 0) {
-      return text;
-    }
-    const port = hostPort.slice(separator + 1).trim();
-    return port ? `udp://@:${port}?fifo_size=${8 * 1024 * 1024}&overrun_nonfatal=1` : text;
+  if (!text.startsWith("udp://")) {
+    return text;
   }
-  return text;
+  const endpoint = text.split("?", 1)[0].slice("udp://".length);
+  const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
+  const separator = hostPort.lastIndexOf(":");
+  if (separator < 0) {
+    return text;
+  }
+  const port = hostPort.slice(separator + 1).trim();
+  return port ? `udp://@:${port}?fifo_size=${8 * 1024 * 1024}&overrun_nonfatal=1` : text;
 }
 
 function withUdpReceiveSafetyOptions(uri: string): string {
@@ -750,12 +634,10 @@ function withUdpReceiveSafetyOptions(uri: string): string {
   }
   let safeUri = uri;
   if (!safeUri.includes("fifo_size=")) {
-    const separator = safeUri.includes("?") ? "&" : "?";
-    safeUri = `${safeUri}${separator}fifo_size=${8 * 1024 * 1024}`;
+    safeUri = `${safeUri}${safeUri.includes("?") ? "&" : "?"}fifo_size=${8 * 1024 * 1024}`;
   }
   if (!safeUri.includes("overrun_nonfatal=")) {
-    const separator = safeUri.includes("?") ? "&" : "?";
-    safeUri = `${safeUri}${separator}overrun_nonfatal=1`;
+    safeUri = `${safeUri}${safeUri.includes("?") ? "&" : "?"}overrun_nonfatal=1`;
   }
   return safeUri;
 }
@@ -771,20 +653,18 @@ export function ffplayReceiveExample(target: unknown): string {
 
 export function outputReachabilityHint(target: unknown): string {
   const text = pickString(target);
-  if (!text) {
+  if (!text || !text.startsWith("udp://")) {
     return "";
   }
-  if (text.startsWith("udp://")) {
-    const endpoint = text.split("?", 1)[0].slice("udp://".length);
-    const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
-    const separator = hostPort.lastIndexOf(":");
-    const host = (separator >= 0 ? hostPort.slice(0, separator) : hostPort).trim().toLowerCase();
-    if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
-      return "루프백 전용: 같은 Windows PC에서 VLC 또는 ffplay로 열어야 합니다.";
-    }
-    if (host) {
-      return `원격 수신기는 ${host} 주소로 접근 가능해야 합니다.`;
-    }
+  const endpoint = text.split("?", 1)[0].slice("udp://".length);
+  const hostPort = endpoint.startsWith("@") ? endpoint.slice(1) : endpoint;
+  const separator = hostPort.lastIndexOf(":");
+  const host = (separator >= 0 ? hostPort.slice(0, separator) : hostPort).trim().toLowerCase();
+  if (host === "127.0.0.1" || host === "localhost" || host === "::1") {
+    return "루프백 전용입니다. 같은 PC에서 VLC 또는 ffplay로 여세요.";
+  }
+  if (host) {
+    return `${host} 주소에 도달할 수 있는 수신기에서 열어야 합니다.`;
   }
   return "";
 }
@@ -796,17 +676,10 @@ export function openRuntimeEventStream(onEvent: (event: RuntimeEvent) => void): 
 
   const handleEvent = (event: Event) => {
     if (event instanceof MessageEvent) {
-      try {
-        onEvent(parseRuntimeEvent(String(event.data), event.type || "message"));
-      } catch {
-        onEvent({ type: event.type || "message", raw: event.data });
-      }
+      onEvent(parseRuntimeEvent(String(event.data), event.type || "message"));
       return;
     }
-    onEvent({
-      type: event.type || "message",
-      raw: { transport: true, readyState: EventSource.CLOSED },
-    });
+    onEvent({ type: event.type || "message", raw: event });
   };
 
   try {
@@ -816,11 +689,6 @@ export function openRuntimeEventStream(onEvent: (event: RuntimeEvent) => void): 
       source.addEventListener(eventType, handleEvent as EventListener);
     }
     source.addEventListener("message", handleEvent as EventListener);
-    source.onerror = () => {
-      if (source.readyState === EventSource.CLOSED) {
-        onEvent({ type: "error", raw: { transport: "closed" } });
-      }
-    };
     return source;
   } catch {
     return null;

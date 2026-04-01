@@ -16,18 +16,18 @@ export function ValidationPage() {
   const preparedPlan = state.prepared_plan as Record<string, unknown> | undefined;
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [validationResult, setValidationResult] = useState(
-    "Validation has not run yet. Read-only checks will report the active artifact, geometry rollout status, and launch readiness.",
+    "아직 validation을 실행하지 않았습니다. 이 화면은 bakeoff winner, 승격된 runtime, 실제 active model을 서로 나눠서 보여줍니다.",
   );
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
-    setValidationResult(`${label} in progress...`);
+    setValidationResult(`${label} 진행 중...`);
     try {
       const result = await action();
       setValidationResult(`${label}: ${describeRuntimeActionResult(result)}\n${JSON.stringify(result, null, 2)}`);
       await refreshRuntime();
     } catch (error) {
-      setValidationResult(`${label} failed: ${error instanceof Error ? error.message : String(error)}`);
+      setValidationResult(`${label} 실패: ${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setBusyAction(null);
     }
@@ -36,12 +36,12 @@ export function ValidationPage() {
   return (
     <section className="page">
       <PageHeader
-        eyebrow="Diagnostics / Validation"
-        title="Read-only Runtime Validation"
-        description="Validation should confirm which geometry artifact is active, whether it is the default launch-ready model, and whether a rollback-only fallback is in use."
+        eyebrow="Validate"
+        title="읽기 전용 런타임 검증"
+        description="이 화면은 bakeoff winner, 승격된 runtime model, 실제 active runtime model을 각각 별도로 검증합니다. fallback artifact 사용 여부와 launch readiness도 함께 확인하세요."
         status={
           <>
-            <strong>{text(state.geometry_artifact_model ?? state.geometry_mode, "unknown geometry")}</strong>
+            <strong>{text(state.runtime_active_model ?? state.geometry_artifact_model ?? state.geometry_mode, "unknown geometry")}</strong>
             <span>{validationResult.split("\n", 1)[0]}</span>
           </>
         }
@@ -59,23 +59,26 @@ export function ValidationPage() {
 
       <div className="metric-grid metric-grid-compact">
         <MetricCard label="Validation mode" value={text(state.validation_mode, "read-only")} />
+        <MetricCard label="Bakeoff winner" value={text(state.bakeoff_selected_model, "-")} detail="selection truth" tone="accent" />
+        <MetricCard label="승격된 runtime" value={text(state.promoted_runtime_model, "-")} detail="promotion truth" />
         <MetricCard
-          label="Geometry model"
-          value={text(state.geometry_artifact_model ?? state.geometry_mode, "unknown")}
-          detail={text(state.geometry_rollout_status, "unknown")}
+          label="실제 active runtime"
+          value={text(state.runtime_active_model ?? state.geometry_artifact_model ?? state.geometry_mode, "unknown")}
+          detail={`runtime=${displayRuntimeStatus(state.status ?? "idle")}`}
           tone="accent"
         />
         <MetricCard
-          label="Launch ready"
-          value={displayBooleanState(state.launch_ready ?? state.prepared)}
-          detail={text(state.launch_ready_reason)}
-          tone={Boolean(state.launch_ready ?? state.prepared) ? "accent" : "warn"}
+          label="Residual"
+          value={text(state.geometry_residual_model, "-")}
+          detail={text(state.geometry_rollout_status, "-")}
         />
         <MetricCard
-          label="Strict fresh"
-          value={displayBooleanState(state.strict_fresh ?? state.running)}
-          detail={`runtime=${displayRuntimeStatus(state.status ?? "idle")}`}
+          label="Launch ready"
+          value={displayBooleanState(state.runtime_launch_ready ?? state.launch_ready ?? state.prepared)}
+          detail={text(state.runtime_launch_ready_reason ?? state.launch_ready_reason)}
+          tone={Boolean(state.runtime_launch_ready ?? state.launch_ready ?? state.prepared) ? "accent" : "warn"}
         />
+        <MetricCard label="GPU path" value={text(state.gpu_path_mode, "unknown")} detail={displayBooleanState(state.gpu_path_ready)} />
       </div>
 
       <section className="panel">
@@ -84,7 +87,7 @@ export function ValidationPage() {
           <div className="definition-item">
             <span className="definition-label">Artifact path</span>
             <span className="definition-value">
-              {text(state.geometry_artifact_path ?? preparedPlan?.geometry_artifact_path, "not prepared")}
+              {text(state.runtime_active_artifact_path ?? state.geometry_artifact_path ?? preparedPlan?.geometry_artifact_path, "not prepared")}
             </span>
           </div>
           <div className="definition-item">
@@ -96,8 +99,12 @@ export function ValidationPage() {
             <span className="definition-value">{displayBooleanState(state.geometry_fallback_only)}</span>
           </div>
           <div className="definition-item">
-            <span className="definition-label">Operator-visible default</span>
-            <span className="definition-value">{displayBooleanState(state.geometry_operator_visible)}</span>
+            <span className="definition-label">Promotion succeeded</span>
+            <span className="definition-value">{displayBooleanState(state.promotion_succeeded)}</span>
+          </div>
+          <div className="definition-item">
+            <span className="definition-label">Promotion blocker</span>
+            <span className="definition-value">{text(state.promotion_blocker_reason, "-")}</span>
           </div>
         </div>
       </section>

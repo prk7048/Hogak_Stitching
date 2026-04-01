@@ -11,14 +11,17 @@ export function App() {
   return (
     <Shell>
       <Routes>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/calibration/start" element={<Navigate to="/geometry-compare" replace />} />
-        <Route path="/calibration/assisted" element={<Navigate to="/geometry-compare" replace />} />
-        <Route path="/calibration/review" element={<Navigate to="/geometry-compare" replace />} />
-        <Route path="/calibration/stitch-review" element={<Navigate to="/geometry-compare" replace />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/validation" element={<ValidationPage />} />
-        <Route path="/geometry-compare" element={<GeometryComparePage />} />
+        <Route path="/" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/dashboard" element={<Navigate to="/run" replace />} />
+        <Route path="/geometry-compare" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/validation" element={<Navigate to="/validate" replace />} />
+        <Route path="/calibration/start" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/calibration/assisted" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/calibration/review" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/calibration/stitch-review" element={<Navigate to="/bakeoff" replace />} />
+        <Route path="/bakeoff" element={<GeometryComparePage />} />
+        <Route path="/run" element={<DashboardPage />} />
+        <Route path="/validate" element={<ValidationPage />} />
         <Route path="/outputs" element={<OutputsPage />} />
         <Route path="/artifacts" element={<ArtifactsPage />} />
       </Routes>

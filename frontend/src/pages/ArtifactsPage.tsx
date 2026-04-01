@@ -18,9 +18,9 @@ export function ArtifactsPage() {
   return (
     <section className="page">
       <PageHeader
-        eyebrow="점검 / 아티팩트"
+        eyebrow="보조 / Artifacts"
         title="저장된 기하 아티팩트 확인"
-        description="아티팩트 메타데이터를 비교하거나, 준비/검증에 사용할 기하가 무엇인지 확인할 때 사용하는 화면입니다."
+        description="아티팩트 메타데이터를 비교하거나, 지금 준비 검증에 사용된 geometry가 무엇인지 확인할 때 쓰는 페이지입니다."
         status={<span>{refreshMessage}</span>}
         actions={
           <button className="action-button" onClick={() => void refreshArtifacts()} type="button">
@@ -42,6 +42,7 @@ export function ArtifactsPage() {
         <div className="panel-title">상태</div>
         <div className="action-output">{refreshMessage}</div>
       </section>
+
       <section className="panel">
         <div className="panel-title">기하 아티팩트</div>
         <div className="artifact-list">
@@ -52,7 +53,9 @@ export function ArtifactsPage() {
               <div className="definition-list">
                 <div className="definition-item">
                   <span className="definition-label">모델</span>
-                  <span className="definition-value">{displayGeometryMode(artifact.model ?? artifact.geometry_model ?? "unknown")}</span>
+                  <span className="definition-value">
+                    {displayGeometryMode(artifact.model ?? artifact.geometry_model ?? "unknown")}
+                  </span>
                 </div>
                 <div className="definition-item">
                   <span className="definition-label">스키마</span>

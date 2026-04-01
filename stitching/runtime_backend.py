@@ -20,12 +20,12 @@ from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Resp
 from stitching.project_defaults import (
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
 )
-from stitching.runtime_calibration_service import CalibrationService
 from stitching.runtime_contract import geometry_rollout_metadata, normalize_schema_v2_reload_payload
 from stitching.runtime_geometry_artifact import (
     load_runtime_geometry_artifact,
     runtime_geometry_artifact_path,
     runtime_geometry_model,
+    runtime_geometry_residual_model,
 )
 from stitching.runtime_geometry_bakeoff import GeometryBakeoffService
 from stitching.runtime_launcher import RuntimeLaunchSpec, query_gpu_direct_status
@@ -137,6 +137,54 @@ def _compute_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _merge_runtime_and_bakeoff_state(runtime_state: dict[str, Any], bakeoff_state: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(runtime_state or {})
+    bakeoff = dict(bakeoff_state or {})
+    selected_candidate_model = str(bakeoff.get("selected_candidate_model") or "").strip()
+    promoted_candidate_model = str(bakeoff.get("promoted_candidate_model") or "").strip()
+    runtime_active_artifact_path = str(
+        merged.get("runtime_active_artifact_path")
+        or merged.get("geometry_artifact_path")
+        or bakeoff.get("runtime_active_artifact_path")
+        or ""
+    ).strip()
+    runtime_active_model = str(
+        merged.get("runtime_active_model")
+        or merged.get("geometry_artifact_model")
+        or merged.get("geometry_mode")
+        or ""
+    ).strip()
+
+    if runtime_active_artifact_path and not runtime_active_model:
+        try:
+            artifact = load_runtime_geometry_artifact(Path(runtime_active_artifact_path))
+        except Exception:
+            artifact = None
+        if isinstance(artifact, dict):
+            runtime_active_model = runtime_geometry_model(artifact)
+
+    production_output_runtime_mode = str(merged.get("production_output_runtime_mode") or "").strip()
+    gpu_path_mode = production_output_runtime_mode or "unknown"
+    gpu_path_ready = bool(merged.get("gpu_only_ready")) and gpu_path_mode not in {"unknown", "native-nvenc-unavailable"}
+
+    merged.update(
+        {
+            "bakeoff_selected_model": selected_candidate_model,
+            "promoted_runtime_model": promoted_candidate_model,
+            "runtime_active_model": runtime_active_model or "",
+            "runtime_active_artifact_path": runtime_active_artifact_path,
+            "runtime_launch_ready": bool(merged.get("launch_ready")),
+            "runtime_launch_ready_reason": str(merged.get("launch_ready_reason") or "").strip(),
+            "gpu_path_mode": gpu_path_mode,
+            "gpu_path_ready": gpu_path_ready,
+            "promotion_attempted": bool(bakeoff.get("promotion_attempted")),
+            "promotion_succeeded": bool(bakeoff.get("promotion_succeeded")),
+            "promotion_blocker_reason": str(bakeoff.get("promotion_blocker_reason") or "").strip(),
+        }
+    )
+    return merged
 
 
 class _CaptureOptionsEnv:
@@ -357,83 +405,6 @@ def _render_virtual_alignment_previews(
     return left_projected, right_projected, stitched
 
 
-class PreviewWorker:
-    def __init__(self, target: str) -> None:
-        self._target = target.strip()
-        self._stop_event = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._latest_frame: np.ndarray | None = None
-        self._latest_jpeg: bytes | None = None
-        self._status = "idle"
-
-    @property
-    def status(self) -> str:
-        with self._lock:
-            return self._status
-
-    @property
-    def latest_frame(self) -> np.ndarray | None:
-        with self._lock:
-            return None if self._latest_frame is None else self._latest_frame.copy()
-
-    @property
-    def latest_jpeg(self) -> bytes | None:
-        with self._lock:
-            return self._latest_jpeg
-
-    def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._run, name="hogak-preview-worker", daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        self._stop_event.set()
-        if self._thread is not None:
-            self._thread.join(timeout=2.5)
-            self._thread = None
-
-    def _store_frame(self, frame: np.ndarray) -> None:
-        ok, encoded = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
-        if not ok:
-            return
-        with self._lock:
-            self._latest_frame = frame.copy()
-            self._latest_jpeg = encoded.tobytes()
-            self._status = "streaming"
-
-    def _run(self) -> None:
-        if not self._target:
-            with self._lock:
-                self._status = "missing target"
-            return
-        with self._lock:
-            self._status = "connecting"
-        while not self._stop_event.is_set():
-            capture = cv2.VideoCapture(self._target, cv2.CAP_FFMPEG)
-            if not capture.isOpened():
-                with self._lock:
-                    self._status = "connect failed"
-                time.sleep(0.75)
-                continue
-            with self._lock:
-                self._status = "connected"
-            try:
-                while not self._stop_event.is_set():
-                    ok, frame = capture.read()
-                    if not ok or frame is None:
-                        with self._lock:
-                            self._status = "waiting"
-                        time.sleep(0.1)
-                        break
-                    self._store_frame(frame)
-            finally:
-                capture.release()
-        with self._lock:
-            self._status = "stopped"
-
-
 class RuntimeService:
     def __init__(self) -> None:
         self._lock = threading.RLock()
@@ -444,7 +415,6 @@ class RuntimeService:
         self._supervisor: RuntimeSupervisor | None = None
         self._event_pump_thread: threading.Thread | None = None
         self._event_pump_stop = threading.Event()
-        self._preview_worker: PreviewWorker | None = None
         self._latest_metrics: dict[str, Any] = {}
         self._latest_hello: dict[str, Any] = {}
         self._latest_validation: dict[str, Any] = {}
@@ -513,11 +483,11 @@ class RuntimeService:
         self._start_preview_left_jpeg = _encode_jpeg(left_preview)
         self._start_preview_right_jpeg = _encode_jpeg(right_preview)
         self._start_preview_stitched_jpeg = _encode_jpeg(stitched_preview)
-        self._start_preview_pending_confirmation = True
+        self._start_preview_pending_confirmation = False
         self._record_event(
             "status",
             {
-                "status": "start_preview_ready",
+                "status": "preview_ready",
                 "geometry_artifact_path": str(plan.geometry_artifact_path),
             },
         )
@@ -529,7 +499,7 @@ class RuntimeService:
             if not explicit_artifact_path.exists():
                 raise ValueError(f"requested geometry artifact does not exist: {explicit_artifact_path}")
             artifact = load_runtime_geometry_artifact(explicit_artifact_path)
-            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            rollout = geometry_rollout_metadata(artifact)
             return {
                 "calibrated": False,
                 "artifact_path": str(explicit_artifact_path),
@@ -547,7 +517,7 @@ class RuntimeService:
 
         if geometry_artifact.exists():
             artifact = load_runtime_geometry_artifact(geometry_artifact)
-            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            rollout = geometry_rollout_metadata(artifact)
             if bool(rollout["launch_ready"]):
                 return {
                     "calibrated": False,
@@ -976,8 +946,7 @@ class RuntimeService:
                 },
             }
         )
-        geometry_model = runtime_geometry_model(artifact or {})
-        rollout = geometry_rollout_metadata(geometry_model)
+        rollout = geometry_rollout_metadata(artifact or {})
         summary = {
             "geometry_artifact_path": str(geometry_artifact),
             "homography_file": str(homography_file),
@@ -991,6 +960,7 @@ class RuntimeService:
             "runtime_schema_version": 2,
             "gpu_only_mode": str(launch_spec.gpu_mode).strip().lower() == "only",
             "geometry_artifact_model": rollout["geometry_model"],
+            "geometry_residual_model": rollout["geometry_residual_model"],
             "geometry_rollout_status": rollout["geometry_rollout_status"],
             "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
             "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
@@ -1030,7 +1000,6 @@ class RuntimeService:
             "latest_hello": self._latest_hello,
             "latest_metrics": self._latest_metrics,
             "latest_validation": self._latest_validation,
-            "preview_status": None if self._preview_worker is None else self._preview_worker.status,
             "event_count": len(self._events),
             "gpu_only_mode": True,
             "gpu_only_ready": len(self._gpu_only_blockers) == 0,
@@ -1047,6 +1016,17 @@ class RuntimeService:
             "start_preview_left_url": self._start_preview_url("left") if self._start_preview_left_jpeg is not None else "",
             "start_preview_right_url": self._start_preview_url("right") if self._start_preview_right_jpeg is not None else "",
             "start_preview_stitched_url": self._start_preview_url("stitched") if self._start_preview_stitched_jpeg is not None else "",
+            "alignment_preview_ready": any(
+                item is not None
+                for item in (
+                    self._start_preview_left_jpeg,
+                    self._start_preview_right_jpeg,
+                    self._start_preview_stitched_jpeg,
+                )
+            ),
+            "alignment_preview_left_url": self._start_preview_url("left") if self._start_preview_left_jpeg is not None else "",
+            "alignment_preview_right_url": self._start_preview_url("right") if self._start_preview_right_jpeg is not None else "",
+            "alignment_preview_stitched_url": self._start_preview_url("stitched") if self._start_preview_stitched_jpeg is not None else "",
         }
         snapshot.update(self._flatten_truth_metrics(self._latest_metrics))
         if self._latest_validation:
@@ -1056,6 +1036,7 @@ class RuntimeService:
             for key in (
                 "geometry_artifact_path",
                 "geometry_artifact_model",
+                "geometry_residual_model",
                 "geometry_rollout_status",
                 "geometry_operator_visible",
                 "geometry_fallback_only",
@@ -1240,12 +1221,13 @@ class RuntimeService:
         exposure_mode = "gain-bias" if bool(exposure_enabled) else "off"
         if not geometry_mode:
             geometry_mode = "-"
-        rollout = geometry_rollout_metadata(geometry_mode)
+        rollout = geometry_rollout_metadata(artifact)
 
         left_projection = projection.get("left", {}) if isinstance(projection.get("left"), dict) else {}
         should_expose_cylindrical_projection = geometry_mode == "cylindrical-affine"
         return {
             "geometry_mode": geometry_mode,
+            "geometry_residual_model": rollout["geometry_residual_model"],
             "alignment_mode": _string(alignment, "model", "-"),
             "seam_mode": seam_mode,
             "exposure_mode": exposure_mode,
@@ -1285,6 +1267,40 @@ class RuntimeService:
                 "prepared": plan.summary,
                 "auto_calibrated": bool(auto_geometry.get("calibrated")),
                 "message": str(auto_geometry.get("message") or "runtime prepared"),
+                "state": self._snapshot_locked(),
+            }
+
+    def preview_align(self, request: dict[str, Any] | None = None) -> dict[str, Any]:
+        with self._lock:
+            if self._supervisor is not None and self._supervisor.process.poll() is None:
+                self._last_status = "already_running"
+                return {"ok": True, "message": "runtime already running", "state": self._snapshot_locked()}
+            auto_prepare_result: dict[str, Any] | None = None
+            if self._prepared_plan is None:
+                auto_prepare_result = self.prepare(request)
+            plan = self._prepared_plan
+            if plan is None:
+                raise ValueError("runtime plan is unavailable after automatic prepare")
+            blockers = self._gpu_only_blockers_for_plan(plan)
+            self._gpu_only_blockers = blockers
+            if blockers:
+                self._last_error = f"preview failed: {' / '.join(blockers)}"
+                self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
+                raise ValueError(" / ".join(blockers))
+            self._render_start_preview_locked(plan)
+            self._last_status = "preview_ready"
+            self._last_error = ""
+            preview_message = "Virtual camera alignment preview is ready."
+            if auto_prepare_result is not None:
+                prepare_message = str(auto_prepare_result.get("message") or "").strip()
+                if prepare_message:
+                    preview_message = f"{prepare_message} / {preview_message}"
+            return {
+                "ok": True,
+                "preview_ready": True,
+                "auto_prepared": auto_prepare_result is not None,
+                "auto_calibrated": bool(auto_prepare_result and auto_prepare_result.get("auto_calibrated")),
+                "message": preview_message,
                 "state": self._snapshot_locked(),
             }
 
@@ -1331,27 +1347,6 @@ class RuntimeService:
                 self._last_error = f"start failed: {' / '.join(blockers)}"
                 self._record_event("error", {"code": "gpu_only_blocked", "message": self._last_error})
                 raise ValueError(" / ".join(blockers))
-            transmit_receive_uri = self._receive_uri_from_target(plan.summary.get("transmit_target", ""))
-            if not self._start_preview_pending_confirmation:
-                self._render_start_preview_locked(plan)
-                self._last_status = "preview_ready"
-                self._last_error = ""
-                preview_message = "Virtual camera alignment preview is ready. Press Start again to launch the stitched runtime."
-                if auto_prepare_result is not None:
-                    prepare_message = str(auto_prepare_result.get("message") or "").strip()
-                    if prepare_message:
-                        preview_message = f"{prepare_message} / {preview_message}"
-                if transmit_receive_uri:
-                    preview_message = f"{preview_message} External player: {transmit_receive_uri}"
-                return {
-                    "ok": True,
-                    "preview_ready": True,
-                    "awaiting_start_confirmation": True,
-                    "auto_prepared": auto_prepare_result is not None,
-                    "auto_calibrated": bool(auto_prepare_result and auto_prepare_result.get("auto_calibrated")),
-                    "message": preview_message,
-                    "state": self._snapshot_locked(),
-                }
             self._supervisor = RuntimeSupervisor.launch(plan.launch_spec)
             try:
                 hello = self._supervisor.wait_for_hello(timeout_sec=5.0)
@@ -1364,13 +1359,7 @@ class RuntimeService:
                 self._last_error = "runtime launch handshake failed"
                 self.stop()
                 raise
-            probe_target = plan.summary.get("probe_target", "")
-            probe_runtime = str(plan.summary.get("output_runtime_mode", "")).strip().lower()
-            if probe_runtime != "none" and isinstance(probe_target, str) and probe_target.strip():
-                self._preview_worker = PreviewWorker(probe_target)
-                self._preview_worker.start()
             self._start_event_pump()
-            self._start_preview_pending_confirmation = False
             self._last_status = "running"
             self._last_error = ""
             self._record_event("status", {"status": "running", "runtime_pid": self._supervisor.process.pid})
@@ -1378,7 +1367,8 @@ class RuntimeService:
             start_message = (
                 f"런타임을 시작했습니다. 외부 플레이어에서 {transmit_receive_uri or plan.summary.get('transmit_target', '')} 를 여세요."
             )
-            start_message = f"Runtime started. Open {transmit_receive_uri or plan.summary.get('transmit_target', '')} in an external player."
+            receive_uri = transmit_receive_uri or str(plan.summary.get("transmit_target", "")).strip()
+            start_message = f"런타임을 시작했습니다. 외부 플레이어에서 {receive_uri} 를 여세요."
             if auto_prepare_result is not None:
                 prepare_message = str(auto_prepare_result.get("message") or "").strip()
                 if prepare_message:
@@ -1413,9 +1403,6 @@ class RuntimeService:
         with self._lock:
             self._event_pump_stop.set()
             self._clear_start_preview_locked()
-            if self._preview_worker is not None:
-                self._preview_worker.stop()
-                self._preview_worker = None
             if self._supervisor is not None:
                 try:
                     self._supervisor.shutdown()
@@ -1454,7 +1441,7 @@ class RuntimeService:
         checksum_after = _compute_sha256(artifact_path)
         geometry_model = runtime_geometry_model(artifact)
         artifact_unchanged = checksum_before == checksum_after
-        rollout = geometry_rollout_metadata(geometry_model)
+        rollout = geometry_rollout_metadata(artifact)
         launch_ready = bool(artifact_unchanged and rollout["launch_ready"])
         launch_ready_reason = (
             "geometry artifact changed during read-only validation"
@@ -1469,6 +1456,7 @@ class RuntimeService:
             "schema_version": artifact.get("schema_version", 0),
             "geometry_model": rollout["geometry_model"],
             "geometry_artifact_model": rollout["geometry_model"],
+            "geometry_residual_model": rollout["geometry_residual_model"],
             "geometry_rollout_status": rollout["geometry_rollout_status"],
             "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
             "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
@@ -1490,12 +1478,6 @@ class RuntimeService:
     def state(self) -> dict[str, Any]:
         with self._lock:
             return self._snapshot_locked()
-
-    def preview_jpeg(self) -> bytes | None:
-        with self._lock:
-            if self._preview_worker is None:
-                return None
-            return self._preview_worker.latest_jpeg
 
     def start_preview_jpeg(self, name: str) -> bytes | None:
         with self._lock:
@@ -1521,7 +1503,7 @@ class RuntimeService:
                 artifact = load_runtime_geometry_artifact(path)
             except Exception:
                 continue
-            rollout = geometry_rollout_metadata(runtime_geometry_model(artifact))
+            rollout = geometry_rollout_metadata(artifact)
             if not bool(rollout["geometry_operator_visible"]) and str(path) != active_artifact:
                 continue
             artifacts.append(
@@ -1532,6 +1514,7 @@ class RuntimeService:
                     "schema_version": artifact.get("schema_version", 0),
                     "saved_at_epoch_sec": artifact.get("saved_at_epoch_sec", 0),
                     "geometry_model": rollout["geometry_model"],
+                    "geometry_residual_model": rollout["geometry_residual_model"],
                     "geometry_rollout_status": rollout["geometry_rollout_status"],
                     "operator_visible": bool(rollout["geometry_operator_visible"]),
                     "fallback_only": bool(rollout["geometry_fallback_only"]),
@@ -1580,12 +1563,18 @@ class RuntimeService:
 def create_app(
     *,
     service: RuntimeService | None = None,
-    calibration_service: CalibrationService | None = None,
+    calibration_service: Any | None = None,
     geometry_bakeoff_service: GeometryBakeoffService | None = None,
     frontend_dist_dir: str | Path | None = None,
 ) -> FastAPI:
     backend = service or RuntimeService()
-    calibration = calibration_service or CalibrationService()
+    calibration_enabled_env = os.environ.get("HOGAK_ENABLE_LEGACY_CALIBRATION_API", "").strip().lower()
+    legacy_calibration_enabled = calibration_service is not None or calibration_enabled_env in {"1", "true", "yes", "on"}
+    calibration = calibration_service
+    if calibration is None and legacy_calibration_enabled:
+        from stitching.runtime_calibration_service import CalibrationService
+
+        calibration = CalibrationService()
     geometry_bakeoff = geometry_bakeoff_service or GeometryBakeoffService()
     app = FastAPI(title="Hogak Runtime API", version="2")
     app.state.runtime_service = backend
@@ -1603,6 +1592,13 @@ def create_app(
     def start_runtime(body: dict[str, Any] | None = None):
         try:
             return backend.start(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.post("/api/runtime/preview-align")
+    def preview_runtime_alignment(body: dict[str, Any] | None = None):
+        try:
+            return backend.preview_align(body)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -1628,7 +1624,7 @@ def create_app(
 
     @app.get("/api/runtime/state")
     def runtime_state():
-        return backend.state()
+        return _merge_runtime_and_bakeoff_state(backend.state(), geometry_bakeoff.state())
 
     @app.get("/api/runtime/events")
     def runtime_events(last_event_id: int = 0):
@@ -1640,13 +1636,6 @@ def create_app(
                 "Connection": "keep-alive",
             },
         )
-
-    @app.get("/api/runtime/preview.jpg")
-    def runtime_preview():
-        jpeg = backend.preview_jpeg()
-        if jpeg is None:
-            raise HTTPException(status_code=503, detail="preview frame unavailable")
-        return Response(content=jpeg, media_type="image/jpeg")
 
     @app.get("/api/runtime/start-preview/{name}.jpg")
     def runtime_start_preview(name: str):
@@ -1691,6 +1680,13 @@ def create_app(
         except Exception as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+    @app.post("/api/bakeoff/use-winner")
+    def use_geometry_bakeoff_winner_api(body: dict[str, Any]):
+        try:
+            return geometry_bakeoff.use_winner(body)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     @app.get("/api/bakeoff/assets/{session_id}/{candidate_model}/{filename}")
     def geometry_bakeoff_asset(session_id: str, candidate_model: str, filename: str):
         try:
@@ -1705,112 +1701,113 @@ def create_app(
             media_type = "video/mp4"
         return Response(content=content, media_type=media_type)
 
-    @app.post("/api/calibration/session/start")
-    def start_calibration_session(body: dict[str, Any] | None = None):
-        try:
-            return calibration.start_session(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if calibration is not None:
+        @app.post("/api/calibration/session/start")
+        def start_calibration_session(body: dict[str, Any] | None = None):
+            try:
+                return calibration.start_session(body)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/calibration/session/state")
-    def get_calibration_session_state():
-        return calibration.state()
+        @app.get("/api/calibration/session/state")
+        def get_calibration_session_state():
+            return calibration.state()
 
-    @app.post("/api/calibration/frames/refresh")
-    def refresh_calibration_frames():
-        try:
-            return calibration.refresh_frames()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/frames/refresh")
+        def refresh_calibration_frames():
+            try:
+                return calibration.refresh_frames()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/pairs")
-    def add_calibration_pair(body: dict[str, Any]):
-        try:
-            return calibration.add_pair(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/pairs")
+        def add_calibration_pair(body: dict[str, Any]):
+            try:
+                return calibration.add_pair(body)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/pairs/select")
-    def select_calibration_pair(body: dict[str, Any]):
-        try:
-            return calibration.select_pair(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/pairs/select")
+        def select_calibration_pair(body: dict[str, Any]):
+            try:
+                return calibration.select_pair(body)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/pairs/undo")
-    def undo_calibration_pair():
-        try:
-            return calibration.undo_pair()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/pairs/undo")
+        def undo_calibration_pair():
+            try:
+                return calibration.undo_pair()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/pairs/delete")
-    def delete_calibration_pair():
-        try:
-            return calibration.delete_pair()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/pairs/delete")
+        def delete_calibration_pair():
+            try:
+                return calibration.delete_pair()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/pairs/clear")
-    def clear_calibration_pairs():
-        try:
-            return calibration.clear_pairs()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/pairs/clear")
+        def clear_calibration_pairs():
+            try:
+                return calibration.clear_pairs()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/candidate/compute")
-    def compute_calibration_candidate():
-        try:
-            return calibration.compute_candidate()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/candidate/compute")
+        def compute_calibration_candidate():
+            try:
+                return calibration.compute_candidate()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/calibration/review")
-    def get_calibration_review():
-        try:
-            return calibration.review()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.get("/api/calibration/review")
+        def get_calibration_review():
+            try:
+                return calibration.review()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/review/accept")
-    def accept_calibration_review():
-        try:
-            return calibration.accept_review()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/review/accept")
+        def accept_calibration_review():
+            try:
+                return calibration.accept_review()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/review/cancel")
-    def cancel_calibration_review():
-        try:
-            return calibration.cancel_review()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/review/cancel")
+        def cancel_calibration_review():
+            try:
+                return calibration.cancel_review()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/calibration/stitch-review")
-    def get_stitch_review():
-        try:
-            return calibration.stitch_review()
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.get("/api/calibration/stitch-review")
+        def get_stitch_review():
+            try:
+                return calibration.stitch_review()
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.post("/api/calibration/use-current")
-    def use_current_homography(body: dict[str, Any] | None = None):
-        try:
-            return calibration.use_current(body)
-        except Exception as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        @app.post("/api/calibration/use-current")
+        def use_current_homography(body: dict[str, Any] | None = None):
+            try:
+                return calibration.use_current(body)
+            except Exception as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    @app.get("/api/calibration/images/{name}")
-    def get_calibration_image(name: str):
-        jpeg = calibration.image(name)
-        if jpeg is None:
-            raise HTTPException(status_code=404, detail="calibration preview unavailable")
-        return Response(content=jpeg, media_type="image/jpeg")
+        @app.get("/api/calibration/images/{name}")
+        def get_calibration_image(name: str):
+            jpeg = calibration.image(name)
+            if jpeg is None:
+                raise HTTPException(status_code=404, detail="calibration preview unavailable")
+            return Response(content=jpeg, media_type="image/jpeg")
 
     @app.get("/legacy/calibration", include_in_schema=False)
     @app.get("/legacy/calibration/", include_in_schema=False)
     def legacy_calibration_redirect():
-        return RedirectResponse(url="/calibration/start")
+        return RedirectResponse(url="/bakeoff")
 
     if frontend_dist_dir is None:
         frontend_env = os.environ.get("HOGAK_FRONTEND_DIST_DIR", "").strip()

@@ -33,8 +33,10 @@ from stitching.native_calibration import (
     calibrate_native_homography_from_frames,
 )
 from stitching.project_defaults import DEFAULT_NATIVE_HOMOGRAPHY_PATH
+from stitching.runtime_contract import geometry_rollout_metadata
 from stitching.runtime_geometry_artifact import (
     build_runtime_geometry_artifact,
+    load_runtime_geometry_artifact,
     runtime_geometry_artifact_path,
     save_runtime_geometry_artifact,
 )
@@ -47,6 +49,7 @@ BAKEOFF_CANDIDATE_MODELS = (
     "virtual-center-rectilinear-rigid",
     "virtual-center-rectilinear-mesh",
 )
+DEFAULT_BAKEOFF_WINNER_MODEL = "virtual-center-rectilinear-mesh"
 DEFAULT_BAKEOFF_ROOT = Path("data/geometry_bakeoff")
 DEFAULT_CLIP_FRAMES = 12
 DEFAULT_VIDEO_DURATION_SEC = 60
@@ -57,6 +60,10 @@ DEFAULT_GRID_ROWS = 8
 
 @dataclass(slots=True)
 class MeshField:
+    grid_cols: int
+    grid_rows: int
+    control_displacement_x: np.ndarray
+    control_displacement_y: np.ndarray
     displacement_x: np.ndarray
     displacement_y: np.ndarray
     instability: np.ndarray
@@ -68,6 +75,24 @@ class MeshField:
 
 def _session_id() -> str:
     return time.strftime("%Y%m%d_%H%M%S", time.localtime())
+
+
+def _preferred_bakeoff_winner(candidates: list[dict[str, Any]]) -> str:
+    available = {
+        str(candidate.get("model") or "").strip()
+        for candidate in candidates
+        if isinstance(candidate, dict)
+    }
+    preferred_order = (
+        DEFAULT_BAKEOFF_WINNER_MODEL,
+        "left-anchor-homography-mesh",
+        "virtual-center-rectilinear-rigid",
+        "left-anchor-homography",
+    )
+    for model in preferred_order:
+        if model in available:
+            return model
+    return ""
 
 
 def _ensure_uint8(frame: np.ndarray) -> np.ndarray:
@@ -392,7 +417,9 @@ def _fit_mesh_field(
     height, width = canvas_shape
     if sample_points.shape[0] < 8:
         zero = np.zeros((height, width), dtype=np.float32)
-        return MeshField(zero, zero, zero, 0.0, 0.0, 0.0, True)
+        control_shape = (grid_rows + 1, grid_cols + 1)
+        zero_control = np.zeros(control_shape, dtype=np.float32)
+        return MeshField(grid_cols, grid_rows, zero_control, zero_control.copy(), zero, zero, zero, 0.0, 0.0, 0.0, True)
     node_cols = grid_cols + 1
     node_rows = grid_rows + 1
     node_count = node_cols * node_rows
@@ -546,6 +573,10 @@ def _fit_mesh_field(
         local_rotation_drift = max(local_rotation_drift, abs(float(np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0])))))
 
     return MeshField(
+        grid_cols=grid_cols,
+        grid_rows=grid_rows,
+        control_displacement_x=nodes_x.reshape(node_rows, node_cols).astype(np.float32),
+        control_displacement_y=nodes_y.reshape(node_rows, node_cols).astype(np.float32),
         displacement_x=field_x,
         displacement_y=field_y,
         instability=instability,
@@ -568,6 +599,21 @@ def _apply_mesh_to_canvas(
     warped_frame = cv2.remap(frame, remap_x, remap_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0))
     warped_mask = cv2.remap(mask, remap_x, remap_y, interpolation=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
     return warped_frame, warped_mask, remap_x, remap_y
+
+
+def _mesh_payload(mesh_field: MeshField | None) -> dict[str, Any]:
+    if mesh_field is None:
+        return {}
+    return {
+        "grid_cols": int(mesh_field.grid_cols),
+        "grid_rows": int(mesh_field.grid_rows),
+        "control_displacement_x": np.asarray(mesh_field.control_displacement_x, dtype=np.float32).tolist(),
+        "control_displacement_y": np.asarray(mesh_field.control_displacement_y, dtype=np.float32).tolist(),
+        "max_displacement_px": float(mesh_field.max_displacement_px),
+        "max_local_scale_drift": float(mesh_field.max_local_scale_drift),
+        "max_local_rotation_drift": float(mesh_field.max_local_rotation_drift),
+        "fallback_used": bool(mesh_field.fallback_used),
+    }
 
 
 def _build_homography_inverse_maps(width: int, height: int, inverse_homography: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -1042,6 +1088,7 @@ def _build_candidate_runtime_artifact(
     calibration_result: dict[str, Any],
     output_resolution: tuple[int, int],
     virtual_solution: Any | None,
+    mesh_field: MeshField | None = None,
 ) -> Path | None:
     homography_file = _build_shared_homography_path(bundle_dir)
     geometry_path = bundle_dir / candidate_model / "runtime_geometry.json"
@@ -1069,6 +1116,31 @@ def _build_candidate_runtime_artifact(
             warp_model="warpPerspective",
             alignment_model="homography",
             alignment_matrix=np.asarray(homography, dtype=np.float64),
+            residual_model="homography",
+            projection_model="rectilinear",
+        )
+        save_runtime_geometry_artifact(geometry_path, artifact)
+        return geometry_path
+    if candidate_model == "left-anchor-homography-mesh":
+        artifact = build_runtime_geometry_artifact(
+            source_homography_file=homography_file,
+            geometry_file=geometry_path,
+            homography=np.asarray(homography, dtype=np.float64),
+            metadata=metadata,
+            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
+            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
+            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
+            output_resolution=output_resolution,
+            inliers_count=int(calibration_result.get("inliers_count") or 0),
+            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
+            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
+            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
+            geometry_model="planar-homography",
+            warp_model="warpPerspective",
+            alignment_model="homography",
+            alignment_matrix=np.asarray(homography, dtype=np.float64),
+            residual_model="mesh",
+            mesh=_mesh_payload(mesh_field),
             projection_model="rectilinear",
         )
         save_runtime_geometry_artifact(geometry_path, artifact)
@@ -1091,6 +1163,44 @@ def _build_candidate_runtime_artifact(
             warp_model="virtual-center-remap",
             alignment_model="rigid",
             alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
+            residual_model="rigid",
+            projection_model="rectilinear",
+            projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
+            projection_left_center=tuple(virtual_solution.left_projection_center),
+            projection_right_focal_px=float(virtual_solution.right_projection_focal_px),
+            projection_right_center=tuple(virtual_solution.right_projection_center),
+            virtual_camera={
+                "model": "rectilinear",
+                "focal_px": float(virtual_solution.virtual_focal_px),
+                "center": [float(virtual_solution.virtual_center[0]), float(virtual_solution.virtual_center[1])],
+                "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
+                "midpoint_alpha": float(virtual_solution.midpoint_alpha),
+                "left_to_virtual_rotation": np.asarray(virtual_solution.left_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
+                "right_to_virtual_rotation": np.asarray(virtual_solution.right_to_virtual_rotation, dtype=np.float64).reshape(3, 3).tolist(),
+            },
+        )
+        save_runtime_geometry_artifact(geometry_path, artifact)
+        return geometry_path
+    if candidate_model == "virtual-center-rectilinear-mesh" and virtual_solution is not None:
+        artifact = build_runtime_geometry_artifact(
+            source_homography_file=homography_file,
+            geometry_file=geometry_path,
+            homography=np.asarray(homography, dtype=np.float64),
+            metadata=metadata,
+            distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
+            left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
+            right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
+            output_resolution=output_resolution,
+            inliers_count=int(calibration_result.get("inliers_count") or 0),
+            inlier_ratio=float(calibration_result.get("inlier_ratio") or 0.0),
+            left_inlier_points=list(calibration_result.get("left_inlier_points") or []),
+            right_inlier_points=list(calibration_result.get("right_inlier_points") or []),
+            geometry_model="virtual-center-rectilinear",
+            warp_model="virtual-center-remap",
+            alignment_model="rigid",
+            alignment_matrix=np.asarray(virtual_solution.rigid_matrix, dtype=np.float64),
+            residual_model="mesh",
+            mesh=_mesh_payload(mesh_field),
             projection_model="rectilinear",
             projection_left_focal_px=float(virtual_solution.left_projection_focal_px),
             projection_left_center=tuple(virtual_solution.left_projection_center),
@@ -1344,7 +1454,14 @@ def run_geometry_bakeoff(
             calibration_result=calibration_result,
             output_resolution=output_resolution,
             virtual_solution=virtual_solution,
+            mesh_field=spec.get("mesh_field"),
         )
+        rollout = {}
+        if runtime_artifact_path is not None and runtime_artifact_path.exists():
+            try:
+                rollout = geometry_rollout_metadata(load_runtime_geometry_artifact(runtime_artifact_path))
+            except Exception:
+                rollout = {}
         candidate_dir = bakeoff_root / candidate_model
         candidate_dir.mkdir(parents=True, exist_ok=True)
         _write_png(candidate_dir / "stitched_preview.png", metadata.pop("stitched_preview"))
@@ -1369,6 +1486,9 @@ def run_geometry_bakeoff(
                 ),
                 "candidate_dir": str(candidate_dir),
                 "runtime_artifact_path": str(runtime_artifact_path) if runtime_artifact_path is not None else "",
+                "runtime_launch_ready": bool(rollout.get("launch_ready")),
+                "runtime_launch_ready_reason": str(rollout.get("launch_ready_reason") or ""),
+                "geometry_rollout_status": str(rollout.get("geometry_rollout_status") or ""),
                 "stitched_preview_path": str(candidate_dir / "stitched_preview.png"),
                 "stitched_uncropped_path": str(candidate_dir / "stitched_uncropped.png"),
                 "overlap_crop_path": str(candidate_dir / "overlap_crop.png"),
@@ -1393,6 +1513,15 @@ def run_geometry_bakeoff(
         candidate_dir = bakeoff_root / model
         _save_candidate_metadata(candidate_dir / "metadata.json", candidate)
 
+    selected_candidate_model = _preferred_bakeoff_winner(candidate_results)
+    for candidate in candidate_results:
+        if not isinstance(candidate, dict):
+            continue
+        candidate["selected"] = str(candidate.get("model") or "").strip() == selected_candidate_model
+        candidate_dir = bakeoff_root / str(candidate.get("model") or "").strip()
+        if candidate_dir.name:
+            _save_candidate_metadata(candidate_dir / "metadata.json", candidate)
+
     bundle_manifest = {
         "session_id": bakeoff_root.name,
         "created_at_epoch_sec": int(time.time()),
@@ -1412,9 +1541,12 @@ def run_geometry_bakeoff(
         "video_duration_sec": int(video_duration_sec),
         "video_fps": int(video_fps),
         "bundle_dir": str(bakeoff_root),
-        "selected_candidate_model": "",
+        "selected_candidate_model": selected_candidate_model,
         "promoted_candidate_model": "",
         "runtime_active_artifact_path": "",
+        "promotion_attempted": False,
+        "promotion_succeeded": False,
+        "promotion_blocker_reason": "",
         "candidates": candidate_results,
     }
     (bakeoff_root / "bundle.json").write_text(json.dumps(bundle_manifest, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -1459,6 +1591,9 @@ def select_bakeoff_winner(bundle_dir: Path, *, candidate_model: str) -> dict[str
         raise ValueError(f"candidate not found in bundle: {candidate_model}")
     bundle["selected_candidate_model"] = str(candidate_model)
     bundle["winner_frozen_at_epoch_sec"] = int(time.time())
+    bundle["promotion_attempted"] = False
+    bundle["promotion_succeeded"] = False
+    bundle["promotion_blocker_reason"] = ""
     (bundle_dir / "winner.json").write_text(
         json.dumps(
             {
@@ -1493,8 +1628,11 @@ def promote_bakeoff_winner(bundle_dir: Path, *, candidate_model: str | None = No
     source_artifact = Path(runtime_artifact_path)
     if not source_artifact.exists():
         raise ValueError(f"candidate runtime artifact is missing: {source_artifact}")
+    artifact = load_runtime_geometry_artifact(source_artifact)
+    rollout = geometry_rollout_metadata(artifact)
+    if not bool(rollout.get("launch_ready")):
+        raise ValueError(str(rollout.get("launch_ready_reason") or f"candidate {target_model} is not launch-ready"))
     active_homography_path, active_geometry_path = _resolve_active_runtime_paths()
-    artifact = json.loads(source_artifact.read_text(encoding="utf-8"))
     if isinstance(artifact, dict):
         source = artifact.get("source", {})
         if isinstance(source, dict):
@@ -1510,8 +1648,24 @@ def promote_bakeoff_winner(bundle_dir: Path, *, candidate_model: str | None = No
         active_geometry_path.write_text(json.dumps(artifact, indent=2, ensure_ascii=False), encoding="utf-8")
     bundle["promoted_candidate_model"] = target_model
     bundle["runtime_active_artifact_path"] = str(active_geometry_path)
+    bundle["promotion_attempted"] = True
+    bundle["promotion_succeeded"] = True
+    bundle["promotion_blocker_reason"] = ""
     (bundle_dir / "bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
     return bundle
+
+
+def use_bakeoff_winner(bundle_dir: Path, *, candidate_model: str) -> dict[str, Any]:
+    bundle = select_bakeoff_winner(bundle_dir, candidate_model=candidate_model)
+    try:
+        return promote_bakeoff_winner(bundle_dir, candidate_model=candidate_model)
+    except Exception as exc:
+        bundle = _load_bundle(bundle_dir)
+        bundle["promotion_attempted"] = True
+        bundle["promotion_succeeded"] = False
+        bundle["promotion_blocker_reason"] = str(exc)
+        (bundle_dir / "bundle.json").write_text(json.dumps(bundle, indent=2, ensure_ascii=False), encoding="utf-8")
+        return bundle
 
 
 def run_geometry_bakeoff_from_args(args: argparse.Namespace) -> int:
@@ -1587,6 +1741,9 @@ class GeometryBakeoffService:
                 "selected_candidate_model": "",
                 "promoted_candidate_model": "",
                 "runtime_active_artifact_path": "",
+                "promotion_attempted": False,
+                "promotion_succeeded": False,
+                "promotion_blocker_reason": "",
                 "candidates": [],
             }
         return _normalize_bundle_for_api(bundle)
@@ -1638,6 +1795,13 @@ class GeometryBakeoffService:
         bundle_dir = Path(str(body.get("bundle_dir") or "")).expanduser()
         candidate_model = str(body.get("model") or "").strip() if body.get("model") else None
         return _normalize_bundle_for_api(promote_bakeoff_winner(bundle_dir, candidate_model=candidate_model))
+
+    def use_winner(self, body: dict[str, Any]) -> dict[str, Any]:
+        bundle_dir = Path(str(body.get("bundle_dir") or "")).expanduser()
+        candidate_model = str(body.get("model") or "").strip()
+        if not candidate_model:
+            raise ValueError("model is required")
+        return _normalize_bundle_for_api(use_bakeoff_winner(bundle_dir, candidate_model=candidate_model))
 
     def read_asset(self, session_id: str, candidate_model: str, filename: str) -> bytes:
         safe_name = Path(filename).name

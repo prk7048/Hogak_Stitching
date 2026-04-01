@@ -1,85 +1,70 @@
-export type AppRouteGroup = "operate" | "calibration" | "diagnostics";
+export type AppRouteSection = "bakeoff" | "run" | "validate";
+export type AppRouteTier = "primary" | "secondary";
 
 export type AppRouteMeta = {
   path: string;
   label: string;
-  shortLabel?: string;
-  group: AppRouteGroup;
   summary: string;
+  section: AppRouteSection;
+  tier: AppRouteTier;
 };
 
-export type AppRouteGroupMeta = {
-  id: AppRouteGroup;
-  label: string;
-  path: string;
-  summary: string;
-};
-
-export const APP_ROUTE_GROUPS: AppRouteGroupMeta[] = [
+export const PRIMARY_ROUTES: AppRouteMeta[] = [
   {
-    id: "operate",
-    label: "운영",
-    path: "/dashboard",
-    summary: "준비된 winner geometry로 송출을 시작하고 현재 출력 상태를 확인합니다.",
-  },
-  {
-    id: "calibration",
+    path: "/bakeoff",
     label: "Bakeoff",
-    path: "/geometry-compare",
-    summary: "4개 후보를 auto-only bakeoff로 비교하고 winner를 freeze/promote 합니다.",
+    summary: "4개 후보를 비교하고 winner를 선택합니다.",
+    section: "bakeoff",
+    tier: "primary",
   },
   {
-    id: "diagnostics",
-    label: "진단",
-    path: "/validation",
-    summary: "런타임 검증과 artifact 상태를 확인합니다.",
+    path: "/run",
+    label: "Run",
+    summary: "승격된 geometry로 정렬 미리보기와 송출을 진행합니다.",
+    section: "run",
+    tier: "primary",
+  },
+  {
+    path: "/validate",
+    label: "Validate",
+    summary: "선택 모델, 승격 모델, 실제 active 모델을 검증합니다.",
+    section: "validate",
+    tier: "primary",
   },
 ];
 
-export const APP_ROUTES: AppRouteMeta[] = [
-  {
-    path: "/dashboard",
-    label: "대시보드",
-    shortLabel: "운영",
-    group: "operate",
-    summary: "Start로 정렬 미리보기와 실제 stitched 송출을 순서대로 확인합니다.",
-  },
+export const SECONDARY_ROUTES: AppRouteMeta[] = [
   {
     path: "/outputs",
     label: "출력",
-    group: "operate",
-    summary: "외부 플레이어 수신 주소와 출력 런타임 상태를 확인합니다.",
-  },
-  {
-    path: "/geometry-compare",
-    label: "Geometry Bakeoff",
-    shortLabel: "Bakeoff",
-    group: "calibration",
-    summary: "left-anchor와 virtual-center 계열 4개 후보를 비교하고 winner를 선택합니다.",
-  },
-  {
-    path: "/validation",
-    label: "검증",
-    group: "diagnostics",
-    summary: "현재 geometry artifact, checksum, launch readiness를 확인합니다.",
+    summary: "외부 플레이어 수신 주소와 출력 상태를 확인합니다.",
+    section: "run",
+    tier: "secondary",
   },
   {
     path: "/artifacts",
     label: "Artifacts",
-    group: "diagnostics",
-    summary: "운영에 노출되는 geometry artifact와 메타데이터를 확인합니다.",
+    summary: "생성된 geometry artifact와 메타데이터를 봅니다.",
+    section: "validate",
+    tier: "secondary",
   },
 ];
+
+export const APP_ROUTES: AppRouteMeta[] = [...PRIMARY_ROUTES, ...SECONDARY_ROUTES];
 
 export function routeForPath(pathname: string): AppRouteMeta | null {
   return APP_ROUTES.find((route) => route.path === pathname) ?? null;
 }
 
-export function routesForGroup(group: AppRouteGroup): AppRouteMeta[] {
-  return APP_ROUTES.filter((route) => route.group === group);
+export function primaryRouteForPath(pathname: string): AppRouteMeta {
+  const route = routeForPath(pathname);
+  if (route?.tier === "primary") {
+    return route;
+  }
+  const owner = PRIMARY_ROUTES.find((candidate) => candidate.section === route?.section);
+  return owner ?? PRIMARY_ROUTES[0];
 }
 
-export function routeGroupForPath(pathname: string): AppRouteGroupMeta {
-  const route = routeForPath(pathname);
-  return APP_ROUTE_GROUPS.find((group) => group.id === route?.group) ?? APP_ROUTE_GROUPS[0];
+export function secondaryRoutesForSection(section: AppRouteSection): AppRouteMeta[] {
+  return SECONDARY_ROUTES.filter((route) => route.section === section);
 }
