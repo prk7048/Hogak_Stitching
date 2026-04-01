@@ -4,30 +4,30 @@ import { describeProjectActionResult, startProject, stopProject } from "../lib/a
 import { useProjectState } from "../lib/useProjectState";
 
 const STATUS_LABELS: Record<string, string> = {
-  idle: "대기",
-  starting: "시작 중",
-  running: "실행 중",
-  blocked: "차단됨",
-  error: "오류",
+  idle: "Idle",
+  starting: "Starting",
+  running: "Running",
+  blocked: "Blocked",
+  error: "Error",
 };
 
 const PHASE_LABELS: Record<string, string> = {
-  idle: "시작 준비",
-  checking_inputs: "입력 확인",
-  refreshing_mesh: "메시 갱신",
-  preparing_runtime: "런타임 준비",
-  starting_runtime: "송출 시작",
-  running: "송출 중",
-  blocked: "차단됨",
-  error: "오류",
+  idle: "Ready",
+  checking_inputs: "Checking inputs",
+  refreshing_mesh: "Refreshing runtime mesh",
+  preparing_runtime: "Preparing runtime",
+  starting_runtime: "Starting output",
+  running: "Running",
+  blocked: "Blocked",
+  error: "Error",
 };
 
 const START_FLOW = [
-  { id: "checking_inputs", label: "입력 확인" },
-  { id: "refreshing_mesh", label: "메시 갱신" },
-  { id: "preparing_runtime", label: "런타임 준비" },
-  { id: "starting_runtime", label: "송출 시작" },
-  { id: "running", label: "송출 중" },
+  { id: "checking_inputs", label: "Check inputs" },
+  { id: "refreshing_mesh", label: "Refresh runtime mesh" },
+  { id: "preparing_runtime", label: "Prepare runtime" },
+  { id: "starting_runtime", label: "Start output" },
+  { id: "running", label: "Running" },
 ] as const;
 
 function text(value: unknown, fallback = "-"): string {
@@ -65,6 +65,19 @@ function viewModeForStatus(status: string): "ready" | "starting" | "running" | "
   return "ready";
 }
 
+function directnessLabel(state: ReturnType<typeof useProjectState>["state"]): string {
+  if (state.output_path_direct) {
+    return "Direct output path";
+  }
+  if (state.output_path_bridge) {
+    return "Bridge output path";
+  }
+  if (state.output_path_mode) {
+    return text(state.output_path_mode);
+  }
+  return "Unknown output path";
+}
+
 export function ProjectPage() {
   const { state, loading, refresh } = useProjectState();
   const [busyAction, setBusyAction] = useState<string | null>(null);
@@ -73,40 +86,52 @@ export function ProjectPage() {
   const status = String(state.status || "idle").trim().toLowerCase() || "idle";
   const startPhase = String(state.start_phase || status).trim().toLowerCase() || status;
   const viewMode = viewModeForStatus(status);
-  const showDetails = viewMode === "blocked" || viewMode === "error";
   const statusLabel = STATUS_LABELS[status] || text(state.status, "Unknown");
   const phaseLabel = PHASE_LABELS[startPhase] || text(state.start_phase, "Ready");
+  const receiveUri = text(state.output_receive_uri, "");
+  const receiveTarget = receiveUri || text(state.production_output_target, "");
+  const activeModel = text(state.runtime_active_model, "Not active");
+  const activeResidual = text(state.runtime_active_residual_model, "Unknown");
+  const activeArtifactPath = text(state.runtime_active_artifact_path, "Not available");
+  const activeChecksum = text(state.runtime_artifact_checksum, "Not available");
+  const readyReason = text(state.runtime_launch_ready_reason, "Not available");
+  const directness = directnessLabel(state);
+  const zeroCopyReason = text(state.zero_copy_reason, "Not available");
+  const zeroCopyBlockers = Array.isArray(state.zero_copy_blockers)
+    ? state.zero_copy_blockers.map((item) => String(item ?? "").trim()).filter(Boolean)
+    : [];
+
   const statusMessage =
     text(state.status_message, "") ||
     (state.running
-      ? "프로젝트가 실행 중입니다. 외부 플레이어에서 파노라마 출력만 확인하면 됩니다."
-      : "Start Project를 누르면 필요한 경우 메시를 자동으로 다시 만들고 바로 송출을 시작합니다.");
+      ? "The project is running. This page reflects the current stitched runtime output."
+      : "Start Project prepares and starts the stitched runtime pipeline automatically.");
 
   const heading =
     viewMode === "running"
-      ? "프로젝트가 실행 중입니다"
+      ? "Project is running"
       : viewMode === "starting"
-        ? "프로젝트를 시작하는 중입니다"
+        ? "Project is starting"
         : viewMode === "blocked"
-          ? "시작 전에 확인이 필요합니다"
+          ? "Project start is blocked"
           : viewMode === "error"
-            ? "프로젝트 시작 중 오류가 발생했습니다"
-            : "프로젝트 시작 준비 완료";
+            ? "Project start failed"
+            : "Project is ready to start";
 
   const lead =
     viewMode === "running"
-      ? "이제 외부 플레이어에서 UDP 주소를 열어 stitched 결과만 확인하면 됩니다."
+      ? "Use the external player to inspect the current stitched runtime output."
       : viewMode === "starting"
-        ? "같은 화면 안에서 진행 상태만 바뀝니다. 완료되면 자동으로 실행 상태로 전환됩니다."
+        ? "The page shows the current startup progress. It will switch to the running state when the stitched runtime is ready."
         : viewMode === "blocked"
-          ? "입력 설정이나 메시 상태 때문에 시작이 차단되었습니다. 아래 사유만 확인하면 됩니다."
+          ? "Review the blocker and runtime truth below before trying again."
           : viewMode === "error"
-            ? "아래 오류를 확인한 뒤 다시 Start Project를 눌러 재시도할 수 있습니다."
-            : "이 화면 하나만 사용합니다. 다른 탭이나 페이지로 이동할 필요 없이 여기서 시작하고 멈추면 됩니다.";
+            ? "Review the error and runtime truth below, then try Start Project again."
+            : "This page starts the project directly and shows the active stitched runtime state.";
 
   const runAction = async (label: string, action: () => Promise<unknown>) => {
     setBusyAction(label);
-    setActionStatus(`${label} 진행 중...`);
+    setActionStatus(`${label} in progress...`);
     try {
       const result = await action();
       setActionStatus(describeProjectActionResult(result));
@@ -129,15 +154,15 @@ export function ProjectPage() {
             <p>{lead}</p>
           </div>
           <div className={`status-badge ${toneForStatus(status)}`}>
-            <span className="status-badge-label">상태</span>
-            <strong>{loading ? "불러오는 중" : statusLabel}</strong>
+            <span className="status-badge-label">Status</span>
+            <strong>{loading ? "Loading..." : statusLabel}</strong>
           </div>
         </div>
 
         <div className="project-body">
           <section className="project-main">
             <div className="phase-panel">
-              <span className="phase-label">현재 단계</span>
+              <span className="phase-label">Current phase</span>
               <strong>{phaseLabel}</strong>
               <p>{statusMessage}</p>
               {actionStatus ? <div className="action-note">{actionStatus}</div> : null}
@@ -146,19 +171,19 @@ export function ProjectPage() {
             <div className={`stage-panel ${viewMode}`}>
               {viewMode === "ready" ? (
                 <div className="stage-copy">
-                  <h2>Start Project 한 번으로 처리됩니다</h2>
-                  <p>입력 확인, 필요 시 mesh-refresh, 런타임 준비, 송출 시작까지 자동으로 진행합니다.</p>
+                  <h2>Start Project runs the stitched runtime</h2>
+                  <p>It checks inputs, refreshes runtime mesh assets when needed, prepares the stitched runtime, and starts output.</p>
                   <ul className="stage-list">
-                    <li>현재 기본 geometry는 `virtual-center-rectilinear-mesh` 입니다.</li>
-                    <li>메시가 없거나 오래됐으면 내부적으로 자동 갱신합니다.</li>
-                    <li>성공하면 외부 플레이어에서 UDP 주소를 바로 열 수 있습니다.</li>
+                    <li>The active runtime model and artifact shown below are the source of truth after start.</li>
+                    <li>The live output follows the stitched runtime pipeline.</li>
+                    <li>The external player address appears only for live runtime output.</li>
                   </ul>
                 </div>
               ) : null}
 
               {viewMode === "starting" ? (
                 <div className="stage-copy">
-                  <h2>자동 시작 진행 상황</h2>
+                  <h2>Automatic startup progress</h2>
                   <div className="progress-list" role="list" aria-label="Project start progress">
                     {START_FLOW.map((step, index) => {
                       const currentIndex = START_FLOW.findIndex((item) => item.id === startPhase);
@@ -173,13 +198,7 @@ export function ProjectPage() {
                           <span className="progress-dot" aria-hidden="true" />
                           <div>
                             <strong>{step.label}</strong>
-                            <p>
-                              {isCurrent
-                                ? "지금 이 단계를 진행하고 있습니다."
-                                : isDone
-                                  ? "완료되었습니다."
-                                  : "곧 이어서 진행됩니다."}
-                            </p>
+                            <p>{isCurrent ? "In progress." : isDone ? "Done." : "Pending."}</p>
                           </div>
                         </div>
                       );
@@ -190,15 +209,15 @@ export function ProjectPage() {
 
               {viewMode === "running" ? (
                 <div className="stage-copy">
-                  <h2>이제 stitched 출력만 확인하면 됩니다</h2>
-                  <p>프로젝트는 이미 시작되었습니다. 외부 플레이어에서 아래 UDP 주소를 열고 결과만 확인하세요.</p>
+                  <h2>Inspect the stitched runtime output</h2>
+                  <p>Open the external player with the address below to inspect the current stitched runtime output.</p>
                 </div>
               ) : null}
 
               {viewMode === "blocked" || viewMode === "error" ? (
                 <div className="stage-copy">
-                  <h2>{viewMode === "blocked" ? "지금 막힌 이유" : "오류 내용"}</h2>
-                  <p>{text(state.blocker_reason || state.status_message, "원인을 확인할 수 없습니다.")}</p>
+                  <h2>{viewMode === "blocked" ? "Current blocker" : "Current error"}</h2>
+                  <p>{text(state.blocker_reason || state.status_message, "No reason was provided.")}</p>
                 </div>
               ) : null}
             </div>
@@ -223,56 +242,69 @@ export function ProjectPage() {
             </div>
 
             <div className="output-panel">
-              <span className="output-label">외부 플레이어 주소</span>
-              <code>{text(state.output_receive_uri, "udp://@:24000")}</code>
-              <p>프로젝트가 실행 중 상태가 되면 외부 플레이어에서 이 주소를 열면 됩니다.</p>
+              <span className="output-label">Live output address</span>
+              <code>{receiveTarget || "Not available until the live runtime is ready."}</code>
+              <p>This address is the current stitched runtime output target.</p>
             </div>
           </section>
 
-          <details className="details-panel" open={showDetails}>
-            <summary>세부 정보</summary>
+          <details className="details-panel" open>
+            <summary>Runtime details</summary>
             <dl className="details-grid">
               <div>
-                <dt>활성 모델</dt>
-                <dd>{text(state.runtime_active_model, "not ready")}</dd>
+                <dt>Active model</dt>
+                <dd>{activeModel}</dd>
               </div>
               <div>
                 <dt>Residual</dt>
-                <dd>{text(state.geometry_residual_model, "not ready")}</dd>
+                <dd>{activeResidual}</dd>
               </div>
               <div>
-                <dt>Artifact 경로</dt>
-                <dd>{text(state.runtime_active_artifact_path, "not ready")}</dd>
+                <dt>Fallback used</dt>
+                <dd>{state.fallback_used ? "Yes" : "No"}</dd>
               </div>
               <div>
-                <dt>체크섬</dt>
-                <dd>{text(state.runtime_artifact_checksum, "not ready")}</dd>
+                <dt>Output path</dt>
+                <dd>{directness}</dd>
               </div>
               <div>
-                <dt>시작 가능</dt>
-                <dd>{state.runtime_launch_ready ? "예" : "아니오"}</dd>
+                <dt>Zero-copy</dt>
+                <dd>{state.zero_copy_ready ? "Ready" : "Not ready"}</dd>
               </div>
               <div>
-                <dt>차단 사유</dt>
-                <dd>{text(state.runtime_launch_ready_reason, "not ready")}</dd>
+                <dt>Zero-copy reason</dt>
+                <dd>{zeroCopyReason}</dd>
+              </div>
+              <div>
+                <dt>Artifact path</dt>
+                <dd>{activeArtifactPath}</dd>
+              </div>
+              <div>
+                <dt>Artifact checksum</dt>
+                <dd>{activeChecksum}</dd>
+              </div>
+              <div>
+                <dt>Launch ready</dt>
+                <dd>{state.runtime_launch_ready ? "Yes" : "No"}</dd>
+              </div>
+              <div>
+                <dt>Ready reason</dt>
+                <dd>{readyReason}</dd>
               </div>
               <div>
                 <dt>GPU path</dt>
-                <dd>{text(state.gpu_path_mode, "unknown")}</dd>
+                <dd>{text(state.gpu_path_mode, "Unknown")}</dd>
               </div>
               <div>
-                <dt>GPU 준비</dt>
-                <dd>{state.gpu_path_ready ? "예" : "아니오"}</dd>
-              </div>
-              <div>
-                <dt>Fallback 사용</dt>
-                <dd>{state.fallback_used ? "예" : "아니오"}</dd>
-              </div>
-              <div>
-                <dt>현재 막힘</dt>
-                <dd>{text(state.blocker_reason, "없음")}</dd>
+                <dt>GPU path ready</dt>
+                <dd>{state.gpu_path_ready ? "Yes" : "No"}</dd>
               </div>
             </dl>
+            {zeroCopyBlockers.length > 0 ? (
+              <div className="action-note">
+                Zero-copy blockers: {zeroCopyBlockers.join(", ")}
+              </div>
+            ) : null}
           </details>
         </div>
       </section>

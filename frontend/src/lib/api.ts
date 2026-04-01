@@ -7,15 +7,23 @@ export type ProjectState = {
   can_stop?: boolean;
   blocker_reason?: string;
   output_receive_uri?: string;
+  production_output_target?: string;
   runtime_active_model?: string;
+  runtime_active_residual_model?: string;
   runtime_active_artifact_path?: string;
   runtime_artifact_checksum?: string;
   runtime_launch_ready?: boolean;
   runtime_launch_ready_reason?: string;
-  geometry_residual_model?: string;
   fallback_used?: boolean;
   gpu_path_mode?: string;
   gpu_path_ready?: boolean;
+  input_path_mode?: string;
+  output_path_mode?: string;
+  output_path_direct?: boolean;
+  output_path_bridge?: boolean;
+  zero_copy_ready?: boolean;
+  zero_copy_reason?: string;
+  zero_copy_blockers?: string[];
 };
 
 export type ProjectActionResponse = {
@@ -68,6 +76,13 @@ function asBoolean(value: unknown, fallback = false): boolean {
   return fallback;
 }
 
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item) => asString(item)).filter((item) => item.length > 0);
+}
+
 function normalizeProjectState(value: unknown): ProjectState {
   if (!isRecord(value)) {
     return {};
@@ -81,15 +96,23 @@ function normalizeProjectState(value: unknown): ProjectState {
     can_stop: asBoolean(value.can_stop, false),
     blocker_reason: asString(value.blocker_reason),
     output_receive_uri: asString(value.output_receive_uri),
+    production_output_target: asString(value.production_output_target),
     runtime_active_model: asString(value.runtime_active_model),
+    runtime_active_residual_model: asString(value.runtime_active_residual_model || value.geometry_residual_model),
     runtime_active_artifact_path: asString(value.runtime_active_artifact_path),
     runtime_artifact_checksum: asString(value.runtime_artifact_checksum),
     runtime_launch_ready: asBoolean(value.runtime_launch_ready, false),
     runtime_launch_ready_reason: asString(value.runtime_launch_ready_reason),
-    geometry_residual_model: asString(value.geometry_residual_model),
     fallback_used: asBoolean(value.fallback_used, false),
     gpu_path_mode: asString(value.gpu_path_mode, "unknown"),
     gpu_path_ready: asBoolean(value.gpu_path_ready, false),
+    input_path_mode: asString(value.input_path_mode),
+    output_path_mode: asString(value.output_path_mode),
+    output_path_direct: asBoolean(value.output_path_direct, false),
+    output_path_bridge: asBoolean(value.output_path_bridge, false),
+    zero_copy_ready: asBoolean(value.zero_copy_ready, false),
+    zero_copy_reason: asString(value.zero_copy_reason),
+    zero_copy_blockers: asStringArray(value.zero_copy_blockers),
   };
 }
 
@@ -128,21 +151,29 @@ export async function fetchProjectState(): Promise<ProjectState> {
     return {
       status: "error",
       start_phase: "error",
-      status_message: "Backend unavailable",
+      status_message: "Backend unavailable. Live runtime truth is not available.",
       running: false,
       can_start: false,
       can_stop: false,
       blocker_reason: "Backend unavailable",
-      output_receive_uri: "udp://@:24000",
+      output_receive_uri: "",
+      production_output_target: "",
       runtime_active_model: "",
+      runtime_active_residual_model: "",
       runtime_active_artifact_path: "",
       runtime_artifact_checksum: "",
       runtime_launch_ready: false,
       runtime_launch_ready_reason: "Backend unavailable",
-      geometry_residual_model: "",
       fallback_used: false,
       gpu_path_mode: "unknown",
       gpu_path_ready: false,
+      input_path_mode: "",
+      output_path_mode: "",
+      output_path_direct: false,
+      output_path_bridge: false,
+      zero_copy_ready: false,
+      zero_copy_reason: "Backend unavailable",
+      zero_copy_blockers: [],
     };
   }
 }

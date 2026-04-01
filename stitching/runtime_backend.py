@@ -29,6 +29,7 @@ from stitching.runtime_geometry_artifact import (
     load_runtime_geometry_artifact,
     runtime_geometry_artifact_path,
     runtime_geometry_model,
+    runtime_geometry_requested_residual_model,
     runtime_geometry_residual_model,
 )
 from stitching.runtime_geometry_bakeoff import MeshRefreshService
@@ -163,54 +164,55 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         or merged.get("geometry_residual_model")
         or ""
     ).strip()
+    runtime_requested_residual_model = str(
+        merged.get("runtime_requested_residual_model")
+        or merged.get("geometry_requested_residual_model")
+        or ""
+    ).strip()
+    runtime_artifact_checksum = str(
+        merged.get("runtime_artifact_checksum")
+        or merged.get("geometry_artifact_checksum")
+        or ""
+    ).strip()
     artifact_rollout: dict[str, Any] | None = None
-    runtime_artifact_checksum = str(merged.get("runtime_artifact_checksum") or merged.get("geometry_artifact_checksum") or "").strip()
 
-    if runtime_active_artifact_path and (not runtime_active_model or not runtime_active_residual_model):
+    if runtime_active_artifact_path:
         try:
             artifact_path = Path(runtime_active_artifact_path)
             artifact = load_runtime_geometry_artifact(artifact_path)
         except Exception:
             artifact = None
+            artifact_path = None
         if isinstance(artifact, dict):
             artifact_rollout = geometry_rollout_metadata(artifact)
-            if not runtime_active_model:
-                runtime_active_model = str(artifact_rollout.get("geometry_model") or runtime_geometry_model(artifact))
-            if not runtime_active_residual_model:
-                runtime_active_residual_model = str(
-                    artifact_rollout.get("geometry_residual_model") or runtime_geometry_residual_model(artifact)
-                )
-            if not runtime_artifact_checksum and artifact_path.exists():
+            runtime_active_model = runtime_active_model or str(
+                artifact_rollout.get("geometry_model") or runtime_geometry_model(artifact)
+            )
+            runtime_requested_residual_model = runtime_requested_residual_model or str(
+                artifact_rollout.get("geometry_requested_residual_model")
+                or runtime_geometry_requested_residual_model(artifact)
+            )
+            runtime_active_residual_model = runtime_active_residual_model or str(
+                artifact_rollout.get("geometry_residual_model") or runtime_geometry_residual_model(artifact)
+            )
+            if not runtime_artifact_checksum and artifact_path is not None and artifact_path.exists():
                 runtime_artifact_checksum = _compute_sha256(artifact_path)
-    elif runtime_active_artifact_path:
-        artifact_path = Path(runtime_active_artifact_path)
-        if not runtime_artifact_checksum and artifact_path.exists():
-            runtime_artifact_checksum = _compute_sha256(artifact_path)
+        elif not runtime_artifact_checksum:
+            try:
+                artifact_path = Path(runtime_active_artifact_path)
+                if artifact_path.exists():
+                    runtime_artifact_checksum = _compute_sha256(artifact_path)
+            except Exception:
+                pass
 
-    if artifact_rollout is None and runtime_active_artifact_path:
-        try:
-            artifact = load_runtime_geometry_artifact(Path(runtime_active_artifact_path))
-        except Exception:
-            artifact = None
-        if isinstance(artifact, dict):
-            artifact_rollout = geometry_rollout_metadata(artifact)
-
+    prepared_plan = merged.get("prepared_plan") if isinstance(merged.get("prepared_plan"), dict) else {}
     production_output_runtime_mode = str(merged.get("production_output_runtime_mode") or "").strip()
     production_output_target = str(
         merged.get("production_output_target")
-        or (merged.get("prepared_plan") or {}).get("transmit_target")
+        or prepared_plan.get("transmit_target")
         or ""
     ).strip()
-    input_runtime = str(
-        merged.get("input_runtime")
-        or merged.get("prepared_plan", {}).get("input_runtime")
-        or ""
-    ).strip().lower() if isinstance(merged.get("prepared_plan"), dict) else str(merged.get("input_runtime") or "").strip().lower()
-    input_pipe_format = str(
-        merged.get("input_pipe_format")
-        or merged.get("prepared_plan", {}).get("input_pipe_format")
-        or ""
-    ).strip().lower() if isinstance(merged.get("prepared_plan"), dict) else str(merged.get("input_pipe_format") or "").strip().lower()
+    input_runtime = str(merged.get("input_runtime") or prepared_plan.get("input_runtime") or "").strip().lower()
     input_path_mode = "unknown"
     if input_runtime == "ffmpeg-cuda":
         input_path_mode = "cuda-decode-cpu-staged"
@@ -231,18 +233,15 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         if output_path_mode == "unknown":
             zero_copy_blockers.append("output path truth is unavailable")
         elif output_path_mode == "native-nvenc-unavailable":
-            zero_copy_blockers.append("native nvenc output path is unavailable")
+            zero_copy_blockers.append("native NVENC output path is unavailable")
         else:
             zero_copy_blockers.append(f"output path is {output_path_mode}, not direct")
     zero_copy_ready = len(zero_copy_blockers) == 0
-    zero_copy_reason = (
-        "end-to-end zero-copy path is active"
-        if zero_copy_ready
-        else "; ".join(zero_copy_blockers)
-    )
+    zero_copy_reason = "end-to-end zero-copy path is active" if zero_copy_ready else "; ".join(zero_copy_blockers)
     gpu_path_mode = output_path_mode
     gpu_path_ready = zero_copy_ready
     output_receive_uri = RuntimeService._receive_uri_from_target(production_output_target)
+
     preview_left_url = str(
         merged.get("preview_left_url")
         or merged.get("alignment_preview_left_url")
@@ -264,31 +263,46 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     preview_ready = any((preview_left_url, preview_right_url, preview_stitched_url)) or bool(
         merged.get("alignment_preview_ready") or merged.get("start_preview_ready")
     )
-    runtime_launch_ready = bool(
-        merged.get("runtime_launch_ready")
-        or merged.get("launch_ready")
-        or mesh_refresh.get("runtime_launch_ready")
-        or (artifact_rollout or {}).get("launch_ready")
-    )
-    runtime_launch_ready_reason = str(
-        merged.get("runtime_launch_ready_reason")
-        or merged.get("launch_ready_reason")
-        or mesh_refresh.get("runtime_launch_ready_reason")
-        or (artifact_rollout or {}).get("launch_ready_reason")
-        or ""
-    ).strip()
+
+    launch_ready_flags: list[bool] = []
+    if merged.get("runtime_launch_ready") is not None:
+        launch_ready_flags.append(bool(merged.get("runtime_launch_ready")))
+    if merged.get("launch_ready") is not None:
+        launch_ready_flags.append(bool(merged.get("launch_ready")))
+    if mesh_refresh.get("runtime_launch_ready") is not None:
+        launch_ready_flags.append(bool(mesh_refresh.get("runtime_launch_ready")))
+    if artifact_rollout is not None:
+        launch_ready_flags.append(bool(artifact_rollout.get("launch_ready")))
+    runtime_launch_ready = all(launch_ready_flags) if launch_ready_flags else False
+
+    runtime_launch_ready_reason = ""
+    if artifact_rollout is not None and not bool(artifact_rollout.get("launch_ready")):
+        runtime_launch_ready_reason = str(artifact_rollout.get("launch_ready_reason") or "").strip()
+    elif merged.get("runtime_launch_ready_reason"):
+        runtime_launch_ready_reason = str(merged.get("runtime_launch_ready_reason") or "").strip()
+    elif merged.get("launch_ready_reason"):
+        runtime_launch_ready_reason = str(merged.get("launch_ready_reason") or "").strip()
+    elif mesh_refresh.get("runtime_launch_ready_reason"):
+        runtime_launch_ready_reason = str(mesh_refresh.get("runtime_launch_ready_reason") or "").strip()
+
     fallback_used = bool(
         merged.get("fallback_used")
         or merged.get("geometry_fallback_only")
         or (artifact_rollout or {}).get("geometry_fallback_only")
+        or (artifact_rollout or {}).get("geometry_mesh_fallback_used")
     )
-    gpu_only_blockers = [str(item).strip() for item in list(merged.get("gpu_only_blockers") or []) if str(item).strip()]
+    gpu_only_blockers = [
+        str(item).strip()
+        for item in list(merged.get("gpu_only_blockers") or [])
+        if str(item).strip()
+    ]
     needs_mesh_refresh = (
         not runtime_active_artifact_path
         or str(runtime_active_residual_model or "").strip().lower() != "mesh"
         or fallback_used
         or not runtime_launch_ready
     )
+
     blocker_reason = ""
     if gpu_only_blockers:
         blocker_reason = " / ".join(gpu_only_blockers)
@@ -300,32 +314,31 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
     if running:
         start_phase = "running"
         status_message = (
-            f"프로젝트가 실행 중입니다. 외부 플레이어에서 {output_receive_uri} 를 여세요."
+            f"Project is running. Open the external player at {output_receive_uri}."
             if output_receive_uri
-            else "프로젝트가 실행 중입니다."
+            else "Project is running."
         )
     elif blocker_reason:
         start_phase = "blocked"
         status_message = blocker_reason
     elif needs_mesh_refresh:
-        start_phase = "mesh-refresh"
-        status_message = "시작 시 mesh-refresh를 자동 실행합니다."
+        start_phase = "refreshing_mesh"
+        status_message = "Start Project will refresh the runtime mesh automatically."
     else:
         start_phase = "ready"
-        status_message = "시작할 준비가 되었습니다."
-    can_start = not running and not blocker_reason
-    can_stop = running
+        status_message = "Project is ready to start."
 
     merged.update(
         {
             "status": status,
             "start_phase": start_phase,
             "status_message": status_message,
-            "can_start": can_start,
-            "can_stop": can_stop,
+            "can_start": not running and not blocker_reason,
+            "can_stop": running,
             "blocker_reason": blocker_reason,
             "output_receive_uri": output_receive_uri,
             "runtime_active_model": runtime_active_model or "",
+            "runtime_requested_residual_model": runtime_requested_residual_model or "",
             "runtime_active_residual_model": runtime_active_residual_model or "",
             "geometry_residual_model": runtime_active_residual_model or "",
             "runtime_active_artifact_path": runtime_active_artifact_path,
@@ -350,8 +363,6 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         }
     )
     return merged
-
-
 def _public_runtime_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, Any]) -> dict[str, Any]:
     return public_runtime_state_surface(_merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state))
 
@@ -427,6 +438,8 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     merged = _merge_runtime_and_mesh_refresh_state(runtime_state, mesh_refresh_state)
     running = bool(merged.get("running"))
     last_error = str(merged.get("last_error") or "").strip()
+    if last_error.lower().startswith("gpu-direct bridge active:"):
+        last_error = ""
     config_blocker = ""
     try:
         left_rtsp, right_rtsp = _configured_rtsp_urls_for_request()
@@ -450,41 +463,48 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
         status = "idle"
 
     if status == "running" and not status_message:
-        status_message = "Project is running. Open the external player to confirm the panorama output."
+        status_message = "Project is running. Open the external player to confirm the stitched runtime output."
     elif status == "starting" and not status_message:
-        status_message = "Start Project is preparing the runtime."
+        status_message = "Start Project is preparing the stitched runtime."
     elif status == "blocked" and not status_message:
         status_message = blocker_reason or "Project start is blocked."
     elif status == "error" and not status_message:
         status_message = last_error or "Project start failed."
     elif not status_message:
-        status_message = "Start Project will refresh the mesh artifact automatically when needed."
+        status_message = "Start Project refreshes the mesh artifact automatically when needed."
 
     can_start = not running and status != "starting" and not config_blocker
     can_stop = running
     output_target = str(merged.get("production_output_target") or "").strip()
 
     return {
-      "status": status,
-      "start_phase": start_phase or ("running" if running else "idle"),
-      "status_message": status_message,
-      "running": running,
-      "can_start": can_start,
-      "can_stop": can_stop,
-      "blocker_reason": blocker_reason if status in {"blocked", "error"} else "",
-      "output_receive_uri": _project_receive_uri_from_target(output_target) or "udp://@:24000",
-      "runtime_active_model": str(merged.get("runtime_active_model") or "").strip(),
-      "runtime_active_artifact_path": str(merged.get("runtime_active_artifact_path") or "").strip(),
-      "runtime_artifact_checksum": str(merged.get("runtime_artifact_checksum") or "").strip(),
-      "runtime_launch_ready": bool(merged.get("runtime_launch_ready")),
-      "runtime_launch_ready_reason": str(merged.get("runtime_launch_ready_reason") or "").strip(),
-      "geometry_residual_model": str(merged.get("runtime_active_residual_model") or "").strip(),
-      "fallback_used": bool(merged.get("fallback_used")),
-      "gpu_path_mode": str(merged.get("gpu_path_mode") or "unknown").strip() or "unknown",
-      "gpu_path_ready": bool(merged.get("gpu_path_ready")),
+        "status": status,
+        "start_phase": start_phase or ("running" if running else "idle"),
+        "status_message": status_message,
+        "running": running,
+        "can_start": can_start,
+        "can_stop": can_stop,
+        "blocker_reason": blocker_reason if status in {"blocked", "error"} else "",
+        "output_receive_uri": _project_receive_uri_from_target(output_target) or "udp://@:24000",
+        "production_output_target": output_target,
+        "runtime_active_model": str(merged.get("runtime_active_model") or "").strip(),
+        "runtime_active_residual_model": str(merged.get("runtime_active_residual_model") or "").strip(),
+        "runtime_active_artifact_path": str(merged.get("runtime_active_artifact_path") or "").strip(),
+        "runtime_artifact_checksum": str(merged.get("runtime_artifact_checksum") or "").strip(),
+        "runtime_launch_ready": bool(merged.get("runtime_launch_ready")),
+        "runtime_launch_ready_reason": str(merged.get("runtime_launch_ready_reason") or "").strip(),
+        "geometry_residual_model": str(merged.get("runtime_active_residual_model") or "").strip(),
+        "fallback_used": bool(merged.get("fallback_used")),
+        "gpu_path_mode": str(merged.get("gpu_path_mode") or "unknown").strip() or "unknown",
+        "gpu_path_ready": bool(merged.get("gpu_path_ready")),
+        "input_path_mode": str(merged.get("input_path_mode") or "").strip(),
+        "output_path_mode": str(merged.get("output_path_mode") or "").strip(),
+        "output_path_direct": bool(merged.get("output_path_direct")),
+        "output_path_bridge": bool(merged.get("output_path_bridge")),
+        "zero_copy_ready": bool(merged.get("zero_copy_ready")),
+        "zero_copy_reason": str(merged.get("zero_copy_reason") or "").strip(),
+        "zero_copy_blockers": list(merged.get("zero_copy_blockers") or []),
     }
-
-
 def _project_start_needs_mesh_refresh(state: dict[str, Any], exc: Exception | None = None) -> bool:
     if bool(state.get("running")):
         return False
@@ -522,8 +542,6 @@ def _project_start_response(
             "message": "Project is already running.",
             "state": initial_state,
         }
-        state["status_message"] = state.get("status_message") or "프로젝트가 이미 실행 중입니다."
-        return {"ok": True, "message": state["status_message"], "state": state}
 
     backend.set_project_progress("checking_inputs", "Checking inputs.")
     left_rtsp, right_rtsp = _configured_rtsp_urls_for_request(request)
@@ -557,6 +575,7 @@ def _project_start_response(
     except Exception as exc:
         backend.set_project_progress("error", str(exc))
         raise
+
     response = {
         "ok": bool(result.get("ok", True)) if isinstance(result, dict) else True,
         "message": str(result.get("message") or "").strip() if isinstance(result, dict) else "",
@@ -564,18 +583,12 @@ def _project_start_response(
     }
     message = response["message"] or "Project started."
     if mesh_refresh_triggered:
-        response["message"] = (
-            f"mesh-refresh를 자동 실행했습니다. {message}".strip()
-            if message
-            else "mesh-refresh를 자동 실행한 뒤 프로젝트를 시작했습니다."
-        )
-    if mesh_refresh_triggered:
         response["message"] = f"Mesh refresh ran automatically. {message}".strip()
     elif prepare_result is not None and bool(prepare_result.get("auto_calibrated")):
         response["message"] = f"Mesh artifact refreshed automatically. {message}".strip()
+    else:
+        response["message"] = message
     return response
-
-
 class _CaptureOptionsEnv:
     def __init__(self, *, transport: str, timeout_sec: float) -> None:
         self._transport = str(transport or "tcp").strip() or "tcp"
@@ -933,10 +946,9 @@ class RuntimeService:
                 )
 
         raise ValueError(
-            "launch-ready runtime geometry artifact가 없습니다. "
-            "내부 mesh-refresh를 먼저 실행해 active mesh artifact를 다시 생성해 주세요."
+            "No launch-ready runtime geometry artifact is available. "
+            "Run mesh-refresh first to regenerate the active mesh artifact."
         )
-
     def _build_plan(self, request: dict[str, Any] | None = None) -> RuntimePlan:
         site_config = load_runtime_site_config()
         request = request or {}
@@ -1634,6 +1646,7 @@ class RuntimeService:
         should_expose_cylindrical_projection = geometry_mode == "cylindrical-affine"
         return {
             "geometry_mode": str(rollout["geometry_model"] or geometry_mode),
+            "geometry_requested_residual_model": str(rollout.get("geometry_requested_residual_model") or "-"),
             "geometry_residual_model": rollout["geometry_residual_model"],
             "alignment_mode": _string(alignment, "model", "-"),
             "seam_mode": seam_mode,
@@ -1644,7 +1657,7 @@ class RuntimeService:
             "geometry_operator_visible": bool(rollout["geometry_operator_visible"]),
             "geometry_fallback_only": bool(rollout["geometry_fallback_only"]),
             "geometry_compat_only": bool(rollout["geometry_compat_only"]),
-            "fallback_used": bool(rollout["geometry_fallback_only"]),
+            "fallback_used": bool(rollout["geometry_fallback_only"] or rollout.get("geometry_mesh_fallback_used")),
             "launch_ready": bool(rollout["launch_ready"]),
             "launch_ready_reason": str(rollout["launch_ready_reason"]),
             "cylindrical_focal_px": _float(left_projection, "focal_px") if should_expose_cylindrical_projection else 0.0,

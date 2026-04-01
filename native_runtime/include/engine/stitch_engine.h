@@ -202,6 +202,20 @@ private:
         const std::vector<int>& seam_path,
         int transition_px,
         cv::Mat* stitched_out) const;
+    cv::Rect largest_valid_rect_locked(const cv::Mat& valid_mask) const;
+    bool compose_stitched_video_quality_locked(
+        const cv::Mat& canvas_left,
+        const cv::Mat& warped_right,
+        cv::Mat* stitched_out,
+        bool* used_exposure_compensation_out = nullptr,
+        bool* used_dynamic_seam_out = nullptr);
+    bool runtime_geometry_requests_mesh_locked() const;
+    bool runtime_geometry_mesh_active_locked() const;
+    std::string runtime_geometry_public_model_locked() const;
+    std::string runtime_geometry_artifact_truth_locked() const;
+    std::string runtime_alignment_truth_locked() const;
+    std::string runtime_seam_truth_locked() const;
+    std::string runtime_exposure_truth_locked() const;
 
     void clear_calibration_state_locked();
     void update_metrics_locked();

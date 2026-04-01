@@ -39,6 +39,8 @@ namespace hogak::output {
 namespace {
 
 constexpr std::size_t kMaxPendingFrames = 3;
+constexpr std::int64_t kDirectFillRetryFramesFloor = 60;
+constexpr const char* kBridgeWarningPrefix = "gpu-direct bridge active: ";
 
 std::string trim_copy(const std::string& text) {
     std::size_t begin = 0;
@@ -199,6 +201,24 @@ std::string join_text(const std::vector<std::string>& parts, char delimiter) {
         builder << parts[index];
     }
     return builder.str();
+}
+
+std::string upsert_command_line_token(std::string text, const std::string& key, const std::string& value) {
+    if (key.empty()) {
+        return text;
+    }
+    const std::string key_prefix = key + "=";
+    std::vector<std::string> parts = split_text(text, ' ');
+    parts.erase(
+        std::remove_if(
+            parts.begin(),
+            parts.end(),
+            [&](const std::string& part) { return part.rfind(key_prefix, 0) == 0; }),
+        parts.end());
+    if (!value.empty()) {
+        parts.push_back(key_prefix + value);
+    }
+    return join_text(parts, ' ');
 }
 
 std::string normalize_tee_leg_options(std::string options) {
@@ -403,7 +423,7 @@ struct GpuDirectOutputWriter::Impl {
     bool cuda_hw_frames_active = false;
     bool bgra_bridge_active = false;
     bool bgra_direct_fill_active = false;
-    bool bgra_direct_fill_disabled = false;
+    std::int64_t bgra_direct_fill_retry_after_pts = 0;
     int fps_num = 30;
     std::int64_t next_pts = 0;
 
@@ -893,13 +913,6 @@ void GpuDirectOutputWriter::run() {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (local_impl->bgra_bridge_active) {
-            command_line_ += " mode=cuda-hwframes-bgra-bridge";
-        } else if (local_impl->cuda_hw_frames_active) {
-            command_line_ += " mode=cuda-hwframes";
-        } else {
-            command_line_ += " mode=cpu-bridge";
-        }
         impl_ = std::move(local_impl);
     }
 
@@ -930,26 +943,39 @@ void GpuDirectOutputWriter::run() {
         return true;
     };
 
-    auto set_runtime_mode = [&](const char* mode) {
+    auto set_runtime_mode = [&](const char* mode, const char* bridge_reason = nullptr) {
         if (mode == nullptr || *mode == '\0') {
             return;
         }
         std::lock_guard<std::mutex> lock(mutex_);
-        if (std::string(mode) == "cuda-hwframes-bgra-direct-fill") {
-            runtime_mode_ = "native-nvenc-direct";
-        } else {
-            runtime_mode_ = "native-nvenc-bridge";
-        }
-        const auto mode_pos = command_line_.find(" mode=");
-        if (mode_pos == std::string::npos) {
-            command_line_ += " mode=";
-            command_line_ += mode;
+        const bool direct_mode = std::string(mode) == "cuda-hwframes-bgra-direct-fill";
+        runtime_mode_ = direct_mode ? "native-nvenc-direct" : "native-nvenc-bridge";
+        command_line_ = upsert_command_line_token(command_line_, "mode", sanitize_runtime_token(mode));
+        if (direct_mode) {
+            command_line_ = upsert_command_line_token(command_line_, "bridge-reason", "");
+            if (starts_with(last_error_, kBridgeWarningPrefix)) {
+                last_error_.clear();
+            }
             return;
         }
-        command_line_.erase(mode_pos);
-        command_line_ += " mode=";
-        command_line_ += mode;
+        std::string reason_text = trim_copy(bridge_reason != nullptr ? bridge_reason : "");
+        if (reason_text.empty()) {
+            reason_text = "bridge reason unavailable";
+        }
+        command_line_ = upsert_command_line_token(
+            command_line_,
+            "bridge-reason",
+            sanitize_runtime_token(reason_text));
+        last_error_ = std::string(kBridgeWarningPrefix) + reason_text;
     };
+
+    if (impl_->bgra_bridge_active) {
+        set_runtime_mode("cuda-hwframes-bgra-bridge", "awaiting first direct-fill attempt");
+    } else if (impl_->cuda_hw_frames_active) {
+        set_runtime_mode("cuda-hwframes", "encoder opened with cuda hwframes but not BGRA direct-fill");
+    } else {
+        set_runtime_mode("cpu-bridge", "encoder path does not use cuda hwframes");
+    }
 
     while (active_.load()) {
         {
@@ -1153,28 +1179,43 @@ void GpuDirectOutputWriter::run() {
             }
 
             bool hw_frame_filled_directly = false;
-            if (impl_->bgra_bridge_active && prepared_gpu_frame_ready && !impl_->bgra_direct_fill_disabled) {
+            std::string bridge_reason;
+            const bool direct_fill_retry_due =
+                impl_->next_pts >= std::max<std::int64_t>(0, impl_->bgra_direct_fill_retry_after_pts);
+            if (impl_->bgra_bridge_active && prepared_gpu_frame_ready && direct_fill_retry_due) {
                 std::string direct_fill_error;
                 if (try_copy_gpu_bgra_to_hw_frame(prepared_gpu_bgra, hw_frame, &direct_fill_error)) {
                     hw_frame_filled_directly = true;
                     frame_content_dirty = false;
+                    impl_->bgra_direct_fill_retry_after_pts = 0;
                     if (!impl_->bgra_direct_fill_active) {
                         impl_->bgra_direct_fill_active = true;
                         set_runtime_mode("cuda-hwframes-bgra-direct-fill");
                     }
                 } else {
-                    const bool first_disable = !impl_->bgra_direct_fill_disabled;
-                    impl_->bgra_direct_fill_disabled = true;
                     impl_->bgra_direct_fill_active = false;
-                    set_runtime_mode("cuda-hwframes-bgra-bridge");
-                    if (first_disable && !direct_fill_error.empty()) {
-                        std::lock_guard<std::mutex> lock(mutex_);
-                        command_line_ += " direct-fill-error=" + sanitize_runtime_token(direct_fill_error);
-                    }
+                    impl_->bgra_direct_fill_retry_after_pts =
+                        impl_->next_pts + std::max<std::int64_t>(kDirectFillRetryFramesFloor, impl_->fps_num * 2);
+                    bridge_reason = direct_fill_error.empty()
+                        ? "direct-fill copy into hw frame failed"
+                        : ("direct-fill unavailable: " + direct_fill_error);
                 }
+            } else if (impl_->bgra_bridge_active && prepared_gpu_frame_ready && !direct_fill_retry_due) {
+                impl_->bgra_direct_fill_active = false;
+                bridge_reason = "awaiting direct-fill retry window";
+            } else if (impl_->bgra_bridge_active && !prepared_gpu_frame_ready) {
+                impl_->bgra_direct_fill_active = false;
+                bridge_reason = "writer received CPU-prepared frame, so direct-fill is unavailable";
             }
 
             if (!hw_frame_filled_directly) {
+                if (impl_->bgra_bridge_active) {
+                    set_runtime_mode("cuda-hwframes-bgra-bridge", bridge_reason.c_str());
+                } else {
+                    set_runtime_mode(
+                        "cuda-hwframes",
+                        "encoder opened with cuda hwframes but requires software bridge submission");
+                }
                 if (!ensure_software_frame_ready()) {
                     av_frame_free(&hw_frame);
                     break;

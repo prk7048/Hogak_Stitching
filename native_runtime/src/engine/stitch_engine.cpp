@@ -1997,6 +1997,139 @@ void StitchEngine::blend_with_dynamic_seam_locked(
     }
 }
 
+cv::Rect StitchEngine::largest_valid_rect_locked(const cv::Mat& valid_mask) const {
+    if (valid_mask.empty()) {
+        return cv::Rect();
+    }
+    const cv::Mat binary = valid_mask > 0;
+    const int height = binary.rows;
+    const int width = binary.cols;
+    std::vector<int> heights(width, 0);
+    int best_area = 0;
+    cv::Rect best_rect(0, 0, width, height);
+    for (int y = 0; y < height; ++y) {
+        const auto* row = binary.ptr<std::uint8_t>(y);
+        for (int x = 0; x < width; ++x) {
+            heights[x] = (row[x] > 0) ? (heights[x] + 1) : 0;
+        }
+        std::vector<int> stack;
+        stack.reserve(static_cast<std::size_t>(width) + 1U);
+        for (int x = 0; x <= width; ++x) {
+            const int current = (x < width) ? heights[x] : 0;
+            while (!stack.empty() && current < heights[stack.back()]) {
+                const int h = heights[stack.back()];
+                stack.pop_back();
+                if (h <= 0) {
+                    continue;
+                }
+                const int left = stack.empty() ? 0 : (stack.back() + 1);
+                const int rect_width = x - left;
+                const int area = h * rect_width;
+                if (area > best_area && rect_width > 0) {
+                    best_area = area;
+                    best_rect = cv::Rect(left, (y - h) + 1, rect_width, h);
+                }
+            }
+            stack.push_back(x);
+        }
+    }
+    if (best_rect.width <= 0 || best_rect.height <= 0) {
+        return cv::Rect(0, 0, width, height);
+    }
+    return best_rect;
+}
+
+bool StitchEngine::compose_stitched_video_quality_locked(
+    const cv::Mat& canvas_left,
+    const cv::Mat& warped_right,
+    cv::Mat* stitched_out,
+    bool* used_exposure_compensation_out,
+    bool* used_dynamic_seam_out) {
+    if (stitched_out == nullptr || canvas_left.empty() || warped_right.empty()) {
+        return false;
+    }
+    if (used_exposure_compensation_out != nullptr) {
+        *used_exposure_compensation_out = false;
+    }
+    if (used_dynamic_seam_out != nullptr) {
+        *used_dynamic_seam_out = false;
+    }
+
+    cv::Mat compensated_right = warped_right;
+    double exposure_gain = 1.0;
+    double exposure_bias = 0.0;
+    if (!runtime_geometry_.exposure_enabled) {
+        last_exposure_gain_ = exposure_gain;
+        last_exposure_bias_ = exposure_bias;
+    } else if (compute_exposure_compensation_locked(
+                   canvas_left,
+                   warped_right,
+                   overlap_mask_,
+                   &compensated_right,
+                   &exposure_gain,
+                   &exposure_bias)) {
+        if (used_exposure_compensation_out != nullptr) {
+            *used_exposure_compensation_out = true;
+        }
+    } else {
+        compensated_right = warped_right;
+    }
+    last_exposure_gain_ = exposure_gain;
+    last_exposure_bias_ = exposure_bias;
+    metrics_.exposure_gain = exposure_gain;
+    metrics_.exposure_bias = exposure_bias;
+
+    std::vector<int> seam_path;
+    if (!build_dynamic_seam_path_locked(canvas_left, compensated_right, overlap_mask_, &seam_path)) {
+        seam_path.assign(canvas_left.rows, canvas_left.cols / 2);
+    }
+    update_seam_path_jitter_locked(seam_path);
+    metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
+
+    cv::Mat stitched_uncropped;
+    blend_with_dynamic_seam_locked(
+        canvas_left,
+        compensated_right,
+        left_mask_template_,
+        right_mask_template_,
+        seam_path,
+        runtime_geometry_.seam_transition_px,
+        &stitched_uncropped);
+
+    cv::Mat valid_mask;
+    cv::bitwise_or(left_mask_template_, right_mask_template_, valid_mask);
+    const cv::Rect crop_rect = largest_valid_rect_locked(valid_mask);
+    if (crop_rect.width > 0 &&
+        crop_rect.height > 0 &&
+        crop_rect.x >= 0 &&
+        crop_rect.y >= 0 &&
+        crop_rect.x + crop_rect.width <= stitched_uncropped.cols &&
+        crop_rect.y + crop_rect.height <= stitched_uncropped.rows) {
+        *stitched_out = stitched_uncropped(crop_rect).clone();
+    } else {
+        *stitched_out = stitched_uncropped;
+    }
+
+    metrics_.warped_mean_luma = mean_luma(compensated_right);
+    if (cv::countNonZero(overlap_mask_) > 0) {
+        cv::Mat left_gray;
+        cv::Mat right_gray;
+        cv::Mat abs_diff;
+        cv::cvtColor(canvas_left, left_gray, cv::COLOR_BGR2GRAY);
+        cv::cvtColor(compensated_right, right_gray, cv::COLOR_BGR2GRAY);
+        cv::absdiff(left_gray, right_gray, abs_diff);
+        metrics_.overlap_diff_mean = cv::mean(abs_diff, overlap_mask_)[0];
+    } else {
+        metrics_.overlap_diff_mean = 0.0;
+    }
+    metrics_.cpu_blend_count += 1;
+    metrics_.blend_mode = "narrow-seam-feather";
+    if (used_dynamic_seam_out != nullptr) {
+        *used_dynamic_seam_out = true;
+    }
+    return !stitched_out->empty();
+}
+
 void StitchEngine::update_seam_path_jitter_locked(const std::vector<int>& seam_path) {
     if (previous_seam_path_.size() != seam_path.size() || seam_path.empty()) {
         last_seam_path_jitter_px_ = 0.0;
@@ -3415,7 +3548,8 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
     state->mesh_max_local_rotation_drift = artifact.mesh_max_local_rotation_drift;
     state->mesh_enabled =
         state->model == "virtual-center-rectilinear" &&
-        state->residual_model == "mesh";
+        state->residual_model == "mesh" &&
+        !state->mesh_fallback_used;
     state->residual_alignment_error_px = artifact.residual_alignment_error_px;
     state->seam_transition_px = std::max(2, artifact.seam_transition_px);
     state->seam_smoothness_penalty = std::max(0.0, artifact.seam_smoothness_penalty);
@@ -3425,6 +3559,58 @@ bool StitchEngine::load_runtime_geometry_from_file(const std::string& path, Runt
     state->exposure_gain_max = std::max(state->exposure_gain_min, artifact.exposure_gain_max);
     state->exposure_bias_abs_max = std::max(0.0, artifact.exposure_bias_abs_max);
     return true;
+}
+
+bool StitchEngine::runtime_geometry_requests_mesh_locked() const {
+    return runtime_geometry_.model == "virtual-center-rectilinear" &&
+           runtime_geometry_.residual_model == "mesh";
+}
+
+bool StitchEngine::runtime_geometry_mesh_active_locked() const {
+    return runtime_geometry_requests_mesh_locked() &&
+           runtime_geometry_.mesh_enabled &&
+           !runtime_geometry_.mesh_fallback_used;
+}
+
+std::string StitchEngine::runtime_geometry_public_model_locked() const {
+    if (runtime_geometry_.model == "virtual-center-rectilinear") {
+        return runtime_geometry_mesh_active_locked()
+            ? "virtual-center-rectilinear-mesh"
+            : "virtual-center-rectilinear-rigid";
+    }
+    return runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+}
+
+std::string StitchEngine::runtime_geometry_artifact_truth_locked() const {
+    if (runtime_geometry_.model == "virtual-center-rectilinear") {
+        return runtime_geometry_requests_mesh_locked()
+            ? "virtual-center-rectilinear-mesh"
+            : "virtual-center-rectilinear-rigid";
+    }
+    return runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+}
+
+std::string StitchEngine::runtime_alignment_truth_locked() const {
+    if (runtime_geometry_.model == "virtual-center-rectilinear") {
+        return runtime_geometry_mesh_active_locked() ? "mesh" : "rigid";
+    }
+    return runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model;
+}
+
+std::string StitchEngine::runtime_seam_truth_locked() const {
+    if (runtime_geometry_.model == "cylindrical-affine" ||
+        runtime_geometry_.model == "virtual-center-rectilinear") {
+        return "min-cost-seam";
+    }
+    return "seam_feather";
+}
+
+std::string StitchEngine::runtime_exposure_truth_locked() const {
+    return ((runtime_geometry_.model == "cylindrical-affine" ||
+             runtime_geometry_.model == "virtual-center-rectilinear") &&
+            runtime_geometry_.exposure_enabled)
+        ? "gain-bias"
+        : "off";
 }
 
 bool StitchEngine::load_runtime_geometry_locked() {
@@ -3453,10 +3639,13 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
     }
     const bool cylindrical_runtime = runtime_geometry_.model == "cylindrical-affine";
     const bool rectilinear_runtime = runtime_geometry_.model == "virtual-center-rectilinear";
+    const bool rectilinear_mesh_requested = rectilinear_runtime && runtime_geometry_requests_mesh_locked();
     if (!cylindrical_runtime && !rectilinear_runtime) {
         return false;
     }
     if (rectilinear_runtime && !gpu_available_) {
+        apply_runtime_geometry_to_metrics_locked();
+        metrics_.status = "virtual_center_rectilinear_requires_gpu";
         metrics_.gpu_reason = "virtual-center-rectilinear requires GPU path";
         return false;
     }
@@ -3510,17 +3699,21 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
                 &runtime_geometry_.rectilinear_right_map_y)) {
             return false;
         }
+        if (rectilinear_mesh_requested && runtime_geometry_.mesh_fallback_used) {
+            apply_runtime_geometry_to_metrics_locked();
+            metrics_.status = "virtual_center_rectilinear_mesh_blocked_degraded";
+            metrics_.gpu_reason = "virtual-center mesh artifact is marked degraded-to-rigid and cannot be launched as mesh";
+            return false;
+        }
         if (runtime_geometry_.mesh_enabled) {
-            if (runtime_geometry_.mesh_fallback_used) {
-                metrics_.gpu_reason = "virtual-center mesh artifact is marked degraded-to-rigid and cannot be launched as mesh";
-                return false;
-            }
             if (!build_runtime_mesh_maps_locked(
                     rectilinear_output_size,
                     runtime_geometry_.mesh_control_displacement_x,
                     runtime_geometry_.mesh_control_displacement_y,
                     &runtime_geometry_.mesh_map_x,
                     &runtime_geometry_.mesh_map_y)) {
+                apply_runtime_geometry_to_metrics_locked();
+                metrics_.status = "virtual_center_rectilinear_mesh_map_missing";
                 metrics_.gpu_reason = "virtual-center mesh artifact is missing a valid runtime mesh map";
                 return false;
             }
@@ -3546,6 +3739,7 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         } catch (const cv::Exception& e) {
             if (rectilinear_runtime) {
                 metrics_.gpu_errors += 1;
+                metrics_.status = "virtual_center_rectilinear_map_upload_failed";
                 metrics_.gpu_reason = std::string("cuda rectilinear map upload failed: ") + e.what();
                 return false;
             }
@@ -3687,13 +3881,12 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
         }
     }
 
-    metrics_.geometry_mode = runtime_geometry_.model;
-    metrics_.alignment_mode = runtime_geometry_.mesh_enabled ? "mesh" : runtime_geometry_.alignment_model;
-    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
-    metrics_.exposure_mode =
-        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+    metrics_.geometry_mode = runtime_geometry_public_model_locked();
+    metrics_.alignment_mode = runtime_alignment_truth_locked();
+    metrics_.seam_mode = runtime_seam_truth_locked();
+    metrics_.exposure_mode = runtime_exposure_truth_locked();
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
-    metrics_.geometry_artifact_model = runtime_geometry_.model;
+    metrics_.geometry_artifact_model = runtime_geometry_artifact_truth_locked();
     metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
     metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
     metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
@@ -3706,15 +3899,12 @@ bool StitchEngine::prepare_runtime_geometry_locked(const cv::Size& left_size, co
 }
 
 void StitchEngine::apply_runtime_geometry_to_metrics_locked() {
-    metrics_.geometry_mode = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.alignment_mode = runtime_geometry_.mesh_enabled
-        ? "mesh"
-        : (runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model);
-    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
-    metrics_.exposure_mode =
-        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
+    metrics_.geometry_mode = runtime_geometry_public_model_locked();
+    metrics_.alignment_mode = runtime_alignment_truth_locked();
+    metrics_.seam_mode = runtime_seam_truth_locked();
+    metrics_.exposure_mode = runtime_exposure_truth_locked();
     metrics_.geometry_artifact_path = runtime_geometry_source_path_;
-    metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
+    metrics_.geometry_artifact_model = runtime_geometry_artifact_truth_locked();
     metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
     metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
     metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
@@ -3955,21 +4145,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
             metrics_.production_output_width = 0;
             metrics_.production_output_height = 0;
         }
-        metrics_.geometry_mode = runtime_geometry_.model;
-        metrics_.alignment_mode = runtime_geometry_.alignment_model;
-        metrics_.seam_mode = "dynamic-path";
-        metrics_.exposure_mode =
-            (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
-        metrics_.geometry_artifact_path = runtime_geometry_source_path_;
-        metrics_.geometry_artifact_model = runtime_geometry_.model;
-        metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
-        metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
-        metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
-        metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
-        metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
-        metrics_.exposure_gain = last_exposure_gain_;
-        metrics_.exposure_bias = last_exposure_bias_;
-        metrics_.blend_mode = metrics_.seam_mode;
+        apply_runtime_geometry_to_metrics_locked();
         metrics_.status = "calibrated";
         return true;
     }
@@ -4004,21 +4180,7 @@ bool StitchEngine::ensure_calibration_locked(const cv::Size& left_size, const cv
         metrics_.production_output_width = 0;
         metrics_.production_output_height = 0;
     }
-    metrics_.geometry_mode = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.alignment_mode = runtime_geometry_.alignment_model.empty() ? "homography" : runtime_geometry_.alignment_model;
-    metrics_.seam_mode = (runtime_geometry_.model == "cylindrical-affine") ? "dynamic-path" : "seam_feather";
-    metrics_.exposure_mode =
-        (runtime_geometry_.model == "cylindrical-affine" && runtime_geometry_.exposure_enabled) ? "gain-bias" : "off";
-    metrics_.geometry_artifact_path = runtime_geometry_source_path_;
-    metrics_.geometry_artifact_model = runtime_geometry_.model.empty() ? "planar-homography" : runtime_geometry_.model;
-    metrics_.cylindrical_focal_px = runtime_geometry_.left_focal_px;
-    metrics_.cylindrical_center_x = runtime_geometry_.left_center_x;
-    metrics_.cylindrical_center_y = runtime_geometry_.left_center_y;
-    metrics_.residual_alignment_error_px = last_residual_alignment_error_px_;
-    metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
-    metrics_.exposure_gain = last_exposure_gain_;
-    metrics_.exposure_bias = last_exposure_bias_;
-    metrics_.blend_mode = metrics_.seam_mode;
+    apply_runtime_geometry_to_metrics_locked();
     metrics_.status = "calibrated";
     return true;
 }
@@ -4240,6 +4402,8 @@ bool StitchEngine::stitch_pair_locked(
     cv::Mat left_corrected_cpu;
     cv::Mat right_corrected_cpu;
     bool used_gpu_blend = false;
+    bool used_gpu_geometry = false;
+    bool gpu_output_frame_ready = false;
     bool used_dynamic_seam = false;
     bool used_exposure_compensation = false;
     const bool cylindrical_runtime = runtime_geometry_.model == "cylindrical-affine";
@@ -4247,11 +4411,6 @@ bool StitchEngine::stitch_pair_locked(
     if (rectilinear_runtime) {
         if (!gpu_available_) {
             metrics_.status = "virtual_center_rectilinear_requires_gpu";
-            metrics_.stitch_fps = 0.0;
-            return false;
-        }
-        if (need_cpu_stitched) {
-            metrics_.status = "virtual_center_rectilinear_rejects_cpu_output";
             metrics_.stitch_fps = 0.0;
             return false;
         }
@@ -4603,50 +4762,79 @@ bool StitchEngine::stitch_pair_locked(
                 metrics_.gpu_warp_count += 1;
                 cached_right_warped_seq_ = selected_pair.right_seq;
             }
-            if (sample_heavy_metrics) {
+            used_gpu_geometry = true;
+            if (rectilinear_runtime) {
+                gpu_left_canvas_.download(canvas_left);
                 gpu_right_warped_.download(warped_right);
-                metrics_.warped_mean_luma = mean_luma(warped_right);
-            }
-
-            gpu_stitched_.create(output_size_, CV_8UC3);
-            gpu_stitched_.setTo(cv::Scalar::all(0));
-            gpu_left_canvas_.copyTo(gpu_stitched_, gpu_only_left_mask_);
-            gpu_right_warped_.copyTo(gpu_stitched_, gpu_only_right_mask_);
-
-            if (overlap_roi_.area() > 0) {
-                cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
-                cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
-                cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
-
-                cv::cuda::GpuMat left_overlap_f;
-                cv::cuda::GpuMat right_overlap_f;
-                left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
-                right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
-
-                std::vector<cv::cuda::GpuMat> left_channels;
-                std::vector<cv::cuda::GpuMat> right_channels;
-                std::vector<cv::cuda::GpuMat> blended_channels(3);
-                cv::cuda::split(left_overlap_f, left_channels);
-                cv::cuda::split(right_overlap_f, right_channels);
-                for (int channel = 0; channel < 3; ++channel) {
-                    cv::cuda::GpuMat left_part;
-                    cv::cuda::GpuMat right_part;
-                    cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
-                    cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
-                    cv::cuda::add(left_part, right_part, blended_channels[channel]);
+                if (!compose_stitched_video_quality_locked(
+                        canvas_left,
+                        warped_right,
+                        &stitched,
+                        &used_exposure_compensation,
+                        &used_dynamic_seam)) {
+                    throw cv::Exception(
+                        cv::Error::StsError,
+                        "virtual-center stitched-video quality compose failed",
+                        __FUNCTION__,
+                        __FILE__,
+                        __LINE__);
+                }
+                try {
+                    gpu_stitched_.upload(stitched);
+                    gpu_output_frame_ready = !gpu_stitched_.empty();
+                } catch (const cv::Exception& upload_error) {
+                    metrics_.gpu_errors += 1;
+                    metrics_.gpu_reason =
+                        std::string("virtual-center cropped stitch upload failed: ") + upload_error.what();
+                    gpu_stitched_.release();
+                    gpu_output_frame_ready = false;
+                }
+            } else {
+                if (sample_heavy_metrics) {
+                    gpu_right_warped_.download(warped_right);
+                    metrics_.warped_mean_luma = mean_luma(warped_right);
                 }
 
-                cv::cuda::merge(blended_channels, gpu_overlap_f_);
-                gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
-                gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
-            }
+                gpu_stitched_.create(output_size_, CV_8UC3);
+                gpu_stitched_.setTo(cv::Scalar::all(0));
+                gpu_left_canvas_.copyTo(gpu_stitched_, gpu_only_left_mask_);
+                gpu_right_warped_.copyTo(gpu_stitched_, gpu_only_right_mask_);
 
-            if (need_cpu_stitched) {
-                gpu_stitched_.download(stitched);
+                if (overlap_roi_.area() > 0) {
+                    cv::cuda::GpuMat left_overlap_u8(gpu_left_canvas_, overlap_roi_);
+                    cv::cuda::GpuMat right_overlap_u8(gpu_right_warped_, overlap_roi_);
+                    cv::cuda::GpuMat stitched_overlap_u8(gpu_stitched_, overlap_roi_);
+
+                    cv::cuda::GpuMat left_overlap_f;
+                    cv::cuda::GpuMat right_overlap_f;
+                    left_overlap_u8.convertTo(left_overlap_f, CV_32FC3);
+                    right_overlap_u8.convertTo(right_overlap_f, CV_32FC3);
+
+                    std::vector<cv::cuda::GpuMat> left_channels;
+                    std::vector<cv::cuda::GpuMat> right_channels;
+                    std::vector<cv::cuda::GpuMat> blended_channels(3);
+                    cv::cuda::split(left_overlap_f, left_channels);
+                    cv::cuda::split(right_overlap_f, right_channels);
+                    for (int channel = 0; channel < 3; ++channel) {
+                        cv::cuda::GpuMat left_part;
+                        cv::cuda::GpuMat right_part;
+                        cv::cuda::multiply(left_channels[channel], gpu_weight_left_roi_, left_part);
+                        cv::cuda::multiply(right_channels[channel], gpu_weight_right_roi_, right_part);
+                        cv::cuda::add(left_part, right_part, blended_channels[channel]);
+                    }
+
+                    cv::cuda::merge(blended_channels, gpu_overlap_f_);
+                    gpu_overlap_f_.convertTo(gpu_overlap_u8_, CV_8UC3);
+                    gpu_overlap_u8_.copyTo(stitched_overlap_u8, gpu_overlap_mask_roi_);
+                }
+
+                if (need_cpu_stitched) {
+                    gpu_stitched_.download(stitched);
+                }
+                metrics_.gpu_blend_count += 1;
+                metrics_.overlap_diff_mean = 0.0;
+                used_gpu_blend = true;
             }
-            metrics_.gpu_blend_count += 1;
-            metrics_.overlap_diff_mean = 0.0;
-            used_gpu_blend = true;
         } catch (const cv::Exception& e) {
             if (rectilinear_runtime) {
                 metrics_.gpu_errors += 1;
@@ -4661,7 +4849,7 @@ bool StitchEngine::stitch_pair_locked(
         }
     }
 
-    if (!used_gpu_blend) {
+    if (!used_gpu_blend && stitched.empty()) {
         if (gpu_only_mode) {
             metrics_.status = "gpu_only_path_unavailable";
             metrics_.stitch_fps = 0.0;
@@ -4752,58 +4940,16 @@ bool StitchEngine::stitch_pair_locked(
                 cached_right_warped_seq_ = selected_pair.right_seq;
             }
 
-            cv::Mat compensated_right = warped_right;
-            double exposure_gain = 1.0;
-            double exposure_bias = 0.0;
-            if (!runtime_geometry_.exposure_enabled) {
-                last_exposure_gain_ = exposure_gain;
-                last_exposure_bias_ = exposure_bias;
-            } else if (!compute_exposure_compensation_locked(
-                           canvas_left,
-                           warped_right,
-                           overlap_mask_,
-                           &compensated_right,
-                           &exposure_gain,
-                           &exposure_bias)) {
-                compensated_right = warped_right;
+            if (!compose_stitched_video_quality_locked(
+                    canvas_left,
+                    warped_right,
+                    &stitched,
+                    &used_exposure_compensation,
+                    &used_dynamic_seam)) {
+                metrics_.status = "dynamic_seam_compose_failed";
+                metrics_.stitch_fps = 0.0;
+                return false;
             }
-            last_exposure_gain_ = exposure_gain;
-            last_exposure_bias_ = exposure_bias;
-            metrics_.exposure_gain = exposure_gain;
-            metrics_.exposure_bias = exposure_bias;
-
-            std::vector<int> seam_path;
-            if (!build_dynamic_seam_path_locked(canvas_left, compensated_right, overlap_mask_, &seam_path)) {
-                seam_path.assign(output_size_.height, output_size_.width / 2);
-            }
-            update_seam_path_jitter_locked(seam_path);
-            metrics_.seam_path_jitter_px = last_seam_path_jitter_px_;
-
-            stitched = cv::Mat::zeros(output_size_, CV_8UC3);
-            blend_with_dynamic_seam_locked(
-                canvas_left,
-                compensated_right,
-                left_mask_template_,
-                right_mask_template_,
-                seam_path,
-                runtime_geometry_.seam_transition_px,
-                &stitched);
-            metrics_.warped_mean_luma = mean_luma(compensated_right);
-            if (cv::countNonZero(overlap_mask_) > 0) {
-                cv::Mat left_gray;
-                cv::Mat right_gray;
-                cv::Mat abs_diff;
-                cv::cvtColor(canvas_left, left_gray, cv::COLOR_BGR2GRAY);
-                cv::cvtColor(compensated_right, right_gray, cv::COLOR_BGR2GRAY);
-                cv::absdiff(left_gray, right_gray, abs_diff);
-                metrics_.overlap_diff_mean = cv::mean(abs_diff, overlap_mask_)[0];
-            } else {
-                metrics_.overlap_diff_mean = 0.0;
-            }
-            metrics_.cpu_blend_count += 1;
-            metrics_.blend_mode = "dynamic-path";
-            used_dynamic_seam = true;
-            used_exposure_compensation = runtime_geometry_.exposure_enabled;
         } else {
         if (left_cpu_frame.empty()) {
             if (selected_pair.left_seq > 0 &&
@@ -4945,13 +5091,21 @@ bool StitchEngine::stitch_pair_locked(
         metrics_.exposure_gain = 1.0;
         metrics_.exposure_bias = 0.0;
     }
-    metrics_.seam_mode = used_dynamic_seam ? "dynamic-path" : "seam_feather";
-    metrics_.blend_mode = metrics_.seam_mode;
+    metrics_.seam_mode = used_dynamic_seam ? "min-cost-seam" : "seam_feather";
+    metrics_.blend_mode = used_dynamic_seam ? "narrow-seam-feather" : "seam_feather";
     metrics_.exposure_mode = used_exposure_compensation ? "gain-bias" : "off";
-    metrics_.gpu_feature_enabled = used_gpu_blend;
-    metrics_.gpu_feature_reason = used_gpu_blend
-        ? "gpu-resident stitch path active"
-        : (gpu_only_mode ? "gpu-only mode blocked CPU fallback" : "cpu stitch fallback active");
+    metrics_.gpu_feature_enabled = used_gpu_blend || used_gpu_geometry || gpu_output_frame_ready;
+    if (used_dynamic_seam && (used_gpu_geometry || gpu_output_frame_ready)) {
+        metrics_.gpu_feature_reason = "gpu remap with stitched-video postprocess active";
+    } else if (used_gpu_blend) {
+        metrics_.gpu_feature_reason = "gpu-resident stitch path active";
+    } else if (used_gpu_geometry || gpu_output_frame_ready) {
+        metrics_.gpu_feature_reason = "gpu-assisted stitch path active";
+    } else {
+        metrics_.gpu_feature_reason = gpu_only_mode
+            ? "gpu-only mode blocked CPU fallback"
+            : "cpu stitch fallback active";
+    }
     if (last_worker_timestamp_ns_ > 0) {
         metrics_.stitch_fps = fps_from_period_ns(pair_ts_ns - last_worker_timestamp_ns_);
     } else {
@@ -4976,6 +5130,8 @@ bool StitchEngine::stitch_pair_locked(
         }
         cv::Mat prepared_frame;
         const cv::cuda::GpuMat* prepared_gpu_frame = nullptr;
+        const cv::cuda::GpuMat* stitched_gpu_source =
+            ((used_gpu_blend || gpu_output_frame_ready) && !gpu_stitched_.empty()) ? &gpu_stitched_ : nullptr;
         const auto output_caps = hogak::output::get_output_runtime_capabilities(output_config.runtime);
         if (gpu_only_mode &&
             (output_config.debug_overlay || output_caps.requires_cpu_input || !output_caps.supports_gpu_input)) {
@@ -4988,7 +5144,7 @@ bool StitchEngine::stitch_pair_locked(
         const bool prepared_ok = prepare_output_frame_locked(
             output_config,
             stitched,
-            used_gpu_blend ? &gpu_stitched_ : nullptr,
+            stitched_gpu_source,
             needs_cpu_prepared_frame ? &prepared_frame : nullptr,
             &prepared_gpu_frame);
         const cv::Mat* cpu_submit_frame = nullptr;
@@ -5002,8 +5158,8 @@ bool StitchEngine::stitch_pair_locked(
             }
         } else {
             cpu_submit_frame = &stitched;
-            if (used_gpu_blend && !gpu_stitched_.empty()) {
-                gpu_submit_frame = &gpu_stitched_;
+            if (stitched_gpu_source != nullptr) {
+                gpu_submit_frame = stitched_gpu_source;
             }
         }
         cv::Mat annotated_frame;

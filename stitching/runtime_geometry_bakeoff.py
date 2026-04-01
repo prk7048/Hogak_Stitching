@@ -618,6 +618,133 @@ def _mesh_payload(mesh_field: MeshField | None) -> dict[str, Any]:
     }
 
 
+def _requested_residual_model(candidate_model: str) -> str:
+    candidate_model = str(candidate_model or "").strip()
+    if candidate_model.endswith("-mesh"):
+        return "mesh"
+    if candidate_model == "virtual-center-rectilinear-rigid":
+        return "rigid"
+    return "none"
+
+
+def _effective_residual_model(candidate_model: str, *, fallback_used: bool) -> str:
+    requested = _requested_residual_model(candidate_model)
+    if requested == "mesh" and bool(fallback_used):
+        return "rigid"
+    return requested
+
+
+def _residual_truth_fields(
+    *,
+    candidate_model: str,
+    fallback_used: bool,
+    status_detail: str = "",
+) -> dict[str, Any]:
+    requested = _requested_residual_model(candidate_model)
+    effective = _effective_residual_model(candidate_model, fallback_used=fallback_used)
+    degraded_to_rigid = requested == "mesh" and effective == "rigid"
+    detail = str(status_detail or "")
+    if not detail:
+        detail = "degraded-to-rigid" if degraded_to_rigid else "ready"
+    return {
+        "requested_residual_model": requested,
+        "effective_residual_model": effective,
+        "degraded_to_rigid": bool(degraded_to_rigid),
+        "fallback_used": bool(fallback_used),
+        "status_detail": detail,
+    }
+
+
+def _rollout_truth_fields(
+    *,
+    candidate_model: str,
+    fallback_used: bool,
+    status_detail: str = "",
+    rollout: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = _residual_truth_fields(
+        candidate_model=candidate_model,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+    )
+    rollout_payload = rollout or {}
+    degraded_reason = ""
+    if payload["degraded_to_rigid"]:
+        degraded_reason = "requested mesh degraded to rigid during bakeoff"
+    launch_ready = bool(rollout_payload.get("launch_ready"))
+    launch_ready_reason = str(rollout_payload.get("launch_ready_reason") or "").strip()
+    if degraded_reason:
+        launch_ready_reason = (
+            f"{launch_ready_reason}; {degraded_reason}" if launch_ready_reason else degraded_reason
+        )
+    geometry_rollout_status = str(rollout_payload.get("geometry_rollout_status") or "").strip()
+    payload.update(
+        {
+            "runtime_launch_ready": launch_ready,
+            "runtime_launch_ready_reason": launch_ready_reason,
+            "geometry_rollout_status": geometry_rollout_status,
+            "launch_compatible": launch_ready,
+            "launch_compatibility_reason": launch_ready_reason,
+        }
+    )
+    return payload
+
+
+def _build_artifact_metadata(
+    metadata: dict[str, Any] | None,
+    *,
+    candidate_model: str,
+    fallback_used: bool,
+    status_detail: str = "",
+    rollout: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    payload = dict(metadata or {})
+    if rollout is None:
+        payload.update(
+            _residual_truth_fields(
+                candidate_model=candidate_model,
+                fallback_used=fallback_used,
+                status_detail=status_detail,
+            )
+        )
+    else:
+        payload.update(
+            _rollout_truth_fields(
+                candidate_model=candidate_model,
+                fallback_used=fallback_used,
+                status_detail=status_detail,
+                rollout=rollout,
+            )
+        )
+    return payload
+
+
+def _stamp_runtime_artifact_metadata(
+    artifact_path: Path | None,
+    *,
+    candidate_model: str,
+    fallback_used: bool,
+    status_detail: str = "",
+    rollout: dict[str, Any] | None = None,
+) -> None:
+    if artifact_path is None:
+        return
+    path = Path(artifact_path)
+    if not path.exists():
+        return
+    artifact = load_runtime_geometry_artifact(path)
+    if not isinstance(artifact, dict):
+        return
+    artifact["metadata"] = _build_artifact_metadata(
+        artifact.get("metadata") if isinstance(artifact.get("metadata"), dict) else {},
+        candidate_model=candidate_model,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+        rollout=rollout,
+    )
+    save_runtime_geometry_artifact(path, artifact)
+
+
 def _build_homography_inverse_maps(width: int, height: int, inverse_homography: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float64), np.arange(height, dtype=np.float64))
     homogeneous = np.stack([grid_x, grid_y, np.ones((height, width), dtype=np.float64)], axis=-1)
@@ -651,7 +778,14 @@ def _compose_candidate_outputs(
     if instability is not None and instability.shape[:2] == cost_map.shape[:2]:
         cost_map = cost_map + (0.35 * instability.astype(np.float32))
     seam_path = _find_seam_path(overlap, cost_map, smoothness_penalty=4.0, temporal_penalty=0.0)
-    stitched_uncropped = _blend_seam_path(left_canvas, right_adjusted, left_mask, right_mask, seam_path, transition_px=max(24, int(transition_px)))
+    stitched_uncropped = _blend_seam_path(
+        left_canvas,
+        right_adjusted,
+        left_mask,
+        right_mask,
+        seam_path,
+        transition_px=max(24, int(transition_px)),
+    )
     valid_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8)
     crop_x, crop_y, crop_w, crop_h = _largest_valid_rect(valid_mask)
     stitched_cropped = stitched_uncropped[crop_y : crop_y + crop_h, crop_x : crop_x + crop_w].copy()
@@ -660,7 +794,10 @@ def _compose_candidate_outputs(
     seam_visibility = 0.0
     valid_rows = np.where(np.any(overlap, axis=1))[0]
     if valid_rows.size > 0:
-        samples = [float(cost_map[int(row), int(np.clip(seam_path[int(row)], 0, cost_map.shape[1] - 1))]) for row in valid_rows.tolist()]
+        samples = [
+            float(cost_map[int(row), int(np.clip(seam_path[int(row)], 0, cost_map.shape[1] - 1))])
+            for row in valid_rows.tolist()
+        ]
         seam_visibility = float(np.mean(samples)) if samples else 0.0
     crop_ratio = float((crop_w * crop_h) / max(1, stitched_uncropped.shape[0] * stitched_uncropped.shape[1]))
     return {
@@ -1091,9 +1228,17 @@ def _build_candidate_runtime_artifact(
     output_resolution: tuple[int, int],
     virtual_solution: Any | None,
     mesh_field: MeshField | None = None,
+    fallback_used: bool = False,
+    status_detail: str = "",
 ) -> Path | None:
     homography_file = _build_shared_homography_path(bundle_dir)
     geometry_path = bundle_dir / candidate_model / "runtime_geometry.json"
+    artifact_metadata = _build_artifact_metadata(
+        metadata,
+        candidate_model=candidate_model,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+    )
     _save_homography_file(
         homography_file,
         np.asarray(homography, dtype=np.float64),
@@ -1105,7 +1250,7 @@ def _build_candidate_runtime_artifact(
             source_homography_file=homography_file,
             geometry_file=geometry_path,
             homography=np.asarray(homography, dtype=np.float64),
-            metadata=metadata,
+            metadata=artifact_metadata,
             distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
             left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
             right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
@@ -1128,7 +1273,7 @@ def _build_candidate_runtime_artifact(
             source_homography_file=homography_file,
             geometry_file=geometry_path,
             homography=np.asarray(homography, dtype=np.float64),
-            metadata=metadata,
+            metadata=artifact_metadata,
             distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
             left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
             right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
@@ -1152,7 +1297,7 @@ def _build_candidate_runtime_artifact(
             source_homography_file=homography_file,
             geometry_file=geometry_path,
             homography=np.asarray(homography, dtype=np.float64),
-            metadata=metadata,
+            metadata=artifact_metadata,
             distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
             left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
             right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
@@ -1188,7 +1333,7 @@ def _build_candidate_runtime_artifact(
             source_homography_file=homography_file,
             geometry_file=geometry_path,
             homography=np.asarray(homography, dtype=np.float64),
-            metadata=metadata,
+            metadata=artifact_metadata,
             distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
             left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
             right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
@@ -1245,15 +1390,22 @@ def _render_left_anchor_candidate(
         np.asarray(spec["left_canvas_points"], dtype=np.float64),
         np.asarray(spec["right_aligned_points"], dtype=np.float64),
     )
+    residual_truth = _residual_truth_fields(
+        candidate_model=candidate_model,
+        fallback_used=bool(spec["fallback_used"]),
+        status_detail=str(spec["status"] or ""),
+    )
     return {
         "model": candidate_model,
         "global_model": "H_right_to_left",
         "residual_model": "mesh" if candidate_model.endswith("-mesh") else "none",
+        **residual_truth,
         "projection_model": "left-image-plane",
         "exposure_model": "gain-bias-luma",
         "seam_model": "min-cost-seam",
         "blend_model": "narrow-seam-feather",
         "crop_model": "largest-valid-interior-rectangle",
+        "render_pipeline": "stitched-video-quality",
         "mean_reprojection_error_px": mean_error_px,
         "vertical_misalignment_p90_px": vertical_p90,
         "overlap_luma_diff": float(outputs["overlap_luma_diff"]),
@@ -1264,7 +1416,6 @@ def _render_left_anchor_candidate(
         "mesh_max_local_scale_drift": float(spec["mesh_max_local_scale_drift"]),
         "mesh_max_local_rotation_drift": float(spec["mesh_max_local_rotation_drift"]),
         "status": str(spec["status"]),
-        "fallback_used": bool(spec["fallback_used"]),
         "crop_rect": list(outputs["crop_rect"]),
         "stitched_uncropped": outputs["stitched_uncropped"],
         "stitched_preview": outputs["stitched_cropped"],
@@ -1298,15 +1449,22 @@ def _render_virtual_center_candidate(
         np.asarray(spec["left_virtual_points"], dtype=np.float64),
         np.asarray(spec["right_aligned_points"], dtype=np.float64),
     )
+    residual_truth = _residual_truth_fields(
+        candidate_model=candidate_model,
+        fallback_used=bool(spec["fallback_used"]),
+        status_detail=str(spec["status"] or ""),
+    )
     return {
         "model": candidate_model,
         "global_model": "common-virtual-plane-reprojection",
         "residual_model": "mesh" if candidate_model.endswith("-mesh") else "rigid",
+        **residual_truth,
         "projection_model": "virtual-center-rectilinear",
         "exposure_model": "gain-bias-luma",
         "seam_model": "min-cost-seam",
         "blend_model": "narrow-seam-feather",
         "crop_model": "largest-valid-interior-rectangle",
+        "render_pipeline": "stitched-video-quality",
         "mean_reprojection_error_px": mean_error_px,
         "vertical_misalignment_p90_px": vertical_p90,
         "overlap_luma_diff": float(outputs["overlap_luma_diff"]),
@@ -1317,7 +1475,6 @@ def _render_virtual_center_candidate(
         "mesh_max_local_scale_drift": float(spec["mesh_max_local_scale_drift"]),
         "mesh_max_local_rotation_drift": float(spec["mesh_max_local_rotation_drift"]),
         "status": str(spec["status"]),
-        "fallback_used": bool(spec["fallback_used"]),
         "crop_rect": list(outputs["crop_rect"]),
         "stitched_uncropped": outputs["stitched_uncropped"],
         "stitched_preview": outputs["stitched_cropped"],
@@ -1457,6 +1614,8 @@ def run_geometry_bakeoff(
             output_resolution=output_resolution,
             virtual_solution=virtual_solution,
             mesh_field=spec.get("mesh_field"),
+            fallback_used=bool(spec.get("fallback_used")),
+            status_detail=str(spec.get("status") or ""),
         )
         rollout = {}
         if runtime_artifact_path is not None and runtime_artifact_path.exists():
@@ -1464,6 +1623,13 @@ def run_geometry_bakeoff(
                 rollout = geometry_rollout_metadata(load_runtime_geometry_artifact(runtime_artifact_path))
             except Exception:
                 rollout = {}
+            _stamp_runtime_artifact_metadata(
+                runtime_artifact_path,
+                candidate_model=candidate_model,
+                fallback_used=bool(spec.get("fallback_used")),
+                status_detail=str(spec.get("status") or ""),
+                rollout=rollout,
+            )
         candidate_dir = bakeoff_root / candidate_model
         candidate_dir.mkdir(parents=True, exist_ok=True)
         _write_png(candidate_dir / "stitched_preview.png", metadata.pop("stitched_preview"))
@@ -1472,6 +1638,14 @@ def run_geometry_bakeoff(
         _write_png(candidate_dir / "seam_debug.png", metadata.pop("seam_debug"))
         spec["video_crop_rect"] = tuple(int(value) for value in metadata.get("crop_rect") or [0, 0, output_resolution[0], output_resolution[1]])
         candidate_specs[candidate_model] = spec
+        metadata.update(
+            _rollout_truth_fields(
+                candidate_model=candidate_model,
+                fallback_used=bool(spec.get("fallback_used")),
+                status_detail=str(spec.get("status") or ""),
+                rollout=rollout,
+            )
+        )
         metadata.update(
             {
                 "good_match_count": int(calibration_result.get("matches_count") or 0),
@@ -1488,9 +1662,6 @@ def run_geometry_bakeoff(
                 ),
                 "candidate_dir": str(candidate_dir),
                 "runtime_artifact_path": str(runtime_artifact_path) if runtime_artifact_path is not None else "",
-                "runtime_launch_ready": bool(rollout.get("launch_ready")),
-                "runtime_launch_ready_reason": str(rollout.get("launch_ready_reason") or ""),
-                "geometry_rollout_status": str(rollout.get("geometry_rollout_status") or ""),
                 "stitched_preview_path": str(candidate_dir / "stitched_preview.png"),
                 "stitched_uncropped_path": str(candidate_dir / "stitched_uncropped.png"),
                 "overlap_crop_path": str(candidate_dir / "overlap_crop.png"),
@@ -1615,15 +1786,23 @@ def _build_active_mesh_runtime_artifact(
     output_resolution: tuple[int, int],
     virtual_solution: Any,
     mesh_field: MeshField | None,
+    fallback_used: bool = False,
+    status_detail: str = "",
 ) -> dict[str, Any]:
     active_homography_path, active_geometry_path = _resolve_active_runtime_paths()
     active_homography_path.parent.mkdir(parents=True, exist_ok=True)
     active_geometry_path.parent.mkdir(parents=True, exist_ok=True)
 
+    artifact_metadata = _build_artifact_metadata(
+        dict(calibration_result.get("metadata") or {}),
+        candidate_model=INTERNAL_MESH_REFRESH_MODEL,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+    )
     _save_homography_file(
         active_homography_path,
         np.asarray(homography, dtype=np.float64),
-        dict(calibration_result.get("metadata") or {}),
+        artifact_metadata,
         distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
     )
 
@@ -1631,7 +1810,7 @@ def _build_active_mesh_runtime_artifact(
         source_homography_file=active_homography_path,
         geometry_file=active_geometry_path,
         homography=np.asarray(homography, dtype=np.float64),
-        metadata=dict(calibration_result.get("metadata") or {}),
+        metadata=artifact_metadata,
         distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
         left_resolution=(int(calibration_result["left_frame"].shape[1]), int(calibration_result["left_frame"].shape[0])),
         right_resolution=(int(calibration_result["right_frame"].shape[1]), int(calibration_result["right_frame"].shape[0])),
@@ -1668,7 +1847,7 @@ def _build_active_mesh_runtime_artifact(
     _save_homography_file(
         snapshot_homography_path,
         np.asarray(homography, dtype=np.float64),
-        dict(calibration_result.get("metadata") or {}),
+        artifact_metadata,
         distortion_reference=str(calibration_result.get("distortion_reference") or "raw"),
     )
     artifact_snapshot = dict(artifact)
@@ -1679,6 +1858,20 @@ def _build_active_mesh_runtime_artifact(
     save_runtime_geometry_artifact(snapshot_geometry_path, artifact_snapshot)
 
     rollout = geometry_rollout_metadata(artifact)
+    _stamp_runtime_artifact_metadata(
+        active_geometry_path,
+        candidate_model=INTERNAL_MESH_REFRESH_MODEL,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+        rollout=rollout,
+    )
+    _stamp_runtime_artifact_metadata(
+        snapshot_geometry_path,
+        candidate_model=INTERNAL_MESH_REFRESH_MODEL,
+        fallback_used=fallback_used,
+        status_detail=status_detail,
+        rollout=rollout,
+    )
     return {
         "artifact": artifact,
         "rollout": rollout,
@@ -1732,8 +1925,16 @@ def run_mesh_refresh(
         output_resolution=output_resolution,
         virtual_solution=virtual_solution,
         mesh_field=spec.get("mesh_field"),
+        fallback_used=bool(spec.get("fallback_used")),
+        status_detail=str(spec.get("status") or ""),
     )
     rollout = dict(artifact_info["rollout"])
+    rollout_truth = _rollout_truth_fields(
+        candidate_model=INTERNAL_MESH_REFRESH_MODEL,
+        fallback_used=bool(spec.get("fallback_used")),
+        status_detail=str(spec.get("status") or ""),
+        rollout=rollout,
+    )
 
     manifest = {
         "status": "ready",
@@ -1743,9 +1944,7 @@ def run_mesh_refresh(
         "mesh_refresh_model": INTERNAL_MESH_REFRESH_MODEL,
         "geometry_artifact_model": str(rollout.get("geometry_model") or ""),
         "geometry_residual_model": str(rollout.get("geometry_residual_model") or ""),
-        "geometry_rollout_status": str(rollout.get("geometry_rollout_status") or ""),
-        "runtime_launch_ready": bool(rollout.get("launch_ready")),
-        "runtime_launch_ready_reason": str(rollout.get("launch_ready_reason") or ""),
+        **rollout_truth,
         "representative_frame_index": int(representative_index),
         "clip_frame_count": int(len(clip)),
         "mesh_refresh_calibration_mode": str(calibration_result.get("bakeoff_calibration_mode") or "strict"),
@@ -1843,9 +2042,16 @@ class MeshRefreshService:
                 "mesh_refresh_model": "",
                 "geometry_artifact_model": "",
                 "geometry_residual_model": "",
+                "requested_residual_model": "",
+                "effective_residual_model": "",
+                "degraded_to_rigid": False,
+                "fallback_used": False,
+                "status_detail": "",
                 "geometry_rollout_status": "",
                 "runtime_launch_ready": False,
                 "runtime_launch_ready_reason": "",
+                "launch_compatible": False,
+                "launch_compatibility_reason": "",
             }
         return manifest
 

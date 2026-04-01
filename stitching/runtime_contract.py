@@ -5,9 +5,12 @@ import json
 from typing import Any, Literal
 
 from stitching.runtime_geometry_artifact import (
+    runtime_geometry_effective_residual_model,
+    runtime_geometry_mesh_contract_ready,
+    runtime_geometry_mesh_fallback_used,
     load_runtime_geometry_artifact,
     runtime_geometry_model,
-    runtime_geometry_residual_model,
+    runtime_geometry_requested_residual_model,
 )
 
 
@@ -250,17 +253,46 @@ def _require_int(value: Any, *, field_name: str) -> int:
 
 
 def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = None) -> dict[str, Any]:
+    requested_residual = ""
+    effective_residual = ""
+    mesh_requested = False
+    mesh_contract_ready = False
+    mesh_fallback_used = False
     if isinstance(geometry_model, dict):
         artifact = geometry_model
         model = runtime_geometry_model(artifact)
-        residual = runtime_geometry_residual_model(artifact)
+        requested_residual = runtime_geometry_requested_residual_model(artifact)
+        effective_residual = runtime_geometry_effective_residual_model(artifact)
+        mesh_requested = requested_residual == "mesh"
+        mesh_contract_ready = runtime_geometry_mesh_contract_ready(artifact)
+        mesh_fallback_used = runtime_geometry_mesh_fallback_used(artifact)
     else:
         model = "" if geometry_model is None else str(geometry_model).strip()
-        residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
-    mesh_default = model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL and residual == "mesh"
-    internal_default_fallback = model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL and residual != "mesh"
+        requested_residual = "" if residual_model is None else str(residual_model).strip().lower().replace("_", "-")
+        effective_residual = requested_residual
+        mesh_requested = requested_residual == "mesh"
+        mesh_contract_ready = mesh_requested
+    mesh_default = (
+        model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
+        and effective_residual == "mesh"
+        and mesh_contract_ready
+    )
+    mesh_requested_but_not_launch_ready = (
+        model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
+        and mesh_requested
+        and not mesh_default
+    )
+    internal_default_fallback = (
+        model == DEFAULT_RUNTIME_BASE_GEOMETRY_MODEL
+        and not mesh_requested_but_not_launch_ready
+        and not mesh_default
+    )
     operator_visible = mesh_default
-    fallback_only = internal_default_fallback or model in LEGACY_FALLBACK_GEOMETRY_MODELS
+    fallback_only = (
+        mesh_requested_but_not_launch_ready
+        or internal_default_fallback
+        or model in LEGACY_FALLBACK_GEOMETRY_MODELS
+    )
     compat_only = model in LEGACY_COMPAT_GEOMETRY_MODELS
 
     if mesh_default:
@@ -268,6 +300,14 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
         rollout_status = "default"
         launch_ready = True
         launch_ready_reason = "default launch-ready mesh geometry artifact"
+    elif mesh_requested_but_not_launch_ready:
+        public_model = INTERNAL_FALLBACK_GEOMETRY_MODEL
+        rollout_status = "internal-fallback"
+        launch_ready = False
+        if mesh_fallback_used:
+            launch_ready_reason = "mesh artifact degraded to rigid fallback; regenerate a valid mesh artifact before launch"
+        else:
+            launch_ready_reason = "mesh artifact is incomplete for runtime launch; regenerate a valid mesh artifact before launch"
     elif internal_default_fallback:
         public_model = INTERNAL_FALLBACK_GEOMETRY_MODEL
         rollout_status = "internal-fallback"
@@ -296,11 +336,14 @@ def geometry_rollout_metadata(geometry_model: Any, residual_model: Any | None = 
 
     return {
         "geometry_model": public_model,
-        "geometry_residual_model": residual or "-",
+        "geometry_requested_residual_model": requested_residual or "-",
+        "geometry_residual_model": effective_residual or "-",
         "geometry_rollout_status": rollout_status,
         "geometry_operator_visible": operator_visible,
         "geometry_fallback_only": fallback_only,
         "geometry_compat_only": compat_only,
+        "geometry_mesh_contract_ready": mesh_contract_ready,
+        "geometry_mesh_fallback_used": mesh_fallback_used,
         "launch_ready": launch_ready,
         "launch_ready_reason": launch_ready_reason,
     }

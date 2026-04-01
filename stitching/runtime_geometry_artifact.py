@@ -571,7 +571,7 @@ def runtime_geometry_model(artifact: dict[str, Any]) -> str:
     return _normalize_geometry_model(geometry.get("model") or "planar-homography")
 
 
-def runtime_geometry_residual_model(artifact: dict[str, Any]) -> str:
+def runtime_geometry_requested_residual_model(artifact: dict[str, Any]) -> str:
     geometry = artifact.get("geometry", {})
     if isinstance(geometry, dict):
         residual_model = geometry.get("residual_model")
@@ -582,6 +582,76 @@ def runtime_geometry_residual_model(artifact: dict[str, Any]) -> str:
     if isinstance(alignment, dict):
         return _normalize_residual_model(alignment.get("model"), geometry_model=geometry_model)
     return _normalize_residual_model(None, geometry_model=geometry_model)
+
+
+def _artifact_canvas_resolution(artifact: dict[str, Any]) -> tuple[int, int] | None:
+    canvas = artifact.get("canvas", {})
+    if isinstance(canvas, dict):
+        width = int(canvas.get("width") or 0)
+        height = int(canvas.get("height") or 0)
+        if width > 0 and height > 0:
+            return (width, height)
+    geometry = artifact.get("geometry", {})
+    if isinstance(geometry, dict):
+        output_resolution = geometry.get("output_resolution")
+        if isinstance(output_resolution, (list, tuple)) and len(output_resolution) >= 2:
+            width = int(output_resolution[0] or 0)
+            height = int(output_resolution[1] or 0)
+            if width > 0 and height > 0:
+                return (width, height)
+    return None
+
+
+def runtime_geometry_mesh_payload(artifact: dict[str, Any]) -> dict[str, Any]:
+    mesh = artifact.get("mesh", {})
+    if not isinstance(mesh, dict):
+        return {}
+    return _normalize_mesh_payload(mesh, canvas_resolution=_artifact_canvas_resolution(artifact))
+
+
+def runtime_geometry_mesh_fallback_used(artifact: dict[str, Any]) -> bool:
+    mesh_payload = runtime_geometry_mesh_payload(artifact)
+    return bool(mesh_payload.get("fallback_used"))
+
+
+def runtime_geometry_mesh_contract_ready(artifact: dict[str, Any]) -> bool:
+    if runtime_geometry_requested_residual_model(artifact) != "mesh":
+        return False
+    mesh_payload = runtime_geometry_mesh_payload(artifact)
+    if not mesh_payload or bool(mesh_payload.get("fallback_used")):
+        return False
+    grid_cols = max(0, int(mesh_payload.get("grid_cols") or 0))
+    grid_rows = max(0, int(mesh_payload.get("grid_rows") or 0))
+    if grid_cols <= 0 or grid_rows <= 0:
+        return False
+    expected_rows = grid_rows + 1
+    expected_cols = grid_cols + 1
+    control_x = mesh_payload.get("control_displacement_x")
+    control_y = mesh_payload.get("control_displacement_y")
+    if not isinstance(control_x, list) or not isinstance(control_y, list):
+        return False
+    if len(control_x) != expected_rows or len(control_y) != expected_rows:
+        return False
+    for row_x, row_y in zip(control_x, control_y):
+        if not isinstance(row_x, list) or not isinstance(row_y, list):
+            return False
+        if len(row_x) != expected_cols or len(row_y) != expected_cols:
+            return False
+    return True
+
+
+def runtime_geometry_effective_residual_model(artifact: dict[str, Any]) -> str:
+    requested_residual = runtime_geometry_requested_residual_model(artifact)
+    if requested_residual != "mesh":
+        return requested_residual
+    if runtime_geometry_mesh_contract_ready(artifact):
+        return "mesh"
+    geometry_model = runtime_geometry_model(artifact)
+    return _normalize_residual_model(None, geometry_model=geometry_model)
+
+
+def runtime_geometry_residual_model(artifact: dict[str, Any]) -> str:
+    return runtime_geometry_effective_residual_model(artifact)
 
 
 def runtime_geometry_alignment_matrix(artifact: dict[str, Any]) -> np.ndarray:
