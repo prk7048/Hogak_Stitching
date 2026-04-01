@@ -462,7 +462,7 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     merged_blocker = str(merged.get("blocker_reason") or "").strip()
     needs_mesh_refresh = _project_start_needs_mesh_refresh(merged)
     runtime_blocker = ""
-    if not needs_mesh_refresh:
+    if not needs_mesh_refresh and not bool(merged.get("runtime_launch_ready")):
         runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
     blocker_reason = config_blocker or merged_blocker or runtime_blocker
 
