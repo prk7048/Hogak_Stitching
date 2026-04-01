@@ -56,10 +56,10 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
     <title>Hogak 운영 화면 번들이 아직 준비되지 않았습니다</title>
     <style>
       :root {{
-        color-scheme: dark;
+        color-scheme: light;
         font-family: "Aptos", "Segoe UI", sans-serif;
-        background: linear-gradient(180deg, #0d131d 0%, #090c12 100%);
-        color: #f4f7ff;
+        background: linear-gradient(180deg, #f7fbf8 0%, #e8f0ee 100%);
+        color: #1c2a2c;
       }}
       body {{
         margin: 0;
@@ -71,9 +71,9 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
       main {{
         width: min(920px, 100%);
         border-radius: 24px;
-        border: 1px solid rgba(255,255,255,0.08);
-        background: rgba(12,18,28,0.88);
-        box-shadow: 0 26px 90px rgba(0,0,0,0.36);
+        border: 1px solid rgba(28,42,44,0.08);
+        background: rgba(255,255,255,0.92);
+        box-shadow: 0 26px 90px rgba(61,84,80,0.12);
         padding: 28px;
       }}
       h1 {{
@@ -81,7 +81,7 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
         font-size: clamp(2rem, 4vw, 3rem);
       }}
       p, li {{
-        color: #c8d4ea;
+        color: #5f7474;
         line-height: 1.65;
       }}
       code, pre {{
@@ -91,8 +91,8 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
         margin: 14px 0;
         padding: 14px 16px;
         border-radius: 16px;
-        background: rgba(255,255,255,0.05);
-        border: 1px solid rgba(255,255,255,0.06);
+        background: rgba(28,42,44,0.06);
+        border: 1px solid rgba(28,42,44,0.08);
         overflow-x: auto;
       }}
       .note {{
@@ -103,7 +103,7 @@ def _frontend_unavailable_html(frontend_path: Path) -> str:
         border: 1px solid rgba(89,157,255,0.18);
       }}
       a {{
-        color: #a9c8ff;
+        color: #3069b1;
       }}
     </style>
   </head>
