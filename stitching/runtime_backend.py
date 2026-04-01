@@ -271,26 +271,21 @@ def _merge_runtime_and_mesh_refresh_state(runtime_state: dict[str, Any], mesh_re
         merged.get("alignment_preview_ready") or merged.get("start_preview_ready")
     )
 
-    launch_ready_flags: list[bool] = []
-    if merged.get("runtime_launch_ready") is not None:
-        launch_ready_flags.append(bool(merged.get("runtime_launch_ready")))
-    if merged.get("launch_ready") is not None:
-        launch_ready_flags.append(bool(merged.get("launch_ready")))
-    if mesh_refresh.get("runtime_launch_ready") is not None:
-        launch_ready_flags.append(bool(mesh_refresh.get("runtime_launch_ready")))
-    if artifact_rollout is not None:
-        launch_ready_flags.append(bool(artifact_rollout.get("launch_ready")))
-    runtime_launch_ready = all(launch_ready_flags) if launch_ready_flags else False
-
+    runtime_launch_ready = False
     runtime_launch_ready_reason = ""
-    if artifact_rollout is not None and not bool(artifact_rollout.get("launch_ready")):
+    mesh_refresh_artifact_path = str(mesh_refresh.get("runtime_active_artifact_path") or "").strip()
+    if artifact_rollout is not None:
+        runtime_launch_ready = bool(artifact_rollout.get("launch_ready"))
         runtime_launch_ready_reason = str(artifact_rollout.get("launch_ready_reason") or "").strip()
-    elif merged.get("runtime_launch_ready_reason"):
-        runtime_launch_ready_reason = str(merged.get("runtime_launch_ready_reason") or "").strip()
-    elif merged.get("launch_ready_reason"):
-        runtime_launch_ready_reason = str(merged.get("launch_ready_reason") or "").strip()
-    elif mesh_refresh.get("runtime_launch_ready_reason"):
+    elif runtime_active_artifact_path and mesh_refresh_artifact_path == runtime_active_artifact_path:
+        runtime_launch_ready = bool(mesh_refresh.get("runtime_launch_ready"))
         runtime_launch_ready_reason = str(mesh_refresh.get("runtime_launch_ready_reason") or "").strip()
+    elif merged.get("runtime_launch_ready") is not None:
+        runtime_launch_ready = bool(merged.get("runtime_launch_ready"))
+        runtime_launch_ready_reason = str(merged.get("runtime_launch_ready_reason") or "").strip()
+    elif merged.get("launch_ready") is not None:
+        runtime_launch_ready = bool(merged.get("launch_ready"))
+        runtime_launch_ready_reason = str(merged.get("launch_ready_reason") or "").strip()
 
     fallback_used = bool(
         merged.get("fallback_used")
@@ -565,6 +560,19 @@ def _project_state(runtime_state: dict[str, Any], mesh_refresh_state: dict[str, 
     status_message = str(merged.get("project_status_message") or "").strip()
     merged_blocker = str(merged.get("blocker_reason") or "").strip()
     needs_mesh_refresh = _project_start_needs_mesh_refresh(merged)
+    if needs_mesh_refresh:
+        suppress_tokens = (
+            "launch-ready runtime geometry artifact",
+            "run mesh-refresh first",
+            "active rigid artifact",
+            "default runtime geometry artifact resolves to an internal fallback model",
+        )
+        normalized_last_error = last_error.lower()
+        normalized_merged_blocker = merged_blocker.lower()
+        if any(token in normalized_last_error for token in suppress_tokens):
+            last_error = ""
+        if any(token in normalized_merged_blocker for token in suppress_tokens):
+            merged_blocker = ""
     runtime_blocker = ""
     if not needs_mesh_refresh and not bool(merged.get("runtime_launch_ready")):
         runtime_blocker = str(merged.get("runtime_launch_ready_reason") or "").strip()
