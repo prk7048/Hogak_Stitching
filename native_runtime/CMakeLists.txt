@@ -139,7 +139,13 @@ find_package(OpenCV CONFIG REQUIRED COMPONENTS core imgproc imgcodecs calib3d cu
 add_library(
     stitch_engine_core
     STATIC
-    src/engine/stitch_engine.cpp
+    src/engine/input_pipeline.cpp
+    src/engine/metrics_pipeline.cpp
+    src/engine/output_pipeline.cpp
+    src/engine/pair_scheduler.cpp
+    src/engine/geometry_loader.cpp
+    src/engine/engine.cpp
+    src/engine/engine_execution.cpp
     src/input/ffmpeg_rtsp_reader.cpp
     src/output/ffmpeg_output_writer.cpp
     src/output/gpu_direct_support.cpp
@@ -168,12 +174,24 @@ endif()
 
 add_executable(
     stitch_runtime
-    src/app/runtime_main.cpp
+    src/app/operator_main.cpp
     src/control/control_server.cpp
+)
+
+add_executable(
+    stitch_capture
+    src/app/capture_main.cpp
 )
 
 target_include_directories(
     stitch_runtime
+    PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+
+target_include_directories(
+    stitch_capture
     PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -195,6 +213,8 @@ if(HOGAK_GPU_DIRECT_CUDA_RUNTIME_ENABLED)
         stitch_engine_core
         PRIVATE
         CUDA::cudart
+        CUDA::nppc
+        CUDA::nppicc
     )
 endif()
 
@@ -204,8 +224,20 @@ target_link_libraries(
     stitch_engine_core
 )
 
+target_link_libraries(
+    stitch_capture
+    PRIVATE
+    stitch_engine_core
+)
+
 if(MSVC AND NATIVE_RUNTIME_ENABLE_WARNINGS)
     target_compile_options(stitch_runtime PRIVATE /W4 /permissive-)
 elseif(NATIVE_RUNTIME_ENABLE_WARNINGS)
     target_compile_options(stitch_runtime PRIVATE -Wall -Wextra -Wpedantic)
+endif()
+
+if(MSVC AND NATIVE_RUNTIME_ENABLE_WARNINGS)
+    target_compile_options(stitch_capture PRIVATE /W4 /permissive-)
+elseif(NATIVE_RUNTIME_ENABLE_WARNINGS)
+    target_compile_options(stitch_capture PRIVATE -Wall -Wextra -Wpedantic)
 endif()

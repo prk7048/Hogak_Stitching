@@ -6,21 +6,8 @@
 
 namespace hogak::engine {
 
-struct LensCorrectionConfig {
-    bool enabled = false;
-    std::string source = "off";
-    std::string model = "opencv_pinhole";
-    std::string left_profile_file;
-    std::string right_profile_file;
-    std::string left_source_hint = "off";
-    std::string right_source_hint = "off";
-    std::string camera_model = "DH-IPC-HFW4841T-ZAS";
-    double horizontal_fov_deg = 0.0;
-    double vertical_fov_deg = 0.0;
-};
-
 struct ProjectionConfig {
-    std::string model = "cylindrical";
+    std::string model = "rectilinear";
     double focal_px = 0.0;
     double center_x = 0.0;
     double center_y = 0.0;
@@ -31,7 +18,7 @@ struct ProjectionConfig {
 };
 
 struct AlignmentConfig {
-    std::string model = "affine";
+    std::string model = "rigid";
     std::array<double, 9> matrix = {1.0, 0.0, 0.0,
                                     0.0, 1.0, 0.0,
                                     0.0, 0.0, 1.0};
@@ -39,7 +26,7 @@ struct AlignmentConfig {
 };
 
 struct SeamConfig {
-    std::string mode = "dynamic-path";
+    std::string mode = "fixed-seam";
     int32_t transition_px = 64;
     double smoothness_penalty = 4.0;
     double temporal_penalty = 2.0;
@@ -53,9 +40,8 @@ struct ExposureConfig {
 };
 
 struct GeometryRuntimeConfig {
-    std::string mode = "planar-homography";
+    std::string mode = "virtual-center-rectilinear-rigid";
     std::string artifact_file;
-    LensCorrectionConfig lens_correction;
     ProjectionConfig projection;
     AlignmentConfig alignment;
     SeamConfig seam;
@@ -97,18 +83,6 @@ struct EngineConfig {
     OutputConfig production_output;
     GeometryRuntimeConfig geometry;
     std::string ffmpeg_bin;
-    std::string homography_file;
-    std::string distortion_mode = "off";
-    bool use_saved_distortion = false;
-    bool distortion_auto_save = false;
-    std::string left_distortion_file = "data/runtime_distortion_left.json";
-    std::string right_distortion_file = "data/runtime_distortion_right.json";
-    std::string left_distortion_source_hint = "off";
-    std::string right_distortion_source_hint = "off";
-    std::string distortion_lens_model_hint = "pinhole";
-    double distortion_horizontal_fov_deg = 0.0;
-    double distortion_vertical_fov_deg = 0.0;
-    std::string distortion_camera_model = "DH-IPC-HFW4841T-ZAS";
     std::string input_runtime = "ffmpeg-cuda";
     std::string sync_pair_mode = "none";
     bool allow_frame_reuse = false;

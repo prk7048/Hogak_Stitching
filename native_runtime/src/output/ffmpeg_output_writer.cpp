@@ -326,9 +326,9 @@ bool FfmpegOutputWriter::start(
     return true;
 }
 
-void FfmpegOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timestamp_ns*/) {
+OutputSubmitResult FfmpegOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timestamp_ns*/) {
     if (!running_.load() || frame.empty()) {
-        return;
+        return OutputSubmitResult::kRejected;
     }
 
     cv::Mat cpu_frame;
@@ -344,20 +344,23 @@ void FfmpegOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timesta
         } catch (const cv::Exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             last_error_ = std::string("ffmpeg writer gpu download failed: ") + e.what();
-            return;
+            return OutputSubmitResult::kRejected;
         }
     }
     if (cpu_frame.empty()) {
-        return;
+        return OutputSubmitResult::kRejected;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    OutputSubmitResult result = OutputSubmitResult::kAccepted;
     if (frame_pending_) {
         frames_dropped_ += 1;
+        result = OutputSubmitResult::kAcceptedDropOldest;
     }
     latest_frame_ = std::move(cpu_frame);
     frame_pending_ = true;
     condition_.notify_one();
+    return result;
 }
 
 void FfmpegOutputWriter::stop() {
@@ -380,6 +383,19 @@ std::int64_t FfmpegOutputWriter::frames_written() const noexcept {
 std::int64_t FfmpegOutputWriter::frames_dropped() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return frames_dropped_;
+}
+
+std::int64_t FfmpegOutputWriter::pending_frames() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return frame_pending_ ? 1 : 0;
+}
+
+std::int64_t FfmpegOutputWriter::max_pending_frames() const noexcept {
+    return 1;
+}
+
+std::string FfmpegOutputWriter::drop_policy() const {
+    return "replace-pending";
 }
 
 std::string FfmpegOutputWriter::last_error() const {

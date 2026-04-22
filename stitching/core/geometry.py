@@ -12,28 +12,98 @@ def _estimate_homography(
     keypoints_right: list[cv2.KeyPoint],
     matches: list[cv2.DMatch],
     config: StitchConfig,
+    *,
+    left_shape: tuple[int, int] | None = None,
+    right_shape: tuple[int, int] | None = None,
+    method_candidates: list[tuple[str, int]] | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """RANSAC으로 호모그래피를 추정한다."""
 
     src_points = np.float32([keypoints_right[m.trainIdx].pt for m in matches]).reshape(-1, 1, 2)
     dst_points = np.float32([keypoints_left[m.queryIdx].pt for m in matches]).reshape(-1, 1, 2)
-    homography, inlier_mask = cv2.findHomography(
-        src_points,
-        dst_points,
-        cv2.RANSAC,
-        config.ransac_reproj_threshold,
-    )
+    if method_candidates is None:
+        method_candidates = []
+        seen_methods: set[int] = set()
+        for method_name, method_value in (
+            ("usac_magsac", getattr(cv2, "USAC_MAGSAC", None)),
+            ("usac_accurate", getattr(cv2, "USAC_ACCURATE", None)),
+            ("usac_default", getattr(cv2, "USAC_DEFAULT", None)),
+            ("ransac", cv2.RANSAC),
+            ("lmeds", cv2.LMEDS),
+        ):
+            if method_value is None:
+                continue
+            method_int = int(method_value)
+            if method_int in seen_methods:
+                continue
+            seen_methods.add(method_int)
+            method_candidates.append((str(method_name), method_int))
 
-    if homography is None or inlier_mask is None:
-        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "homography estimation returned null")
+    best_candidate: tuple[np.ndarray, np.ndarray] | None = None
+    best_rank: tuple[int, int, float, float] | None = None
+    last_null_method: str | None = None
+    last_inlier_failure: tuple[str, int] | None = None
 
-    inliers = int(inlier_mask.ravel().sum())
-    if inliers < config.min_inliers:
-        raise StitchingFailure(
-            ErrorCode.HOMOGRAPHY_FAIL,
-            f"inliers below threshold: {inliers} < {config.min_inliers}",
+    for method_name, method_value in method_candidates:
+        try:
+            homography, inlier_mask = cv2.findHomography(
+                src_points,
+                dst_points,
+                int(method_value),
+                config.ransac_reproj_threshold,
+            )
+        except cv2.error:
+            continue
+
+        if homography is None or inlier_mask is None:
+            last_null_method = str(method_name)
+            continue
+
+        inliers = int(inlier_mask.ravel().sum())
+        if inliers < config.min_inliers:
+            last_inlier_failure = (str(method_name), inliers)
+            continue
+
+        projected_points = cv2.perspectiveTransform(src_points, homography)
+        errors = np.linalg.norm(projected_points.reshape(-1, 2) - dst_points.reshape(-1, 2), axis=1)
+        inlier_values = inlier_mask.ravel().astype(bool)
+        mean_error = float(np.mean(errors[inlier_values])) if np.any(inlier_values) else float(np.mean(errors))
+
+        geometry_ok = 0
+        geometry_area = float("inf")
+        if left_shape is not None and right_shape is not None:
+            try:
+                plan = _prepare_warp_plan(left_shape, right_shape, homography, config)
+            except StitchingFailure:
+                geometry_ok = 0
+            else:
+                geometry_ok = 1
+                geometry_area = float(plan.width * plan.height)
+
+        candidate_rank = (
+            geometry_ok,
+            inliers,
+            -mean_error,
+            -geometry_area,
         )
-    return homography, inlier_mask
+        if best_rank is None or candidate_rank > best_rank:
+            best_rank = candidate_rank
+            best_candidate = (
+                np.asarray(homography, dtype=np.float64),
+                np.asarray(inlier_mask, dtype=np.uint8).reshape(-1, 1),
+            )
+
+    if best_candidate is None:
+        if last_inlier_failure is not None:
+            method_name, inliers = last_inlier_failure
+            raise StitchingFailure(
+                ErrorCode.HOMOGRAPHY_FAIL,
+                f"{method_name} inliers below threshold: {inliers} < {config.min_inliers}",
+            )
+        if last_null_method is not None:
+            raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, f"{last_null_method} homography estimation returned null")
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "homography estimation returned null")
+    return best_candidate
 
 
 def _estimate_affine_homography(

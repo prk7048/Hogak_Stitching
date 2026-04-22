@@ -42,6 +42,12 @@ struct OutputFrame {
     }
 };
 
+enum class OutputSubmitResult {
+    kRejected = 0,
+    kAccepted,
+    kAcceptedDropOldest,
+};
+
 class OutputWriter {
 public:
     virtual ~OutputWriter() = default;
@@ -53,12 +59,15 @@ public:
         int height,
         double fps,
         bool input_prepared = false) = 0;
-    virtual void submit(const OutputFrame& frame, std::int64_t timestamp_ns) = 0;
+    virtual OutputSubmitResult submit(const OutputFrame& frame, std::int64_t timestamp_ns) = 0;
     virtual void stop() = 0;
 
     virtual bool active() const noexcept = 0;
     virtual std::int64_t frames_written() const noexcept = 0;
     virtual std::int64_t frames_dropped() const noexcept = 0;
+    virtual std::int64_t pending_frames() const noexcept = 0;
+    virtual std::int64_t max_pending_frames() const noexcept = 0;
+    virtual std::string drop_policy() const = 0;
     virtual std::string last_error() const = 0;
     virtual std::string effective_codec() const = 0;
     virtual std::string command_line() const = 0;

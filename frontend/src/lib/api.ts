@@ -14,38 +14,69 @@ export type ProjectDebugStep = {
   timestamp_sec?: number;
 };
 
-export type ProjectState = {
+export type GeometryTruth = {
+  model?: string;
+  requested_residual_model?: string;
+  residual_model?: string;
+  artifact_path?: string;
+  artifact_checksum?: string;
+  launch_ready?: boolean;
+  launch_ready_reason?: string;
+  rollout_status?: string;
+  fallback_used?: boolean;
+  operator_visible?: boolean;
+};
+
+export type RuntimeTruth = {
   status?: string;
-  start_phase?: string;
+  running?: boolean;
+  pid?: number;
+  phase?: string;
+  active_model?: string;
+  active_residual_model?: string;
+  gpu_path_mode?: string;
+  gpu_path_ready?: boolean;
+  input_path_mode?: string;
+  output_path_mode?: string;
+};
+
+export type OutputTruth = {
+  receive_uri?: string;
+  target?: string;
+  mode?: string;
+  direct?: boolean;
+  bridge?: boolean;
+  bridge_reason?: string;
+  last_error?: string;
+};
+
+export type ZeroCopyTruth = {
+  ready?: boolean;
+  reason?: string;
+  blockers?: string[];
+  status?: string;
+};
+
+export type ProjectDebug = {
+  enabled?: boolean;
+  current_stage?: string;
+  steps?: ProjectDebugStep[];
+};
+
+export type ProjectState = {
+  lifecycle_state?: string;
+  phase?: string;
   status_message?: string;
   running?: boolean;
   can_start?: boolean;
   can_stop?: boolean;
   blocker_reason?: string;
-  output_receive_uri?: string;
-  production_output_target?: string;
-  production_output_last_error?: string;
-  output_bridge_reason?: string;
-  runtime_active_model?: string;
-  runtime_active_residual_model?: string;
-  runtime_active_artifact_path?: string;
-  runtime_artifact_checksum?: string;
-  runtime_launch_ready?: boolean;
-  runtime_launch_ready_reason?: string;
-  fallback_used?: boolean;
-  gpu_path_mode?: string;
-  gpu_path_ready?: boolean;
-  input_path_mode?: string;
-  output_path_mode?: string;
-  output_path_direct?: boolean;
-  output_path_bridge?: boolean;
-  zero_copy_ready?: boolean;
-  zero_copy_reason?: string;
-  zero_copy_blockers?: string[];
-  project_log?: ProjectLogEntry[];
-  debug_mode?: boolean;
-  debug_current_stage?: string;
-  debug_steps?: ProjectDebugStep[];
+  geometry?: GeometryTruth;
+  runtime?: RuntimeTruth;
+  output?: OutputTruth;
+  zero_copy?: ZeroCopyTruth;
+  recent_events?: ProjectLogEntry[];
+  debug?: ProjectDebug;
 };
 
 export type ProjectActionResponse = {
@@ -170,38 +201,83 @@ function normalizeProjectState(value: unknown): ProjectState {
   if (!isRecord(value)) {
     return {};
   }
+  const geometry = isRecord(value.geometry) ? value.geometry : {};
+  const runtime = isRecord(value.runtime) ? value.runtime : {};
+  const output = isRecord(value.output) ? value.output : {};
+  const zeroCopy = isRecord(value.zero_copy) ? value.zero_copy : {};
+  const debug = isRecord(value.debug) ? value.debug : {};
+  const recentEvents = Array.isArray(value.recent_events) ? value.recent_events : value.project_log;
+  const debugStepsValue = Array.isArray(debug.steps) ? debug.steps : value.debug_steps;
+  const lifecycleState = asString(value.lifecycle_state || value.status, "unknown");
+  const phase = asString(value.phase || value.start_phase);
+  const activeModel = asString(geometry.model || runtime.active_model || value.runtime_active_model);
+  const activeResidualModel = asString(
+    geometry.residual_model || runtime.active_residual_model || value.runtime_active_residual_model || value.geometry_residual_model,
+  );
+  const artifactPath = asString(geometry.artifact_path || value.runtime_active_artifact_path);
+  const artifactChecksum = asString(geometry.artifact_checksum || value.runtime_artifact_checksum);
+  const launchReady = asBoolean(geometry.launch_ready ?? value.runtime_launch_ready, false);
+  const launchReadyReason = asString(geometry.launch_ready_reason || value.runtime_launch_ready_reason);
+  const outputMode = asString(output.mode || runtime.output_path_mode || value.output_path_mode);
+  const outputDirect = asBoolean(output.direct ?? value.output_path_direct, false);
+  const outputBridge = asBoolean(output.bridge ?? value.output_path_bridge, false);
+  const zeroCopyReady = asBoolean(zeroCopy.ready ?? value.zero_copy_ready, false);
+  const zeroCopyReason = asString(zeroCopy.reason || value.zero_copy_reason);
+  const zeroCopyBlockers = asStringArray(zeroCopy.blockers || value.zero_copy_blockers);
+
   return {
-    status: asString(value.status, "unknown"),
-    start_phase: asString(value.start_phase),
+    lifecycle_state: lifecycleState,
+    phase,
     status_message: asString(value.status_message),
     running: asBoolean(value.running, false),
     can_start: asBoolean(value.can_start, false),
     can_stop: asBoolean(value.can_stop, false),
     blocker_reason: asString(value.blocker_reason),
-    output_receive_uri: asString(value.output_receive_uri),
-    production_output_target: asString(value.production_output_target),
-    production_output_last_error: asString(value.production_output_last_error),
-    output_bridge_reason: asString(value.output_bridge_reason),
-    runtime_active_model: asString(value.runtime_active_model),
-    runtime_active_residual_model: asString(value.runtime_active_residual_model || value.geometry_residual_model),
-    runtime_active_artifact_path: asString(value.runtime_active_artifact_path),
-    runtime_artifact_checksum: asString(value.runtime_artifact_checksum),
-    runtime_launch_ready: asBoolean(value.runtime_launch_ready, false),
-    runtime_launch_ready_reason: asString(value.runtime_launch_ready_reason),
-    fallback_used: asBoolean(value.fallback_used, false),
-    gpu_path_mode: asString(value.gpu_path_mode, "unknown"),
-    gpu_path_ready: asBoolean(value.gpu_path_ready, false),
-    input_path_mode: asString(value.input_path_mode),
-    output_path_mode: asString(value.output_path_mode),
-    output_path_direct: asBoolean(value.output_path_direct, false),
-    output_path_bridge: asBoolean(value.output_path_bridge, false),
-    zero_copy_ready: asBoolean(value.zero_copy_ready, false),
-    zero_copy_reason: asString(value.zero_copy_reason),
-    zero_copy_blockers: asStringArray(value.zero_copy_blockers),
-    project_log: asProjectLog(value.project_log),
-    debug_mode: asBoolean(value.debug_mode, false),
-    debug_current_stage: asString(value.debug_current_stage),
-    debug_steps: asProjectDebugSteps(value.debug_steps),
+    geometry: {
+      model: activeModel,
+      requested_residual_model: asString(geometry.requested_residual_model),
+      residual_model: activeResidualModel,
+      artifact_path: artifactPath,
+      artifact_checksum: artifactChecksum,
+      launch_ready: launchReady,
+      launch_ready_reason: launchReadyReason,
+      rollout_status: asString(geometry.rollout_status || value.geometry_rollout_status),
+      fallback_used: asBoolean(geometry.fallback_used ?? value.fallback_used, false),
+      operator_visible: asBoolean(geometry.operator_visible ?? value.geometry_operator_visible, false),
+    },
+    runtime: {
+      status: asString(runtime.status || value.status, lifecycleState),
+      running: asBoolean(runtime.running ?? value.running, false),
+      pid: asNumber(runtime.pid, 0),
+      phase,
+      active_model: activeModel,
+      active_residual_model: activeResidualModel,
+      gpu_path_mode: asString(runtime.gpu_path_mode || value.gpu_path_mode, "unknown"),
+      gpu_path_ready: asBoolean(runtime.gpu_path_ready ?? value.gpu_path_ready, false),
+      input_path_mode: asString(runtime.input_path_mode || value.input_path_mode),
+      output_path_mode: outputMode,
+    },
+    output: {
+      receive_uri: asString(output.receive_uri || value.output_receive_uri),
+      target: asString(output.target || value.production_output_target),
+      mode: outputMode,
+      direct: outputDirect,
+      bridge: outputBridge,
+      bridge_reason: asString(output.bridge_reason || value.output_bridge_reason),
+      last_error: asString(output.last_error || value.production_output_last_error),
+    },
+    zero_copy: {
+      ready: zeroCopyReady,
+      reason: zeroCopyReason,
+      blockers: zeroCopyBlockers,
+      status: asString(zeroCopy.status, zeroCopyReady ? "ready" : zeroCopyBlockers.length > 0 ? "blocked" : "pending"),
+    },
+    recent_events: asProjectLog(recentEvents),
+    debug: {
+      enabled: asBoolean(debug.enabled ?? value.debug_mode, false),
+      current_stage: asString(debug.current_stage || value.debug_current_stage),
+      steps: asProjectDebugSteps(debugStepsValue),
+    },
   };
 }
 
@@ -238,37 +314,58 @@ export async function fetchProjectState(): Promise<ProjectState> {
     return normalizeProjectState(payload);
   } catch {
     return {
-      status: "error",
-      start_phase: "error",
+      lifecycle_state: "error",
+      phase: "error",
       status_message: "Backend unavailable. Live runtime truth is not available.",
       running: false,
       can_start: false,
       can_stop: false,
       blocker_reason: "Backend unavailable",
-      output_receive_uri: "",
-      production_output_target: "",
-      production_output_last_error: "",
-      output_bridge_reason: "",
-      runtime_active_model: "",
-      runtime_active_residual_model: "",
-      runtime_active_artifact_path: "",
-      runtime_artifact_checksum: "",
-      runtime_launch_ready: false,
-      runtime_launch_ready_reason: "Backend unavailable",
-      fallback_used: false,
-      gpu_path_mode: "unknown",
-      gpu_path_ready: false,
-      input_path_mode: "",
-      output_path_mode: "",
-      output_path_direct: false,
-      output_path_bridge: false,
-      zero_copy_ready: false,
-      zero_copy_reason: "Backend unavailable",
-      zero_copy_blockers: [],
-      project_log: [],
-      debug_mode: false,
-      debug_current_stage: "",
-      debug_steps: [],
+      geometry: {
+        model: "",
+        requested_residual_model: "",
+        residual_model: "",
+        artifact_path: "",
+        artifact_checksum: "",
+        launch_ready: false,
+        launch_ready_reason: "Backend unavailable",
+        rollout_status: "",
+        fallback_used: false,
+        operator_visible: false,
+      },
+      runtime: {
+        status: "error",
+        running: false,
+        pid: 0,
+        phase: "error",
+        active_model: "",
+        active_residual_model: "",
+        gpu_path_mode: "unknown",
+        gpu_path_ready: false,
+        input_path_mode: "",
+        output_path_mode: "",
+      },
+      output: {
+        receive_uri: "",
+        target: "",
+        mode: "",
+        direct: false,
+        bridge: false,
+        bridge_reason: "",
+        last_error: "",
+      },
+      zero_copy: {
+        ready: false,
+        reason: "Backend unavailable",
+        blockers: [],
+        status: "blocked",
+      },
+      recent_events: [],
+      debug: {
+        enabled: false,
+        current_stage: "",
+        steps: [],
+      },
     };
   }
 }

@@ -12,7 +12,7 @@
 
 #include "control/json_line_protocol.h"
 #include "control/json_parser.h"
-#include "engine/stitch_engine.h"
+#include "engine/engine.h"
 
 namespace hogak::control {
 
@@ -215,37 +215,6 @@ bool load_json_file(const std::string& path, JsonValue* value_out, std::string* 
     return true;
 }
 
-bool resolve_geometry_artifact_homography_file(const std::string& artifact_path, std::string* homography_file_out, std::string* error_out) {
-    JsonValue artifact;
-    if (!load_json_file(artifact_path, &artifact, error_out)) {
-        return false;
-    }
-    if (!artifact.is_object()) {
-        if (error_out != nullptr) {
-            *error_out = "runtime geometry artifact must be a JSON object";
-        }
-        return false;
-    }
-    const JsonValue* source_value = artifact.find("source");
-    if (source_value == nullptr || !source_value->is_object()) {
-        if (error_out != nullptr) {
-            *error_out = "runtime geometry artifact is missing source object";
-        }
-        return false;
-    }
-    const JsonValue* homography_value = source_value->find("homography_file");
-    if (homography_value == nullptr || !homography_value->is_string() || homography_value->as_string().empty()) {
-        if (error_out != nullptr) {
-            *error_out = "runtime geometry artifact does not expose source.homography_file";
-        }
-        return false;
-    }
-    if (homography_file_out != nullptr) {
-        *homography_file_out = homography_value->as_string();
-    }
-    return true;
-}
-
 bool load_reload_config(
     const JsonValue::Object& payload,
     hogak::engine::EngineConfig* config,
@@ -351,8 +320,8 @@ bool load_reload_config(
     }
 
     // Left/right input shared settings must be exact matches.
-    const auto left_transport = left.find("transport");
-    const auto right_transport = right.find("transport");
+    const JsonValue* left_transport = require_field(left, "transport");
+    const JsonValue* right_transport = require_field(right, "transport");
     if (left_transport == nullptr || right_transport == nullptr || !left_transport->is_string() || !right_transport->is_string() ||
         left_transport->as_string() != right_transport->as_string()) {
         if (error_out != nullptr) {
@@ -360,8 +329,8 @@ bool load_reload_config(
         }
         return false;
     }
-    const auto left_timeout = left.find("timeout_sec");
-    const auto right_timeout = right.find("timeout_sec");
+    const JsonValue* left_timeout = require_field(left, "timeout_sec");
+    const JsonValue* right_timeout = require_field(right, "timeout_sec");
     if (left_timeout == nullptr || right_timeout == nullptr || !left_timeout->is_number() || !right_timeout->is_number() ||
         left_timeout->as_number() != right_timeout->as_number()) {
         if (error_out != nullptr) {
@@ -369,8 +338,8 @@ bool load_reload_config(
         }
         return false;
     }
-    const auto left_reconnect = left.find("reconnect_cooldown_sec");
-    const auto right_reconnect = right.find("reconnect_cooldown_sec");
+    const JsonValue* left_reconnect = require_field(left, "reconnect_cooldown_sec");
+    const JsonValue* right_reconnect = require_field(right, "reconnect_cooldown_sec");
     if (left_reconnect == nullptr || right_reconnect == nullptr || !left_reconnect->is_number() || !right_reconnect->is_number() ||
         left_reconnect->as_number() != right_reconnect->as_number()) {
         if (error_out != nullptr) {
@@ -378,8 +347,8 @@ bool load_reload_config(
         }
         return false;
     }
-    const auto left_buffer = left.find("buffer_frames");
-    const auto right_buffer = right.find("buffer_frames");
+    const JsonValue* left_buffer = require_field(left, "buffer_frames");
+    const JsonValue* right_buffer = require_field(right, "buffer_frames");
     if (left_buffer == nullptr || right_buffer == nullptr || !left_buffer->is_number() || !right_buffer->is_number() ||
         left_buffer->as_number() != right_buffer->as_number()) {
         if (error_out != nullptr) {
@@ -390,10 +359,6 @@ bool load_reload_config(
 
     std::string artifact_path;
     if (!require_string_field(geometry, "artifact_path", &artifact_path, "geometry.artifact_path", false, error_out)) {
-        return false;
-    }
-    std::string homography_file;
-    if (!resolve_geometry_artifact_homography_file(artifact_path, &homography_file, error_out)) {
         return false;
     }
 
@@ -467,10 +432,6 @@ bool load_reload_config(
     config->left.max_buffered_frames = buffer_frames;
     config->right.max_buffered_frames = buffer_frames;
     config->geometry.artifact_file = artifact_path;
-    config->homography_file = homography_file;
-    config->distortion_mode = "off";
-    config->use_saved_distortion = false;
-    config->distortion_auto_save = false;
     return true;
 }
 
@@ -620,26 +581,6 @@ bool ControlServer::process_one_command(hogak::engine::StitchEngine& engine) {
         } else {
             write_error(output_, seq, "reload_failed", "config reload failed");
         }
-        return true;
-    }
-
-    if (command_type == "reset_auto_calibration" || command_type == "reload_homography") {
-        auto config = engine.current_config();
-        const JsonValue* homography_value = payload.find("homography_file");
-        if (homography_value != nullptr) {
-            if (!homography_value->is_string() || homography_value->as_string().empty()) {
-                write_error(output_, seq, "invalid_payload", "homography_file must be a non-empty string");
-                return true;
-            }
-            config.homography_file = homography_value->as_string();
-            if (!engine.reload_config(config)) {
-                write_error(output_, seq, "reload_failed", "calibration reload failed");
-                return true;
-            }
-        } else {
-            engine.reset_calibration();
-        }
-        write_status(output_, seq, "calibration_reset", "calibration reset");
         return true;
     }
 

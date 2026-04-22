@@ -29,12 +29,15 @@ public:
         int height,
         double fps,
         bool input_prepared = false) override;
-    void submit(const OutputFrame& frame, std::int64_t timestamp_ns) override;
+    OutputSubmitResult submit(const OutputFrame& frame, std::int64_t timestamp_ns) override;
     void stop() override;
 
     bool active() const noexcept override;
     std::int64_t frames_written() const noexcept override;
     std::int64_t frames_dropped() const noexcept override;
+    std::int64_t pending_frames() const noexcept override;
+    std::int64_t max_pending_frames() const noexcept override;
+    std::string drop_policy() const override;
     std::string last_error() const override;
     std::string effective_codec() const override;
     std::string command_line() const override;

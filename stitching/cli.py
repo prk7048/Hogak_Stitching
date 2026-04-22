@@ -4,7 +4,7 @@ import argparse
 import os
 import sys
 
-from stitching.runtime_site_config import RuntimeSiteConfigError
+from stitching.domain.runtime.site_config import RuntimeSiteConfigError
 
 
 CURRENT_MAIN_PATH_NOTE = (
@@ -37,23 +37,21 @@ def _add_native_calibration_args(
     cmd: argparse.ArgumentParser,
     *,
     include_stream_args: bool = True,
+    mesh_refresh_mode: bool = False,
 ) -> None:
-    from stitching.project_defaults import (
-        DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-        DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
-        DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
-        DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
-        DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
-        DEFAULT_NATIVE_DISTORTION_MODE,
-        DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
-        DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-        DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
-        DEFAULT_NATIVE_LEFT_DISTORTION_FILE,
-        DEFAULT_NATIVE_RIGHT_DISTORTION_FILE,
-        DEFAULT_NATIVE_USE_SAVED_DISTORTION,
+    from stitching.domain.runtime.defaults import (
+        DEFAULT_CALIBRATION_DEBUG_DIR,
+        DEFAULT_CALIBRATION_INLIERS_FILE,
+        DEFAULT_HOMOGRAPHY_PATH,
+        DEFAULT_RTSP_TIMEOUT_SEC,
+        DEFAULT_RTSP_TRANSPORT,
         default_left_rtsp,
         default_right_rtsp,
     )
+    if mesh_refresh_mode:
+        from stitching.domain.geometry.refresh_service import DEFAULT_MESH_REFRESH_WARMUP_FRAMES
+    else:
+        DEFAULT_MESH_REFRESH_WARMUP_FRAMES = 45
 
     if include_stream_args:
         cmd.add_argument(
@@ -66,98 +64,42 @@ def _add_native_calibration_args(
             default=default_right_rtsp(),
             help="Right RTSP URL (default: config/runtime.json or HOGAK_RIGHT_RTSP)",
         )
-        cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default="tcp")
-        cmd.add_argument("--rtsp-timeout-sec", type=float, default=10.0)
+        cmd.add_argument("--rtsp-transport", choices=["tcp", "udp"], default=DEFAULT_RTSP_TRANSPORT)
+        cmd.add_argument("--rtsp-timeout-sec", type=float, default=DEFAULT_RTSP_TIMEOUT_SEC)
     cmd.add_argument(
         "--out",
-        default=DEFAULT_NATIVE_HOMOGRAPHY_PATH,
+        default=DEFAULT_HOMOGRAPHY_PATH,
         help="Output homography JSON path (default: config/runtime.json)",
     )
     cmd.add_argument(
         "--debug-dir",
-        default=DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
+        default=DEFAULT_CALIBRATION_DEBUG_DIR,
         help="Calibration debug image directory (default: config/runtime.json)",
     )
     cmd.add_argument(
         "--inliers-out",
-        default=DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
+        default=DEFAULT_CALIBRATION_INLIERS_FILE,
         help="Output calibration inliers JSON path",
-    )
-    cmd.add_argument(
-        "--distortion-mode",
-        choices=["off", "runtime-lines"],
-        default=DEFAULT_NATIVE_DISTORTION_MODE,
-        help="Compatibility flag. Distortion is currently disabled and calibration uses raw images.",
-    )
-    cmd.add_argument(
-        "--use-saved-distortion",
-        dest="use_saved_distortion",
-        action="store_true",
-        default=DEFAULT_NATIVE_USE_SAVED_DISTORTION,
-        help="Compatibility flag. Ignored because distortion is currently disabled.",
-    )
-    cmd.add_argument(
-        "--no-use-saved-distortion",
-        dest="use_saved_distortion",
-        action="store_false",
-        help="Compatibility flag. Ignored because distortion is currently disabled.",
-    )
-    cmd.add_argument(
-        "--distortion-auto-save",
-        dest="distortion_auto_save",
-        action="store_true",
-        default=DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
-        help="Compatibility flag. Ignored because distortion is currently disabled.",
-    )
-    cmd.add_argument(
-        "--no-distortion-auto-save",
-        dest="distortion_auto_save",
-        action="store_false",
-        help="Compatibility flag. Ignored because distortion is currently disabled.",
-    )
-    cmd.add_argument("--left-distortion-file", default=DEFAULT_NATIVE_LEFT_DISTORTION_FILE)
-    cmd.add_argument("--right-distortion-file", default=DEFAULT_NATIVE_RIGHT_DISTORTION_FILE)
-    cmd.add_argument(
-        "--distortion-lens-model-hint",
-        choices=["auto", "pinhole", "fisheye"],
-        default=DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
-        help="Optional prior for distortion fitting. auto evaluates pinhole and fisheye candidates.",
-    )
-    cmd.add_argument(
-        "--distortion-horizontal-fov-deg",
-        type=float,
-        default=DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
-        help="Optional horizontal FOV prior in degrees for guided distortion fit.",
-    )
-    cmd.add_argument(
-        "--distortion-vertical-fov-deg",
-        type=float,
-        default=DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
-        help="Optional vertical FOV prior in degrees for guided distortion fit.",
-    )
-    cmd.add_argument(
-        "--distortion-camera-model",
-        default=DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
-        help="Optional camera model label recorded with the saved distortion artifact.",
-    )
-    cmd.add_argument(
-        "--skip-review",
-        action="store_true",
-        help="Skip the final calibration review window. Used by runtime-managed automatic recalibration.",
     )
     cmd.add_argument(
         "--warmup-frames",
         type=int,
-        default=45,
+        default=DEFAULT_MESH_REFRESH_WARMUP_FRAMES,
         help="Frames to read before selecting representative images",
     )
     cmd.add_argument("--process-scale", type=float, default=1.0, help="Calibration frame scale")
-    cmd.add_argument(
-        "--calibration-mode",
-        choices=["assisted", "manual", "auto"],
-        default="assisted",
-        help="assisted(default): click any number of matching points, then auto-boost around them",
-    )
+    if not mesh_refresh_mode:
+        cmd.add_argument(
+            "--skip-review",
+            action="store_true",
+            help="Skip the final calibration review window. Used by runtime-managed automatic recalibration.",
+        )
+        cmd.add_argument(
+            "--calibration-mode",
+            choices=["assisted", "manual", "auto"],
+            default="assisted",
+            help="assisted(default): click any number of matching points, then auto-boost around them",
+        )
     cmd.add_argument(
         "--assisted-reproj-threshold",
         type=float,
@@ -170,12 +112,13 @@ def _add_native_calibration_args(
         default=600,
         help="Max number of auto-reinforced matches kept in assisted mode",
     )
-    cmd.add_argument(
-        "--match-backend",
-        choices=["classic"],
-        default="classic",
-        help="Calibration match backend. The current path uses the classic matcher only.",
-    )
+    if not mesh_refresh_mode:
+        cmd.add_argument(
+            "--match-backend",
+            choices=["classic"],
+            default="classic",
+            help="Calibration match backend. The current path uses the classic matcher only.",
+        )
     cmd.add_argument("--min-matches", type=int, default=40)
     cmd.add_argument("--min-inliers", type=int, default=20)
     # ratio_test : 값이 작을수록 정확도가 높아지고, 매칭되는 점이 적어짐
@@ -206,7 +149,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "mesh-refresh",
         help="Internal path: regenerate the active virtual-center-rectilinear-rigid runtime artifact",
     )
-    _add_native_calibration_args(mesh_refresh_cmd)
+    _add_native_calibration_args(mesh_refresh_cmd, mesh_refresh_mode=True)
     mesh_refresh_cmd.add_argument(
         "--refresh-dir",
         help="Optional internal output directory for stitch-refresh metadata. Defaults to data/mesh_refresh/<timestamp>",
@@ -214,7 +157,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     mesh_refresh_cmd.add_argument(
         "--clip-frames",
         type=int,
-        default=12,
+        default=8,
         help="Representative synchronized clip length used for stitch geometry refresh",
     )
 
@@ -228,14 +171,14 @@ def main() -> int:
         args = parse_args()
 
         if args.command == "operator-server":
-            from stitching.runtime_backend import main as run_runtime_backend
+            from stitching.domain.runtime.backend import main as run_runtime_backend
 
             os.environ["HOGAK_BACKEND_HOST"] = str(args.host)
             os.environ["HOGAK_BACKEND_PORT"] = str(int(args.port))
             return int(run_runtime_backend())
 
         if args.command == "mesh-refresh":
-            from stitching.runtime_geometry_bakeoff import run_mesh_refresh_from_args
+            from stitching.domain.geometry.refresh_service import run_mesh_refresh_from_args
 
             return int(run_mesh_refresh_from_args(args))
     except RuntimeSiteConfigError as exc:

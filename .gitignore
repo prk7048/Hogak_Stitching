@@ -14,8 +14,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 .third_party/
-native_runtime/build/
+native_runtime/build*/
 native_runtime/CMakeUserPresets.json
+frontend/dist/
 dist/
 _tags.txt
 _cv2_check.py
@@ -40,3 +41,15 @@ output/debug/*
 !output/debug/.gitkeep
 output/videos/*
 !output/videos/.gitkeep
+
+# Generated runtime data and experiment bundles
+data/mesh_refresh/
+data/geometry_bakeoff/
+data/geometry_candidates/
+data/runtime_geometry.json
+data/runtime_homography.bak_*.json
+data/runtime_calibration_inliers.json
+data/runtime_distortion_left.json
+data/runtime_distortion_right.json
+data/runtime_distortion_hints_left.json
+data/runtime_distortion_hints_right.json

@@ -108,7 +108,7 @@ $backendImportCheck = ""
 if (-not [string]::IsNullOrWhiteSpace($summary.python)) {
     $pythonVersion = Invoke-VersionProbe @("python", "--version")
     try {
-        $backendImportCheck = (& python -c "import fastapi, uvicorn, stitching.runtime_backend; print('ok')" 2>$null | Select-Object -First 1)
+        $backendImportCheck = (& python -c "import fastapi, uvicorn, stitching.domain.runtime.backend; print('ok')" 2>$null | Select-Object -First 1)
     } catch {
         $backendImportCheck = ""
     }

@@ -98,23 +98,10 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"sync_estimate_pairs\":" << metrics.sync_estimate_pairs << ','
         << "\"sync_estimate_avg_gap_ms\":" << metrics.sync_estimate_avg_gap_ms << ','
         << "\"sync_estimate_score\":" << metrics.sync_estimate_score << ','
-        << "\"distortion_enabled_left\":" << (metrics.distortion_enabled_left ? "true" : "false") << ','
-        << "\"distortion_enabled_right\":" << (metrics.distortion_enabled_right ? "true" : "false") << ','
-        << "\"distortion_source_left\":\"" << json_escape(metrics.distortion_source_left) << "\","
-        << "\"distortion_source_right\":\"" << json_escape(metrics.distortion_source_right) << "\","
-        << "\"distortion_confidence_left\":" << metrics.distortion_confidence_left << ','
-        << "\"distortion_confidence_right\":" << metrics.distortion_confidence_right << ','
-        << "\"distortion_model\":\"" << json_escape(metrics.distortion_model) << "\","
-        << "\"distortion_fit_score_left\":" << metrics.distortion_fit_score_left << ','
-        << "\"distortion_fit_score_right\":" << metrics.distortion_fit_score_right << ','
-        << "\"distortion_line_count_left\":" << metrics.distortion_line_count_left << ','
-        << "\"distortion_line_count_right\":" << metrics.distortion_line_count_right << ','
-        << "\"distortion_frame_count_left\":" << metrics.distortion_frame_count_left << ','
-        << "\"distortion_frame_count_right\":" << metrics.distortion_frame_count_right << ','
-        << "\"distortion_lens_model_left\":\"" << json_escape(metrics.distortion_lens_model_left) << "\","
-        << "\"distortion_lens_model_right\":\"" << json_escape(metrics.distortion_lens_model_right) << "\","
         << "\"gpu_enabled\":" << (metrics.gpu_enabled ? "true" : "false") << ','
         << "\"gpu_reason\":\"" << json_escape(metrics.gpu_reason) << "\","
+        << "\"gpu_feature_enabled\":" << (metrics.gpu_feature_enabled ? "true" : "false") << ','
+        << "\"gpu_feature_reason\":\"" << json_escape(metrics.gpu_feature_reason) << "\","
         << "\"gpu_errors\":" << metrics.gpu_errors << ','
         << "\"calibrated\":" << (metrics.calibrated ? "true" : "false") << ','
         << "\"output_width\":" << metrics.output_width << ','
@@ -153,6 +140,9 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"output_active\":" << (metrics.output_active ? "true" : "false") << ','
         << "\"output_frames_written\":" << metrics.output_frames_written << ','
         << "\"output_frames_dropped\":" << metrics.output_frames_dropped << ','
+        << "\"output_pending_frames\":" << metrics.output_pending_frames << ','
+        << "\"output_queue_capacity\":" << metrics.output_queue_capacity << ','
+        << "\"output_drop_policy\":\"" << json_escape(metrics.output_drop_policy) << "\","
         << "\"output_target\":\"" << json_escape(metrics.output_target) << "\","
         << "\"output_command_line\":\"" << json_escape(metrics.output_command_line) << "\","
         << "\"output_effective_codec\":\"" << json_escape(metrics.output_effective_codec) << "\","
@@ -161,6 +151,9 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"production_output_active\":" << (metrics.production_output_active ? "true" : "false") << ','
         << "\"production_output_frames_written\":" << metrics.production_output_frames_written << ','
         << "\"production_output_frames_dropped\":" << metrics.production_output_frames_dropped << ','
+        << "\"production_output_pending_frames\":" << metrics.production_output_pending_frames << ','
+        << "\"production_output_queue_capacity\":" << metrics.production_output_queue_capacity << ','
+        << "\"production_output_drop_policy\":\"" << json_escape(metrics.production_output_drop_policy) << "\","
         << "\"production_output_target\":\"" << json_escape(metrics.production_output_target) << "\","
         << "\"production_output_command_line\":\"" << json_escape(metrics.production_output_command_line) << "\","
         << "\"production_output_effective_codec\":\"" << json_escape(metrics.production_output_effective_codec) << "\","
@@ -179,9 +172,6 @@ inline std::string metrics_event_json(std::int64_t seq, double timestamp_sec, co
         << "\"blend_mode\":\"" << json_escape(metrics.blend_mode) << "\","
         << "\"geometry_artifact_path\":\"" << json_escape(metrics.geometry_artifact_path) << "\","
         << "\"geometry_artifact_model\":\"" << json_escape(metrics.geometry_artifact_model) << "\","
-        << "\"cylindrical_focal_px\":" << metrics.cylindrical_focal_px << ','
-        << "\"cylindrical_center_x\":" << metrics.cylindrical_center_x << ','
-        << "\"cylindrical_center_y\":" << metrics.cylindrical_center_y << ','
         << "\"residual_alignment_error_px\":" << metrics.residual_alignment_error_px << ','
         << "\"seam_path_jitter_px\":" << metrics.seam_path_jitter_px << ','
         << "\"exposure_gain\":" << metrics.exposure_gain << ','

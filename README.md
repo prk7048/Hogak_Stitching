@@ -1,148 +1,102 @@
 # Hogak Stitching
 
-두 개의 RTSP 카메라 입력을 받아 하나의 stitched stream으로 송출하는 프로젝트다.
+This project ingests two RTSP cameras and publishes one stitched live output.
 
-현재 구조는 `Python control plane + C++ native runtime`이다.
+The maintained architecture is `Python control plane + C++ native runtime`.
 
-- Python: calibration, config/profile loading, runtime launch, monitor UI
+- Python: config/profile loading, rigid geometry refresh, runtime launch, operator API/UI
 - C++: RTSP ingest, pair/sync, stitch, encode, output
 
-## Requirements
+## Public Surface
 
-- Windows
-- NVIDIA GPU
-- CUDA / NVENC 사용 가능 환경
-- Python 3.12 근처 환경
-
-## Main Entry Points
-
-현재 운영 기준 진입점은 둘뿐이다.
+The only supported operator-facing Python entrypoints are:
 
 ```cmd
-python -m stitching.cli native-calibrate
-python -m stitching.cli native-runtime
+python -m stitching.cli operator-server
+python -m stitching.cli mesh-refresh
 ```
 
-strict fresh baseline 검증은 아래로 수행한다.
+- `operator-server`: unified FastAPI + React operator surface, default `http://127.0.0.1:8088`
+- `mesh-refresh`: internal preparation command that regenerates the active launch-ready rigid runtime artifact
 
-```cmd
-python -m stitching.cli native-validate --duration-sec 600
-```
+The only supported operator-facing HTTP APIs are:
+
+- `GET /api/project/state`
+- `POST /api/project/start`
+- `POST /api/project/stop`
+
+Everything else is internal, compatibility-only, or removed from the maintained product path.
 
 ## Quick Start
 
-빌드:
+Install Python requirements:
 
 ```cmd
 python -m pip install -r requirements.txt
+```
+
+Check native prerequisites on Windows before configuring CMake:
+
+```cmd
+native_runtime\bootstrap_native_runtime.ps1
 copy native_runtime\CMakeUserPresets.example.json native_runtime\CMakeUserPresets.json
+```
+
+Build the native runtime:
+
+```cmd
 cmake --preset windows-release
 cmake --build --preset build-windows-release
 ```
 
-runtime 실행:
+Build the operator UI once:
 
 ```cmd
-python -m stitching.cli native-runtime
+cd frontend
+npm install
+npm run build
+cd ..
 ```
 
-headless 실행:
+Run the operator surface:
 
 ```cmd
-python -m stitching.cli native-runtime --no-output-ui --no-viewer
+python -m stitching.cli operator-server
 ```
 
-25fps profile:
+Run the internal rigid geometry refresh directly:
 
 ```cmd
-python -m stitching.cli --runtime-profile camera25 native-runtime
-```
-
-strict fresh 30 smoke/validation:
-
-```cmd
-python -m stitching.cli native-validate --duration-sec 10
-python -m stitching.cli native-validate --duration-sec 600
-```
-
-검증 결과는 `output/debug/native_validate_*.json`으로 저장된다.
-
-기본 sync 기준은 `pts-offset-auto`다. 즉 runtime은 카메라 wallclock을 기본으로 믿지 않고,
-`stream_pts + offset`을 기본 시간축으로 쓴다. 기본 가설은 `0ms`이고, motion correlation이
-강한 증거를 줄 때만 작은 step으로 offset을 보정한다.
-
-명시적으로 고정하고 싶으면 manual mode를 쓴다.
-
-```cmd
-python -m stitching.cli native-runtime --sync-time-source pts-offset-manual --sync-manual-offset-ms -64
+python -m stitching.cli mesh-refresh
 ```
 
 ## Config
 
-기본 설정은 [runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json)에서 읽는다.
+- `config/runtime.json` is the checked-in base config and keeps placeholder RTSP values.
+- `config/runtime.local.json` is the preferred site-local override for real camera URLs and machine-specific values.
+- `config/profiles/<name>.json` is an override layer for named operating modes, not a secret store.
+- The effective merge order is `runtime.json -> runtime.local.json -> profiles/<name>.json`.
 
-중요한 운영 원칙:
+See [config/README.md](/C:/Users/Pixellot/Hogak_Stitching/config/README.md) for the current config contract.
 
-- repo의 `config/runtime.json` RTSP 값은 placeholder다
-- 실제 현장 값은 `config/runtime.local.json`에 둔다
-- `runtime.local.json`은 git에 올리지 않는다
+## Verification
 
-적용 순서와 profile 구조는 [config/README.md](/c:/Users/Pixellot/Hogak_Stitching/config/README.md)를 본다.
+Run these checks before treating a branch as stable:
+
+```cmd
+python -m unittest discover -s tests -v
+python -m compileall stitching
+cd frontend && npm run build
+```
+
+Manual operator acceptance is documented in [docs/operator_acceptance.md](/C:/Users/Pixellot/Hogak_Stitching/docs/operator_acceptance.md).
 
 ## Repository Layout
 
-- [config](/c:/Users/Pixellot/Hogak_Stitching/config): site config와 profile override
-- [data](/c:/Users/Pixellot/Hogak_Stitching/data): runtime homography 같은 보존 데이터
-- [stitching](/c:/Users/Pixellot/Hogak_Stitching/stitching): Python control plane
-- [native_runtime](/c:/Users/Pixellot/Hogak_Stitching/native_runtime): C++ native runtime
-- [output](/c:/Users/Pixellot/Hogak_Stitching/output): 재생성 가능한 실행 산출물
-- [reports](/c:/Users/Pixellot/Hogak_Stitching/reports): 아키텍처, 상태, 배포, 온보딩 문서
-
-## Runtime Summary
-
-현재 기본 흐름은 아래와 같다.
-
-```text
-RTSP -> libav ingest/decode -> pair/sync -> stitch -> encode -> output
-```
-
-기본 pair/sync 시간축은 아래 순서로 본다.
-
-- 기본: `pts-offset-auto`
-- 수동 고정: `pts-offset-manual`
-- 혼합: `pts-offset-hybrid`
-- fallback: `arrival`
-- 진단 전용: `wallclock`
-
-출력 역할은 둘로 나눈다.
-
-- `probe`: local debug/viewer용
-- `transmit`: 실제 외부 송출 경로
-
-현재 baseline 설명과 운영 상태는 [reports/03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)를 본다.
-strict fresh `30fps` acceptance 기준과 source timing 지표는 [reports/09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)를 본다.
-현재 1차 목표는 `pair_source_skew_ms_mean < 33ms`, 가능하면 `15~20ms` 수준까지 낮추는 것이다.
-
-## Distortion Correction
-
-현재 distortion 기능은 잠정적으로 **비활성화** 되어 있고, runtime/calibration은 `raw` 기준으로 동작한다.
-
-- interactive `native-runtime` 웹 흐름은 `Start -> Stitch Review -> Runtime Dashboard`만 사용한다
-- `Prepare stitch review`는 active homography가 `undistorted`이면 raw 기준 homography를 먼저 복구한다
-- 웹 preview에는 calibration-time inlier overlay를 켤 수 있지만, 실제 송출 영상에는 burn-in 하지 않는다
-
-중요한 안전 규칙:
-
-- active homography는 현재 항상 `raw` 기준이어야 한다
-- calibration-time inlier overlay는 active homography와 sidecar가 일치할 때만 웹에서 보여준다
-
-## Documentation Map
-
-- 설정 구조: [config/README.md](/c:/Users/Pixellot/Hogak_Stitching/config/README.md)
-- native runtime 상세: [native_runtime/README.md](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/README.md)
-- 문서 인덱스: [reports/README.md](/c:/Users/Pixellot/Hogak_Stitching/reports/README.md)
-- 아키텍처 개요: [01_project_overview_and_architecture.md](/c:/Users/Pixellot/Hogak_Stitching/reports/01_project_overview_and_architecture.md)
-- 현재 상태와 다음 단계: [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
-- baseline acceptance / source timing: [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
-- 배포/지원 환경: [06_deployment_and_support_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/06_deployment_and_support_guide.md)
-- 신입 온보딩 문서: [07_new_hire_handoff_study_guide.md](/c:/Users/Pixellot/Hogak_Stitching/reports/07_new_hire_handoff_study_guide.md)
+- `config`: site config and profile overrides
+- `data`: runtime artifacts and generated geometry/debug data
+- `stitching`: Python control plane
+- `native_runtime`: C++ native runtime
+- `frontend`: React operator UI
+- `docs`: current product-path docs and acceptance notes
+- `reports`: minimal internal design notes

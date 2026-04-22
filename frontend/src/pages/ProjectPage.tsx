@@ -1,6 +1,7 @@
 import { useState } from "react";
 
 import { describeProjectActionResult, startProject, stopProject } from "../lib/api";
+import { displayPhaseLabel, normalizeDisplayPhase, START_FLOW } from "../lib/projectPhase";
 import { useProjectState } from "../lib/useProjectState";
 
 const STATUS_LABELS: Record<string, string> = {
@@ -10,25 +11,6 @@ const STATUS_LABELS: Record<string, string> = {
   blocked: "Blocked",
   error: "Error",
 };
-
-const PHASE_LABELS: Record<string, string> = {
-  idle: "Ready",
-  checking_inputs: "Checking inputs",
-  refreshing_mesh: "Recomputing stitch geometry",
-  preparing_runtime: "Preparing runtime",
-  starting_runtime: "Starting output",
-  running: "Running",
-  blocked: "Blocked",
-  error: "Error",
-};
-
-const START_FLOW = [
-  { id: "checking_inputs", label: "Check inputs" },
-  { id: "refreshing_mesh", label: "Recompute stitch geometry" },
-  { id: "preparing_runtime", label: "Prepare runtime" },
-  { id: "starting_runtime", label: "Start output" },
-  { id: "running", label: "Running" },
-] as const;
 
 function debugTone(state: string): string {
   const normalized = String(state || "").trim().toLowerCase();
@@ -79,15 +61,15 @@ function viewModeForStatus(status: string): "ready" | "starting" | "running" | "
   return "ready";
 }
 
-function directnessLabel(state: ReturnType<typeof useProjectState>["state"]): string {
-  if (state.output_path_direct) {
+function directnessLabel(output: ReturnType<typeof useProjectState>["state"]["output"]): string {
+  if (output?.direct) {
     return "Direct output path";
   }
-  if (state.output_path_bridge) {
+  if (output?.bridge) {
     return "Bridge output path";
   }
-  if (state.output_path_mode) {
-    return text(state.output_path_mode);
+  if (output?.mode) {
+    return text(output.mode);
   }
   return "Unknown output path";
 }
@@ -107,35 +89,40 @@ export function ProjectPage() {
   const { state, loading, refresh } = useProjectState();
   const [busyAction, setBusyAction] = useState<string | null>(null);
   const [actionStatus, setActionStatus] = useState("");
+  const geometry = state.geometry || {};
+  const runtime = state.runtime || {};
+  const output = state.output || {};
+  const zeroCopy = state.zero_copy || {};
+  const debug = state.debug || {};
 
-  const status = String(state.status || "idle").trim().toLowerCase() || "idle";
-  const startPhase = String(state.start_phase || status).trim().toLowerCase() || status;
+  const status = String(state.lifecycle_state || "idle").trim().toLowerCase() || "idle";
+  const displayPhase = normalizeDisplayPhase(state.phase, status);
   const viewMode = viewModeForStatus(status);
-  const statusLabel = STATUS_LABELS[status] || text(state.status, "Unknown");
-  const phaseLabel = PHASE_LABELS[startPhase] || text(state.start_phase, "Ready");
-  const receiveUri = text(state.output_receive_uri, "");
-  const receiveTarget = receiveUri || text(state.production_output_target, "");
-  const outputFailure = text(state.production_output_last_error, "");
-  const outputBridgeReason = text(state.output_bridge_reason, "");
-  const activeModel = text(state.runtime_active_model, "Not active");
-  const activeResidual = text(state.runtime_active_residual_model, "Unknown");
-  const activeArtifactPath = text(state.runtime_active_artifact_path, "Not available");
-  const activeChecksum = text(state.runtime_artifact_checksum, "Not available");
-  const readyReason = text(state.runtime_launch_ready_reason, "Not available");
-  const directness = directnessLabel(state);
-  const zeroCopyReason = text(state.zero_copy_reason, "Not available");
-  const zeroCopyBlockers = Array.isArray(state.zero_copy_blockers)
-    ? state.zero_copy_blockers.map((item) => String(item ?? "").trim()).filter(Boolean)
+  const statusLabel = STATUS_LABELS[status] || text(state.lifecycle_state, "Unknown");
+  const phaseLabel = displayPhaseLabel(state.phase, status);
+  const receiveUri = text(output.receive_uri, "");
+  const receiveTarget = receiveUri || text(output.target, "");
+  const outputFailure = text(output.last_error, "");
+  const outputBridgeReason = text(output.bridge_reason, "");
+  const activeModel = text(runtime.active_model || geometry.model, "Not active");
+  const activeResidual = text(runtime.active_residual_model || geometry.residual_model, "Unknown");
+  const activeArtifactPath = text(geometry.artifact_path, "Not available");
+  const activeChecksum = text(geometry.artifact_checksum, "Not available");
+  const readyReason = text(geometry.launch_ready_reason, "Not available");
+  const directness = directnessLabel(output);
+  const zeroCopyReason = text(zeroCopy.reason, "Not available");
+  const zeroCopyBlockers = Array.isArray(zeroCopy.blockers)
+    ? zeroCopy.blockers.map((item) => String(item ?? "").trim()).filter(Boolean)
     : [];
-  const projectLog = Array.isArray(state.project_log) ? state.project_log : [];
-  const debugSteps = Array.isArray(state.debug_steps) ? state.debug_steps : [];
-  const debugCurrentStage = String(state.debug_current_stage || "").trim();
+  const projectLog = Array.isArray(state.recent_events) ? state.recent_events : [];
+  const debugSteps = Array.isArray(debug.steps) ? debug.steps : [];
+  const debugCurrentStage = String(debug.current_stage || "").trim();
 
   const statusMessage =
     text(state.status_message, "") ||
     (state.running
       ? "The project is running. This page reflects the current stitched runtime output."
-      : "Start Project recalculates stitch geometry and starts the stitched runtime automatically.");
+      : "Start Project reuses the active stitch geometry when possible and regenerates it only if needed.");
 
   const heading =
     viewMode === "running"
@@ -202,7 +189,7 @@ export function ProjectPage() {
               {viewMode === "ready" ? (
                 <div className="stage-copy">
                   <h2>Start Project runs the stitched runtime</h2>
-                  <p>It checks inputs, recalculates rigid stitch geometry, prepares the stitched runtime, and starts output.</p>
+                  <p>It checks inputs, reuses the active rigid geometry when it is launch-ready, prepares the stitched runtime, and starts output.</p>
                   <ul className="stage-list">
                     <li>The active runtime model and artifact shown below are the source of truth after start.</li>
                     <li>The live output follows the rigid virtual-center stitch pipeline.</li>
@@ -216,9 +203,9 @@ export function ProjectPage() {
                   <h2>Automatic startup progress</h2>
                   <div className="progress-list" role="list" aria-label="Project start progress">
                     {START_FLOW.map((step, index) => {
-                      const currentIndex = START_FLOW.findIndex((item) => item.id === startPhase);
-                      const isDone = currentIndex > index || startPhase === "running";
-                      const isCurrent = step.id === startPhase || (startPhase === "running" && step.id === "running");
+                      const currentIndex = START_FLOW.findIndex((item) => item.id === displayPhase);
+                      const isDone = currentIndex > index || displayPhase === "running";
+                      const isCurrent = step.id === displayPhase || (displayPhase === "running" && step.id === "running");
                       return (
                         <div
                           key={step.id}
@@ -315,7 +302,7 @@ export function ProjectPage() {
               </div>
               <div>
                 <dt>Fallback used</dt>
-                <dd>{state.fallback_used ? "Yes" : "No"}</dd>
+                <dd>{geometry.fallback_used ? "Yes" : "No"}</dd>
               </div>
               <div>
                 <dt>Output path</dt>
@@ -323,15 +310,15 @@ export function ProjectPage() {
               </div>
               <div>
                 <dt>Bridge reason</dt>
-                <dd>{text(state.output_bridge_reason, "Not available")}</dd>
+                <dd>{text(output.bridge_reason, "Not available")}</dd>
               </div>
               <div>
                 <dt>Writer error</dt>
-                <dd>{text(state.production_output_last_error, "Not available")}</dd>
+                <dd>{text(output.last_error, "Not available")}</dd>
               </div>
               <div>
                 <dt>Zero-copy</dt>
-                <dd>{state.zero_copy_ready ? "Ready" : "Not ready"}</dd>
+                <dd>{zeroCopy.ready ? "Ready" : "Not ready"}</dd>
               </div>
               <div>
                 <dt>Zero-copy reason</dt>
@@ -347,7 +334,7 @@ export function ProjectPage() {
               </div>
               <div>
                 <dt>Launch ready</dt>
-                <dd>{state.runtime_launch_ready ? "Yes" : "No"}</dd>
+                <dd>{geometry.launch_ready ? "Yes" : "No"}</dd>
               </div>
               <div>
                 <dt>Ready reason</dt>
@@ -355,11 +342,11 @@ export function ProjectPage() {
               </div>
               <div>
                 <dt>GPU path</dt>
-                <dd>{text(state.gpu_path_mode, "Unknown")}</dd>
+                <dd>{text(runtime.gpu_path_mode, "Unknown")}</dd>
               </div>
               <div>
                 <dt>GPU path ready</dt>
-                <dd>{state.gpu_path_ready ? "Yes" : "No"}</dd>
+                <dd>{runtime.gpu_path_ready ? "Yes" : "No"}</dd>
               </div>
             </dl>
             {zeroCopyBlockers.length > 0 ? (
@@ -369,7 +356,7 @@ export function ProjectPage() {
             ) : null}
           </details>
 
-          {state.debug_mode ? (
+          {debug.enabled ? (
             <details className="debug-panel" open={viewMode === "starting" || viewMode === "blocked" || viewMode === "error"}>
               <summary>Debug progress</summary>
               <div className="debug-panel-copy">

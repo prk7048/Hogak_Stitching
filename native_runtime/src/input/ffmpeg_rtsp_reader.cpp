@@ -609,14 +609,19 @@ bool open_reader_session(
         transport.begin(),
         [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
     av_dict_set(&options, "rtsp_transport", config.transport.c_str(), 0);
+    av_dict_set(&options, "allowed_media_types", "video", 0);
     av_dict_set(&options, "fflags", "nobuffer", 0);
     av_dict_set(&options, "flags", "low_delay", 0);
+    av_dict_set_int(&options, "probesize", 32 * 1024, 0);
+    av_dict_set_int(&options, "analyzeduration", 250 * 1000, 0);
+    av_dict_set_int(&options, "max_delay", 0, 0);
     av_dict_set_int(&options, "rw_timeout", timeout_us, 0);
     av_dict_set_int(&options, "stimeout", timeout_us, 0);
     av_dict_set_int(&options, "timeout", timeout_us, 0);
     if (transport == "udp") {
         av_dict_set_int(&options, "fifo_size", kUdpReceiveFifoBytes, 0);
         av_dict_set(&options, "overrun_nonfatal", "1", 0);
+        av_dict_set_int(&options, "reorder_queue_size", 0, 0);
     }
 
     const int open_result = avformat_open_input(&format_context, config.url.c_str(), nullptr, &options);
@@ -685,26 +690,66 @@ FfmpegRtspReader::~FfmpegRtspReader() {
 bool FfmpegRtspReader::start(
     const hogak::engine::StreamConfig& config,
     const std::string& ffmpeg_bin,
-    const std::string& input_runtime) {
+    const std::string& input_runtime,
+    bool require_initial_session) {
     stop();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         config_ = config;
         ffmpeg_bin_ = resolve_ffmpeg_bin(ffmpeg_bin);
         input_runtime_ = input_runtime;
+        require_initial_session_ = require_initial_session;
         snapshot_ = ReaderSnapshot{};
         frames_.clear();
         frames_.resize(static_cast<std::size_t>(std::max(1, config.max_buffered_frames)));
         frame_start_index_ = 0;
         frame_count_ = 0;
+        start_attempt_completed_ = false;
+        start_attempt_succeeded_ = false;
+        start_attempt_error_.clear();
     }
     running_.store(true);
     thread_ = std::thread(&FfmpegRtspReader::run, this);
-    return true;
+    if (!require_initial_session) {
+        return true;
+    }
+
+    const auto startup_timeout = std::chrono::duration<double>(
+        std::max(0.5, std::min(15.0, config.timeout_sec + 0.25)));
+    std::unique_lock<std::mutex> lock(mutex_);
+    const bool completed = start_condition_.wait_for(
+        lock,
+        startup_timeout,
+        [this]() { return start_attempt_completed_ || !running_.load(); });
+    const bool startup_ok = completed && start_attempt_completed_ && start_attempt_succeeded_;
+    if (startup_ok) {
+        return true;
+    }
+
+    if (!completed && snapshot_.last_error.empty()) {
+        snapshot_.last_error = "reader startup timed out before the first session opened";
+    } else if (!start_attempt_error_.empty()) {
+        snapshot_.last_error = start_attempt_error_;
+    }
+    lock.unlock();
+    stop();
+    return false;
 }
 
 void FfmpegRtspReader::stop() {
     running_.store(false);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!start_attempt_completed_) {
+            start_attempt_completed_ = true;
+            start_attempt_succeeded_ = false;
+            if (start_attempt_error_.empty()) {
+                start_attempt_error_ = "reader stopped";
+            }
+        }
+        require_initial_session_ = false;
+    }
+    start_condition_.notify_all();
     if (thread_.joinable()) {
         thread_.join();
     }
@@ -899,10 +944,25 @@ void FfmpegRtspReader::run() {
         ReaderSession session;
         std::string session_error;
         if (!open_reader_session(config_, input_runtime_, &session, &session_error)) {
+            bool notify_start_attempt = false;
+            bool strict_start_failure = false;
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 snapshot_.last_error = session_error;
                 snapshot_.launch_failures += 1;
+                if (!start_attempt_completed_) {
+                    start_attempt_completed_ = true;
+                    start_attempt_succeeded_ = false;
+                    start_attempt_error_ = session_error;
+                    notify_start_attempt = true;
+                    strict_start_failure = require_initial_session_;
+                }
+            }
+            if (notify_start_attempt) {
+                start_condition_.notify_all();
+                if (strict_start_failure) {
+                    break;
+                }
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(
                 static_cast<int>(std::max(0.2, config_.reconnect_cooldown_sec) * 1000.0)));
@@ -910,11 +970,21 @@ void FfmpegRtspReader::run() {
         }
 
         packet_wallclock_hints.clear();
+        bool notify_start_attempt = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             snapshot_.last_error.clear();
             snapshot_.content_frozen = false;
             snapshot_.frozen_duration_sec = 0.0;
+            if (!start_attempt_completed_) {
+                start_attempt_completed_ = true;
+                start_attempt_succeeded_ = true;
+                start_attempt_error_.clear();
+                notify_start_attempt = true;
+            }
+        }
+        if (notify_start_attempt) {
+            start_condition_.notify_all();
         }
 
         while (running_.load()) {

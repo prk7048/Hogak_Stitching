@@ -2,30 +2,40 @@
 
 Minimal Vite + React + TypeScript operator surface for the Hogak stitch runtime.
 
-## Run
+The maintained UI is a single page that exposes only:
 
-```bash
+1. project state
+2. start project
+3. stop project
+
+## Dev
+
+```cmd
 npm install
+set HOGAK_API_PROXY_TARGET=http://127.0.0.1:8088
 npm run dev
 ```
 
-## Backend
+## Build
 
-The UI expects these endpoints to exist:
-
-- `GET /api/runtime/state`
-- `GET /api/runtime/events`
-- `GET /api/runtime/preview.jpg`
-- `GET /api/artifacts/geometry`
-- `GET /api/artifacts/geometry/{name}`
-
-If the backend is not available, the UI falls back to placeholder state so the shell still loads.
-
-## Proxy
-
-Set `HOGAK_API_PROXY_TARGET` to point the Vite dev server at a backend origin.
-
-```bash
-set HOGAK_API_PROXY_TARGET=http://127.0.0.1:8000
-npm run dev
+```cmd
+npm run build
 ```
+
+`operator-server` expects the built bundle at `frontend/dist` unless `HOGAK_FRONTEND_DIST_DIR` is set.
+
+## Backend Contract
+
+Run the backend with:
+
+```cmd
+python -m stitching.cli operator-server
+```
+
+The UI expects only these product APIs:
+
+- `GET /api/project/state`
+- `POST /api/project/start`
+- `POST /api/project/stop`
+
+If the backend is unavailable, the UI falls back to a placeholder error state so the shell still loads.

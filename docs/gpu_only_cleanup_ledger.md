@@ -12,7 +12,7 @@ It intentionally captures only:
 - removed product surfaces
 - internal-only fallback paths that remain
 - the official operator flow
-- mesh refresh and rigid rollback handling
+- mesh refresh and internal artifact rollback handling
 - acceptance checkpoints
 
 This ledger is the minimal active cleanup record for the current product path.
@@ -117,7 +117,7 @@ python -m stitching.cli mesh-refresh --left-rtsp "rtsp://LEFT" --right-rtsp "rts
 
 The output of mesh refresh is expected to become the active rigid runtime artifact used by runtime preparation and validation.
 
-## Internal Rigid Rollback
+## Internal Artifact Rollback
 
 The only intended rollback path is:
 
@@ -125,11 +125,13 @@ The only intended rollback path is:
 
 Rollback is not part of the public UI.
 
-It remains available only as an explicit internal rollback path when mesh launch is blocked or mesh artifacts are invalid.
+It remains available only as an explicit internal rollback path for recovery or artifact override.
 
 Rollback must never be silent.
 
-If rigid is active, the runtime state must show that a fallback is in use.
+Rigid is the normal product path, not a fallback by itself.
+
+If a non-default internal artifact is active, the runtime state must show that a fallback is in use.
 
 ## Public Runtime Truth
 
@@ -151,7 +153,7 @@ The branch no longer treats bakeoff selection or promotion state as public opera
 
 The target runtime path remains:
 
-- `NVDEC -> GPU NV12 -> engine direct consume -> mesh remap and blend -> native-nvenc-direct`
+- `NVDEC -> GPU NV12 -> engine direct consume -> virtual-center rigid remap and blend -> native-nvenc-direct`
 
 At this audit point, zero-copy truth is exposed in runtime state, but final confirmation still depends on native runtime validation and build verification.
 
@@ -234,10 +236,12 @@ ffplay -fflags nobuffer -flags low_delay -framedrop -strict experimental "udp://
 
 ## Documentation Drift To Watch
 
-These files may still describe older stories and should be updated later:
+Current maintained docs for the product surface are:
 
 - `README.md`
+- `config/README.md`
+- `frontend/README.md`
 - `native_runtime/README.md`
-- `reports/*`
+- `docs/operator_acceptance.md`
 
-This ledger is the temporary source of truth until those documents are refreshed.
+`reports/*` remains archival and may describe older stories.

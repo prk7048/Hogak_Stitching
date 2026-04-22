@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -152,7 +153,11 @@ public:
     FfmpegRtspReader(const FfmpegRtspReader&) = delete;
     FfmpegRtspReader& operator=(const FfmpegRtspReader&) = delete;
 
-    bool start(const hogak::engine::StreamConfig& config, const std::string& ffmpeg_bin, const std::string& input_runtime);
+    bool start(
+        const hogak::engine::StreamConfig& config,
+        const std::string& ffmpeg_bin,
+        const std::string& input_runtime,
+        bool require_initial_session = false);
     void stop();
     ReaderSnapshot snapshot() const;
     std::vector<BufferedFrameInfo> buffered_frame_infos() const;
@@ -218,6 +223,11 @@ private:
     std::string input_runtime_ = "ffmpeg-cpu";
     std::thread thread_{};
     std::atomic<bool> running_{false};
+    bool require_initial_session_ = false;
+    std::condition_variable start_condition_{};
+    bool start_attempt_completed_ = false;
+    bool start_attempt_succeeded_ = false;
+    std::string start_attempt_error_{};
     ReaderSnapshot snapshot_{};
     std::vector<BufferedFrame> frames_{};
     std::size_t frame_start_index_ = 0;

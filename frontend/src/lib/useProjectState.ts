@@ -6,7 +6,7 @@ const IDLE_POLL_MS = 5000;
 const ACTIVE_POLL_MS = 1000;
 
 function pollIntervalForState(state: ProjectState): number {
-  const status = String(state.status || "").trim().toLowerCase();
+  const status = String(state.lifecycle_state || "").trim().toLowerCase();
   return status === "starting" || status === "running" ? ACTIVE_POLL_MS : IDLE_POLL_MS;
 }
 

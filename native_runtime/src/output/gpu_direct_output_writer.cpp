@@ -509,9 +509,9 @@ bool GpuDirectOutputWriter::start(
     return true;
 }
 
-void GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timestamp_ns*/) {
+OutputSubmitResult GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*timestamp_ns*/) {
     if (!active_.load() || frame.empty()) {
-        return;
+        return OutputSubmitResult::kRejected;
     }
 
     cv::Mat cpu_frame;
@@ -524,7 +524,7 @@ void GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*time
         } catch (const cv::Exception& e) {
             std::lock_guard<std::mutex> lock(mutex_);
             last_error_ = std::string("gpu-direct gpu frame copy failed: ") + e.what();
-            return;
+            return OutputSubmitResult::kRejected;
         }
     } else if (frame.cpu_frame != nullptr && !frame.cpu_frame->empty()) {
         if (frame.cpu_frame->isContinuous()) {
@@ -534,16 +534,18 @@ void GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*time
         }
     }
     if (!frame_on_gpu && cpu_frame.empty()) {
-        return;
+        return OutputSubmitResult::kRejected;
     }
     if (frame_on_gpu && gpu_frame.empty()) {
-        return;
+        return OutputSubmitResult::kRejected;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    OutputSubmitResult result = OutputSubmitResult::kAccepted;
     if (pending_frames_.size() >= kMaxPendingFrames) {
         frames_dropped_ += 1;
         pending_frames_.pop_front();
+        result = OutputSubmitResult::kAcceptedDropOldest;
     }
     PendingFrame pending_frame{};
     if (frame_on_gpu) {
@@ -555,6 +557,7 @@ void GpuDirectOutputWriter::submit(const OutputFrame& frame, std::int64_t /*time
     }
     pending_frames_.push_back(std::move(pending_frame));
     condition_.notify_one();
+    return result;
 }
 
 void GpuDirectOutputWriter::stop() {
@@ -577,6 +580,19 @@ std::int64_t GpuDirectOutputWriter::frames_written() const noexcept {
 std::int64_t GpuDirectOutputWriter::frames_dropped() const noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
     return frames_dropped_;
+}
+
+std::int64_t GpuDirectOutputWriter::pending_frames() const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return static_cast<std::int64_t>(pending_frames_.size());
+}
+
+std::int64_t GpuDirectOutputWriter::max_pending_frames() const noexcept {
+    return static_cast<std::int64_t>(kMaxPendingFrames);
+}
+
+std::string GpuDirectOutputWriter::drop_policy() const {
+    return "drop-oldest";
 }
 
 std::string GpuDirectOutputWriter::last_error() const {

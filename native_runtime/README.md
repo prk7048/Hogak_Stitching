@@ -2,20 +2,10 @@
 
 이 디렉터리는 실시간 stitch를 실제로 수행하는 C++ 네이티브 런타임이다.
 
-상위 구조는 아래처럼 나뉜다.
+현재 유지하는 제품 경로는 `launch-ready rigid runtime artifact` 를 소비하는 구조다.
 
 ```text
-Python:
-calibration / config / launch / monitor
-
-C++ native runtime:
-RTSP ingest -> pair/sync -> stitch -> encode -> output
-```
-
-현재 제품 경로에서는 distortion correction을 잠정적으로 끄고, raw homography 기준으로만 stitch한다.
-
-```text
-RTSP ingest -> pair/sync -> homography warp -> feather blend -> encode -> output
+RTSP ingest -> pair/sync -> rigid geometry remap and blend -> encode -> output
 ```
 
 ## Scope
@@ -25,9 +15,8 @@ RTSP ingest -> pair/sync -> homography warp -> feather blend -> encode -> output
 - RTSP 입력 수신
 - arrival/source dual timestamp 수집
 - left/right frame pair 선택과 sync 판단
-- homography 기반 stitch
-- GPU warp / GPU feather blend
-- encoded probe/transmit 출력
+- GPU stitch 및 blend
+- probe/transmit 출력
 - metrics / control channel
 
 현재 메인 입력/출력 기준:
@@ -40,22 +29,25 @@ RTSP ingest -> pair/sync -> homography warp -> feather blend -> encode -> output
 
 ## Key Files
 
-- [runtime_main.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/app/runtime_main.cpp)
+- [operator_main.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/app/operator_main.cpp)
   - native runtime 진입점
-- [stitch_engine.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/stitch_engine.cpp)
+- [engine.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/engine.cpp)
   - pair/sync, stitch, metrics 핵심
-- [ffmpeg_rtsp_reader.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/input/ffmpeg_rtsp_reader.cpp)
+- [geometry_loader.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/engine/geometry_loader.cpp)
+  - launch-ready geometry artifact load
+- [ffmpeg_rtsp_reader.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/input/ffmpeg_rtsp_reader.cpp)
   - libav 기반 RTSP ingest/decode reader와 arrival/source timestamp 수집
-- [ffmpeg_output_writer.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/ffmpeg_output_writer.cpp)
-  - ffmpeg 기반 encoded output writer
-- [gpu_direct_output_writer.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/gpu_direct_output_writer.cpp)
+- [gpu_direct_output_writer.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/output/gpu_direct_output_writer.cpp)
   - libav/NVENC 기반 transmit writer
-- [control_server.cpp](/c:/Users/Pixellot/Hogak_Stitching/native_runtime/src/control/control_server.cpp)
+- [control_server.cpp](/C:/Users/Pixellot/Hogak_Stitching/native_runtime/src/control/control_server.cpp)
   - JSON Lines control / metrics channel
 
 ## Build
 
+Windows 머신에서는 먼저 prerequisite check를 돌리는 쪽을 기준으로 삼는다:
+
 ```cmd
+bootstrap_native_runtime.ps1
 copy CMakeUserPresets.example.json CMakeUserPresets.json
 cmake --preset windows-release
 cmake --build --preset build-windows-release
@@ -71,111 +63,44 @@ cmake --build --preset build-windows-release
 
 ```text
 native_runtime\build\windows-release\Release\stitch_runtime.exe
+native_runtime\build\windows-release\Release\stitch_capture.exe
 ```
 
-## Run
+## Run Contract
 
-런타임은 보통 Python entrypoint를 통해 실행한다.
+native runtime은 제품 표면에서 직접 호출하지 않는다. Python control plane이 설정을 합치고 launch-ready rigid artifact를 확인한 뒤 native process를 띄운다.
 
 ```cmd
-python -m stitching.cli native-runtime
+python -m stitching.cli operator-server
+python -m stitching.cli mesh-refresh
 ```
 
-viewer 없이:
-
-```cmd
-python -m stitching.cli native-runtime --no-output-ui --no-viewer
-```
-
-strict fresh baseline 검증:
-
-```cmd
-python -m stitching.cli native-validate --duration-sec 600
-```
-
-25fps profile:
-
-```cmd
-python -m stitching.cli --runtime-profile camera25 native-runtime
-```
-
-고부하 preset:
-
-```cmd
-python -m stitching.cli native-runtime --output-standard realtime_gpu_1080p
-```
-
-## Output Model
-
-출력 역할은 둘로 나눈다.
-
-- `probe`: viewer가 켜져 있을 때만 쓰는 local debug stream
-- `transmit`: 실제 외부 송출 경로
-
-viewer on:
-
-```text
-stitched frame -> probe encode -> local receive -> viewer
-               -> transmit encode -> external target
-```
-
-viewer off:
-
-```text
-stitched frame -> transmit encode -> external target
-```
+`stitch_runtime.exe` 를 직접 실행하는 경로는 내부 계약이다. 운영 기준 surface는 `operator-server` 와 `mesh-refresh` 만 유지한다.
 
 ## Config Contract
 
-native runtime이 기대하는 주요 입력:
+실제 기본값은 [config/runtime.json](/C:/Users/Pixellot/Hogak_Stitching/config/runtime.json), `runtime.local.json`, profile override에서 온다.
+
+중요한 입력:
 
 - `left_rtsp`, `right_rtsp`
-- `homography_file`
-- `probe_output_*`
-- `transmit_output_*`
-- `rtsp_transport`
-- `sync_pair_mode`
-- `input_buffer_frames`
-- `gpu_mode`
+- `paths.homography_file`
+- `runtime.probe.*`
+- `runtime.transmit.*`
+- `runtime.rtsp_transport`
+- `runtime.sync_*`
+- `runtime.input_buffer_frames`
+- `runtime.gpu_mode`
 
-실제 기본값은 [config/runtime.json](/c:/Users/Pixellot/Hogak_Stitching/config/runtime.json)과 profile override에서 온다.
-
-현재 sync 관련 핵심 키:
-
-- `sync_time_source`
-- `sync_manual_offset_ms`
-- `sync_auto_offset_window_sec`
-- `sync_auto_offset_max_search_ms`
-- `sync_recalibration_interval_sec`
-- `sync_recalibration_trigger_skew_ms`
-- `sync_recalibration_trigger_wait_ratio`
-- `sync_auto_offset_confidence_min`
-- `distortion_mode`
-- `use_saved_distortion`
-- `distortion_auto_save`
-- `left_distortion_file`
-- `right_distortion_file`
-
-기본값은 `sync_time_source=pts-offset-auto`다.
-기본 distortion 모드는 현재 `off`다.
-
-현재 auto sync는 `0ms prior + strong-evidence correction` 방식이다.
-
-- source PTS가 유효하면 기본 pair 시간축은 `stream_pts_offset`
-- offset 기본 가설은 `0ms`
-- motion correlation이 충분히 강할 때만 offset을 조정
-- 재보정은 작은 step으로만 반영
-- `wallclock`은 자동 운영 기준이 아니라 explicit 진단 모드
+repo의 `config/runtime.json` 은 placeholder RTSP만 유지한다. 실제 현장 값은 `config/runtime.local.json` 을 우선 사용한다.
 
 ## What To Watch
 
 운영 중 먼저 볼 값:
 
 - `stitch_actual_fps`
-- `probe_fps`
 - `transmit_fps`
 - `left_age_ms`, `right_age_ms`
-- `left_source_age_ms`, `right_source_age_ms`
 - `pair_skew_ms`
 - `pair_source_skew_ms_mean`
 - `source_time_mode`
@@ -185,61 +110,16 @@ native runtime이 기대하는 주요 입력:
 - `sync_recalibration_count`
 - `read_fail`, `restart`, `gpu_errors`
 
-간단 해석:
+제품 경로에서 중요한 규칙:
 
-- `stitch_actual_fps`: 실제 fresh stitched frame 속도
-- `transmit_fps`: 실제 송출 cadence
-- `age_ms`: arrival 기준 입력 지연
-- `source_age_ms`: explicit `wallclock` 진단 모드에서만 의미 있는 source age
-- `pair_skew_ms`: arrival 기준 좌우 시간 차이
-- `pair_source_skew_ms_mean`: `stream_pts_offset` 또는 `wallclock` 기준 좌우 시간 차이
-- `source_time_mode`: `stream_pts_offset`, `wallclock`, `fallback-arrival`
-- `sync_effective_offset_ms`: 현재 pair selection에 실제 적용 중인 right-stream offset
-- `sync_offset_source`: `auto`, `manual`, `recalibration`, `arrival-fallback`, `wallclock`
-- `sync_offset_confidence`: auto/recalibration offset 신뢰도
-- `sync_recalibration_count`: runtime 중 offset 재보정 횟수
-- `sync_estimate_pairs`: 최근 auto estimate가 실제로 매칭한 pair 수
-- `sync_estimate_avg_gap_ms`: auto estimate가 선택한 후보들의 평균 gap
-- `sync_estimate_score`: auto estimate selection score
-- `distortion_enabled_left/right`: runtime에서 실제 distortion remap이 켜졌는지
-- `distortion_source_left/right`: 현재는 항상 `off`
-- `distortion_confidence_left/right`: 선택된 distortion profile confidence
-- `distortion_model`: 현재는 metrics 호환성용으로만 남아 있다
-
-distortion 관련 중요한 안전 규칙:
-
-- distortion 기능은 현재 제품 경로에서 **완전히 비활성화** 되어 있다
-- interactive web은 `Start -> Stitch Review -> Runtime Dashboard`만 노출한다
-- `Prepare stitch review`는 active homography가 `undistorted`이면 먼저 raw homography를 복구하거나 raw calibration을 다시 만든다
-- calibration-time inlier overlay는 웹 preview 전용이며, 실제 송출 영상에는 burn-in 하지 않는다
-- overlay는 `data/runtime_calibration_inliers.json`이 active homography와 일치할 때만 보여준다
-
-운영 권장:
-
-- 기본은 `pts-offset-auto`
-- 현장에 고정 offset이 있으면 `pts-offset-manual`
-- auto 실패 시 manual까지 같이 준비하려면 `pts-offset-hybrid`
-- `wallclock`은 기본 운영이 아니라 비교/진단용
-
-현재 기본 튜닝값:
-
-- `sync_auto_offset_window_sec=4.0`
-- `sync_auto_offset_max_search_ms=500.0`
-- `sync_recalibration_interval_sec=60.0`
-- `sync_recalibration_trigger_skew_ms=45.0`
-- `sync_recalibration_trigger_wait_ratio=0.50`
-- `sync_auto_offset_confidence_min=0.85`
-
-## Notes
-
-- operator-facing 이름은 `probe`, `transmit`을 쓴다
-- engine 내부 메트릭 필드는 일부 `output_*`, `production_output_*` 이름을 아직 유지한다
-- calibration 결과 homography는 [data/runtime_homography.json](/c:/Users/Pixellot/Hogak_Stitching/data/runtime_homography.json)을 기본으로 쓴다
+- distortion 기능은 현재 제품 경로에서 비활성화 상태다
+- runtime truth 는 rigid artifact 기준으로만 본다
+- 웹 표면은 `Project state -> Start Project -> Stop Project` 흐름만 유지한다
+- `mesh-refresh` 는 내부 준비 경로이며, 필요 시 `Start Project` 안에서 자동으로 호출될 수 있다
 
 ## Related Docs
 
-- [README.md](/c:/Users/Pixellot/Hogak_Stitching/README.md)
-- [config/README.md](/c:/Users/Pixellot/Hogak_Stitching/config/README.md)
-- [03_current_status_and_roadmap.md](/c:/Users/Pixellot/Hogak_Stitching/reports/03_current_status_and_roadmap.md)
-- [09_baseline_acceptance_and_source_timing.md](/c:/Users/Pixellot/Hogak_Stitching/reports/09_baseline_acceptance_and_source_timing.md)
-- [08_runtime_architecture_diagrams.md](/c:/Users/Pixellot/Hogak_Stitching/reports/08_runtime_architecture_diagrams.md)
+- [README.md](/C:/Users/Pixellot/Hogak_Stitching/README.md)
+- [config/README.md](/C:/Users/Pixellot/Hogak_Stitching/config/README.md)
+- [docs/operator_acceptance.md](/C:/Users/Pixellot/Hogak_Stitching/docs/operator_acceptance.md)
+- [docs/gpu_only_cleanup_ledger.md](/C:/Users/Pixellot/Hogak_Stitching/docs/gpu_only_cleanup_ledger.md)

@@ -4,9 +4,10 @@ import argparse
 import json
 import os
 from pathlib import Path
-import shutil
+import subprocess
+import sys
 import time
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Iterator, cast
 
 import numpy as np
@@ -36,31 +37,10 @@ from stitching.core import (
     _estimate_homography,
     _prepare_warp_plan,
 )
-from stitching.distortion_calibration import (
-    apply_distortion_profile,
-    load_homography_distortion_reference,
-    resolve_distortion_profile,
-)
 from stitching.errors import ErrorCode
 from stitching.project_defaults import (
     DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR,
-    DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE,
-    DEFAULT_NATIVE_DISTORTION_AUTO_SAVE,
-    DEFAULT_NATIVE_DISTORTION_MODE,
     DEFAULT_NATIVE_HOMOGRAPHY_PATH,
-    DEFAULT_NATIVE_LEFT_DISTORTION_FILE,
-    DEFAULT_NATIVE_RIGHT_DISTORTION_FILE,
-    DEFAULT_NATIVE_USE_SAVED_DISTORTION,
-    DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
-    DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG,
-    DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
-    DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG,
-)
-from stitching.runtime_geometry_artifact import (
-    build_runtime_geometry_artifact,
-    RUNTIME_GEOMETRY_SCHEMA_VERSION,
-    runtime_geometry_artifact_path,
-    save_runtime_geometry_artifact,
 )
 from stitching.runtime_site_config import require_configured_rtsp_urls
 
@@ -70,7 +50,6 @@ class NativeCalibrationConfig(StitchConfig):
     left_rtsp: str = ""
     right_rtsp: str = ""
     output_path: Path = Path(DEFAULT_NATIVE_HOMOGRAPHY_PATH)
-    inliers_output_path: Path = Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE)
     debug_dir: Path = Path(DEFAULT_NATIVE_CALIBRATION_DEBUG_DIR)
     rtsp_transport: str = "tcp"
     rtsp_timeout_sec: float = 10.0
@@ -80,16 +59,6 @@ class NativeCalibrationConfig(StitchConfig):
     assisted_reproj_threshold: float = 12.0
     assisted_max_auto_matches: int = 600
     match_backend: str = "classic"
-    distortion_mode: str = DEFAULT_NATIVE_DISTORTION_MODE
-    use_saved_distortion: bool = DEFAULT_NATIVE_USE_SAVED_DISTORTION
-    distortion_auto_save: bool = DEFAULT_NATIVE_DISTORTION_AUTO_SAVE
-    left_distortion_file: Path = Path(DEFAULT_NATIVE_LEFT_DISTORTION_FILE)
-    right_distortion_file: Path = Path(DEFAULT_NATIVE_RIGHT_DISTORTION_FILE)
-    distortion_lens_model_hint: str = DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT
-    distortion_horizontal_fov_deg: float | None = DEFAULT_NATIVE_DISTORTION_HORIZONTAL_FOV_DEG
-    distortion_vertical_fov_deg: float | None = DEFAULT_NATIVE_DISTORTION_VERTICAL_FOV_DEG
-    distortion_camera_model: str = DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL
-    review_required: bool = True
 
 
 @dataclass(slots=True)
@@ -116,30 +85,6 @@ class _CalibrationCandidate:
     overlap_edge_diff: float
     ghosting_score: float
     backend_name: str
-
-
-@dataclass(slots=True)
-class _VirtualCenterRectilinearSolution:
-    left_projection_focal_px: float
-    left_projection_center: tuple[float, float]
-    right_projection_focal_px: float
-    right_projection_center: tuple[float, float]
-    virtual_focal_px: float
-    virtual_center: tuple[float, float]
-    left_to_virtual_rotation: np.ndarray
-    right_to_virtual_rotation: np.ndarray
-    rigid_matrix: np.ndarray
-    mean_error_px: float
-    p95_error_px: float
-    rigid_rotation_deg: float
-    rigid_translation_px: float
-    rigid_scale: float
-    candidate_score: float
-    crop_ratio: float = 0.0
-    right_edge_scale_drift: float = 0.0
-    virtual_roll_correction_deg: float = 0.0
-    mask_tilt_deg: float = 0.0
-    midpoint_alpha: float = 0.5
 
 
 class _AssistedCalibrationUi:
@@ -486,15 +431,9 @@ class _FfmpegCaptureEnv:
 
     def __enter__(self) -> None:
         timeout_us = max(100_000, int(self._timeout_sec * 1_000_000))
-        capture_options = [f"rtsp_transport;{self._transport}", f"timeout;{timeout_us}"]
-        if str(self._transport or "").strip().lower() == "udp":
-            capture_options.extend(
-                [
-                    f"fifo_size;{8 * 1024 * 1024}",
-                    "overrun_nonfatal;1",
-                ]
-            )
-        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "|".join(capture_options)
+        os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            f"rtsp_transport;{self._transport}|timeout;{timeout_us}"
+        )
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self._prev is None:
@@ -566,127 +505,16 @@ def _capture_pair(config: NativeCalibrationConfig) -> tuple[np.ndarray, np.ndarr
         left_cap.release()
         right_cap.release()
 
-
-def _save_homography_file(
-    path: Path,
-    homography: np.ndarray,
-    metadata: dict,
-    *,
-    distortion_reference: str,
-) -> None:
+ 
+def _save_homography_file(path: Path, homography: np.ndarray, metadata: dict) -> None:
     payload = {
         "version": 1,
         "saved_at_epoch_sec": int(time.time()),
-        "distortion_reference": str(distortion_reference),
         "homography": homography.tolist(),
         "metadata": metadata,
     }
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _extract_inlier_points(
-    keypoints_left: list[CvKeyPoint],
-    keypoints_right: list[CvKeyPoint],
-    matches: list[CvDMatch],
-    inlier_mask: np.ndarray,
-) -> tuple[list[list[float]], list[list[float]]]:
-    left_points: list[list[float]] = []
-    right_points: list[list[float]] = []
-    flat_mask = inlier_mask.ravel().tolist()
-    for match, is_inlier in zip(matches, flat_mask):
-        if not bool(is_inlier):
-            continue
-        try:
-            left_point = keypoints_left[int(match.queryIdx)].pt
-            right_point = keypoints_right[int(match.trainIdx)].pt
-        except Exception:
-            continue
-        left_points.append([float(left_point[0]), float(left_point[1])])
-        right_points.append([float(right_point[0]), float(right_point[1])])
-    return left_points, right_points
-
-
-def _save_calibration_inliers_file(
-    path: Path,
-    *,
-    homography: np.ndarray,
-    distortion_reference: str,
-    left_resolution: tuple[int, int],
-    right_resolution: tuple[int, int],
-    output_resolution: tuple[int, int],
-    inliers_count: int,
-    inlier_ratio: float,
-    left_points: list[list[float]],
-    right_points: list[list[float]],
-) -> None:
-    payload = {
-        "version": 1,
-        "saved_at_epoch_sec": int(time.time()),
-        "distortion_reference": str(distortion_reference or "raw"),
-        "homography": homography.tolist(),
-        "left_resolution": [int(left_resolution[0]), int(left_resolution[1])],
-        "right_resolution": [int(right_resolution[0]), int(right_resolution[1])],
-        "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
-        "inliers_count": int(inliers_count),
-        "inlier_ratio": float(inlier_ratio),
-        "left_inlier_points": left_points,
-        "right_inlier_points": right_points,
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-
-
-def _resolve_calibration_distortion(
-    left: np.ndarray,
-    right: np.ndarray,
-    config: NativeCalibrationConfig,
-) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
-    left_resolved = resolve_distortion_profile(
-        left,
-        camera_slot="left",
-        saved_path=config.left_distortion_file,
-        use_saved_distortion=bool(config.use_saved_distortion),
-        distortion_auto_save=bool(config.distortion_auto_save),
-        distortion_mode=str(config.distortion_mode),
-        lens_model_hint=str(config.distortion_lens_model_hint),
-        horizontal_fov_deg=config.distortion_horizontal_fov_deg,
-        vertical_fov_deg=config.distortion_vertical_fov_deg,
-        camera_model=str(config.distortion_camera_model),
-    )
-    right_resolved = resolve_distortion_profile(
-        right,
-        camera_slot="right",
-        saved_path=config.right_distortion_file,
-        use_saved_distortion=bool(config.use_saved_distortion),
-        distortion_auto_save=bool(config.distortion_auto_save),
-        distortion_mode=str(config.distortion_mode),
-        lens_model_hint=str(config.distortion_lens_model_hint),
-        horizontal_fov_deg=config.distortion_horizontal_fov_deg,
-        vertical_fov_deg=config.distortion_vertical_fov_deg,
-        camera_model=str(config.distortion_camera_model),
-    )
-    left_corrected = apply_distortion_profile(left, left_resolved.profile) if left_resolved.enabled else left
-    right_corrected = apply_distortion_profile(right, right_resolved.profile) if right_resolved.enabled else right
-    metadata = {
-        "left_distortion_source": str(left_resolved.source),
-        "right_distortion_source": str(right_resolved.source),
-        "left_distortion_confidence": float(left_resolved.confidence),
-        "right_distortion_confidence": float(right_resolved.confidence),
-        "left_distortion_fit_score": float(left_resolved.fit_score),
-        "right_distortion_fit_score": float(right_resolved.fit_score),
-        "left_distortion_line_count": int(left_resolved.line_count),
-        "right_distortion_line_count": int(right_resolved.line_count),
-        "left_distortion_frame_count": int(left_resolved.frame_count_used),
-        "right_distortion_frame_count": int(right_resolved.frame_count_used),
-        "left_distortion_file": str(left_resolved.active_path or config.left_distortion_file),
-        "right_distortion_file": str(right_resolved.active_path or config.right_distortion_file),
-        "distortion_reference": "undistorted" if left_resolved.enabled or right_resolved.enabled else "raw",
-        "distortion_model": "mixed"
-        if left_resolved.lens_model and right_resolved.lens_model and left_resolved.lens_model != right_resolved.lens_model
-        else str(left_resolved.lens_model or right_resolved.lens_model or "opencv_pinhole"),
-    }
-    return left_corrected, right_corrected, metadata
 
 
 def _estimate_seed_guidance_transform(
@@ -734,385 +562,19 @@ def _reprojection_error(homography: np.ndarray, right_point: tuple[float, float]
     return float(np.linalg.norm(projected - dst))
 
 
-def _default_runtime_projection_params(frame_shape: tuple[int, int] | tuple[int, int, int]) -> tuple[float, tuple[float, float]]:
-    height = max(1, int(frame_shape[0]))
-    width = max(1, int(frame_shape[1]))
-    return float(max(width, height) * 0.90), (float(width) / 2.0, float(height) / 2.0)
-
-
-def _point_to_rectilinear_ray(
-    point: list[float] | tuple[float, float],
-    *,
-    focal_px: float,
-    center_x: float,
-    center_y: float,
-) -> np.ndarray:
-    focal = max(1.0, float(focal_px))
-    x = (float(point[0]) - float(center_x)) / focal
-    y = (float(point[1]) - float(center_y)) / focal
-    ray = np.asarray([x, y, 1.0], dtype=np.float64)
-    norm = float(np.linalg.norm(ray))
-    if norm <= 1e-9:
-        return np.asarray([0.0, 0.0, 1.0], dtype=np.float64)
-    return ray / norm
-
-
-def _project_point_to_cylindrical(
-    point: list[float] | tuple[float, float],
-    *,
-    focal_px: float,
-    center_x: float,
-    center_y: float,
-) -> tuple[float, float]:
-    x = float(point[0])
-    y = float(point[1])
-    focal = max(1.0, float(focal_px))
-    cx = float(center_x)
-    cy = float(center_y)
-    dx = x - cx
-    dy = y - cy
-    theta = np.arctan(dx / focal)
-    cylindrical_x = (focal * theta) + cx
-    cylindrical_y = (focal * dy) / np.sqrt((dx * dx) + (focal * focal)) + cy
-    return float(cylindrical_x), float(cylindrical_y)
-
-
-def _solve_rotation_kabsch(source_rays: np.ndarray, target_rays: np.ndarray) -> np.ndarray:
-    source = np.asarray(source_rays, dtype=np.float64).reshape(-1, 3)
-    target = np.asarray(target_rays, dtype=np.float64).reshape(-1, 3)
-    if source.shape[0] != target.shape[0] or source.shape[0] < 2:
-        raise ValueError("virtual-center rotation solve requires at least two paired rays")
-    covariance = source.T @ target
-    u, _s, vt = np.linalg.svd(covariance)
-    rotation = vt.T @ u.T
-    if np.linalg.det(rotation) < 0.0:
-        vt[-1, :] *= -1.0
-        rotation = vt.T @ u.T
-    return rotation
-
-
-def _midpoint_virtual_rotations(right_to_left_rotation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    rotation = np.asarray(right_to_left_rotation, dtype=np.float64).reshape(3, 3)
-    rvec, _ = cv2.Rodrigues(rotation)
-    rvec = np.asarray(rvec, dtype=np.float64).reshape(3, 1)
-    left_to_virtual, _ = cv2.Rodrigues((-0.5 * rvec).reshape(3, 1))
-    right_to_virtual, _ = cv2.Rodrigues((0.5 * rvec).reshape(3, 1))
-    return (
-        np.asarray(left_to_virtual, dtype=np.float64).reshape(3, 3),
-        np.asarray(right_to_virtual, dtype=np.float64).reshape(3, 3),
-    )
-
-
-def _lock_virtual_roll(
-    left_to_virtual_rotation: np.ndarray,
-    right_to_virtual_rotation: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    left_rotation = np.asarray(left_to_virtual_rotation, dtype=np.float64).reshape(3, 3)
-    right_rotation = np.asarray(right_to_virtual_rotation, dtype=np.float64).reshape(3, 3)
-    projected_right_axis = left_rotation[:, 0]
-    roll_rad = float(np.arctan2(projected_right_axis[1], projected_right_axis[0]))
-    if abs(roll_rad) <= 1e-9:
-        return left_rotation, right_rotation, 0.0
-    cos_value = float(np.cos(-roll_rad))
-    sin_value = float(np.sin(-roll_rad))
-    roll_correction = np.asarray(
-        [
-            [cos_value, -sin_value, 0.0],
-            [sin_value, cos_value, 0.0],
-            [0.0, 0.0, 1.0],
-        ],
-        dtype=np.float64,
-    )
-    return (
-        np.asarray(roll_correction @ left_rotation, dtype=np.float64).reshape(3, 3),
-        np.asarray(roll_correction @ right_rotation, dtype=np.float64).reshape(3, 3),
-        float(np.degrees(roll_rad)),
-    )
-
-
-def _project_ray_to_virtual_rectilinear(
-    ray: np.ndarray,
-    *,
-    focal_px: float,
-    center_x: float,
-    center_y: float,
-) -> tuple[float, float] | None:
-    direction = np.asarray(ray, dtype=np.float64).reshape(3)
-    z = float(direction[2])
-    if z <= 1e-6:
-        return None
-    focal = max(1.0, float(focal_px))
-    x = (focal * float(direction[0]) / z) + float(center_x)
-    y = (focal * float(direction[1]) / z) + float(center_y)
-    if not np.isfinite(x) or not np.isfinite(y):
-        return None
-    return float(x), float(y)
-
-
-def _build_rectilinear_inverse_map(
-    *,
-    source_shape: tuple[int, int] | tuple[int, int, int],
-    output_resolution: tuple[int, int],
-    focal_px: float,
-    center: tuple[float, float],
-    virtual_focal_px: float,
-    virtual_center: tuple[float, float],
-    virtual_to_source_rotation: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    output_width = max(1, int(output_resolution[0]))
-    output_height = max(1, int(output_resolution[1]))
-    grid_x, grid_y = np.meshgrid(
-        np.arange(output_width, dtype=np.float64),
-        np.arange(output_height, dtype=np.float64),
-    )
-    ray_x = (grid_x - float(virtual_center[0])) / max(1.0, float(virtual_focal_px))
-    ray_y = (grid_y - float(virtual_center[1])) / max(1.0, float(virtual_focal_px))
-    rays = np.stack([ray_x, ray_y, np.ones_like(ray_x)], axis=-1)
-    norms = np.linalg.norm(rays, axis=-1, keepdims=True)
-    norms = np.where(norms <= 1e-9, 1.0, norms)
-    normalized = rays / norms
-    source = np.einsum(
-        "ij,hwj->hwi",
-        np.asarray(virtual_to_source_rotation, dtype=np.float64).reshape(3, 3),
-        normalized,
-    )
-    z = np.where(np.abs(source[..., 2]) < 1e-6, 1e-6, source[..., 2])
-    map_x = ((float(focal_px) * source[..., 0] / z) + float(center[0])).astype(np.float32)
-    map_y = ((float(focal_px) * source[..., 1] / z) + float(center[1])).astype(np.float32)
-    source_height = max(1, int(source_shape[0]))
-    source_width = max(1, int(source_shape[1]))
-    invalid = (
-        ~np.isfinite(map_x)
-        | ~np.isfinite(map_y)
-        | (source[..., 2] <= 1e-6)
-        | (map_x < 0.0)
-        | (map_y < 0.0)
-        | (map_x > float(source_width - 1))
-        | (map_y > float(source_height - 1))
-    )
-    map_x[invalid] = -1.0
-    map_y[invalid] = -1.0
-    return map_x, map_y
-
-
-def _compose_affine_inverse_map(
-    base_map_x: np.ndarray,
-    base_map_y: np.ndarray,
-    alignment_matrix: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray]:
-    affine = np.asarray(alignment_matrix, dtype=np.float64).reshape(2, 3)
-    inverse = cv2.invertAffineTransform(affine.astype(np.float32))
-    height, width = base_map_x.shape[:2]
-    grid_x, grid_y = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-    sample_x = inverse[0, 0] * grid_x + inverse[0, 1] * grid_y + inverse[0, 2]
-    sample_y = inverse[1, 0] * grid_x + inverse[1, 1] * grid_y + inverse[1, 2]
-    remapped_x = cv2.remap(
-        base_map_x,
-        sample_x,
-        sample_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=-1,
-    )
-    remapped_y = cv2.remap(
-        base_map_y,
-        sample_x,
-        sample_y,
-        interpolation=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=-1,
-    )
-    return remapped_x, remapped_y
-
-
-def _largest_valid_rect(mask: np.ndarray) -> tuple[int, int, int, int]:
-    binary = (np.asarray(mask, dtype=np.uint8) > 0).astype(np.uint8)
-    height, width = binary.shape[:2]
-    heights = np.zeros(width, dtype=np.int32)
-    best_area = 0
-    best_rect = (0, 0, width, height)
-    for y in range(height):
-        heights = np.where(binary[y] > 0, heights + 1, 0)
-        stack: list[int] = []
-        for x in range(width + 1):
-            current = heights[x] if x < width else 0
-            while stack and current < heights[stack[-1]]:
-                h = heights[stack.pop()]
-                x0 = stack[-1] + 1 if stack else 0
-                rect_width = x - x0
-                area = int(h * rect_width)
-                if area > best_area and h > 0 and rect_width > 0:
-                    best_area = area
-                    best_rect = (x0, y - h + 1, rect_width, h)
-            stack.append(x)
-    return best_rect
-
-
-def _right_edge_scale_drift(map_x: np.ndarray, map_y: np.ndarray) -> float:
-    valid = np.isfinite(map_x) & np.isfinite(map_y) & (map_x >= 0.0) & (map_y >= 0.0)
-    if not np.any(valid):
-        return 0.0
-    grad_x = cv2.Sobel(np.asarray(map_x, dtype=np.float32), cv2.CV_32F, 1, 0, ksize=3)
-    grad_y = cv2.Sobel(np.asarray(map_y, dtype=np.float32), cv2.CV_32F, 1, 0, ksize=3)
-    local_scale = np.sqrt(grad_x * grad_x + grad_y * grad_y)
-    valid_cols = np.where(np.any(valid, axis=0))[0]
-    if valid_cols.size < 10:
-        return 0.0
-    width = int(valid_cols[-1] - valid_cols[0] + 1)
-    center_start = int(valid_cols[0] + width * 0.40)
-    center_end = int(valid_cols[0] + width * 0.60)
-    right_start = int(valid_cols[-1] - max(2, int(width * 0.15)))
-    center_band = np.zeros_like(valid, dtype=bool)
-    right_band = np.zeros_like(valid, dtype=bool)
-    center_band[:, max(0, center_start) : min(valid.shape[1], center_end)] = True
-    right_band[:, max(0, right_start) : valid.shape[1]] = True
-    center_values = local_scale[valid & center_band]
-    right_values = local_scale[valid & right_band]
-    if center_values.size == 0 or right_values.size == 0:
-        return 0.0
-    center_median = float(np.median(center_values))
-    right_median = float(np.median(right_values))
-    if right_median <= 1e-6:
-        return 0.0
-    return float(center_median / right_median)
-
-
-def _valid_mask_tilt_deg(mask: np.ndarray) -> float:
-    ys, xs = np.where(np.asarray(mask, dtype=np.uint8) > 0)
-    if xs.size < 8:
-        return 0.0
-    centered_x = xs.astype(np.float64) - float(np.mean(xs))
-    centered_y = ys.astype(np.float64) - float(np.mean(ys))
-    covariance = np.cov(np.stack([centered_x, centered_y], axis=0))
-    eigenvalues, eigenvectors = np.linalg.eigh(covariance)
-    principal = eigenvectors[:, int(np.argmax(eigenvalues))]
-    angle_rad = float(np.arctan2(principal[1], principal[0]))
-    angle_deg = abs(float(np.degrees(angle_rad)))
-    if angle_deg > 90.0:
-        angle_deg = 180.0 - angle_deg
-    return float(angle_deg)
-
-
-def _estimate_runtime_alignment_affine(
-    right_points: list[list[float]] | list[tuple[float, float]],
-    left_points: list[list[float]] | list[tuple[float, float]],
-    homography: np.ndarray,
-    *,
-    left_projection_focal_px: float,
-    left_projection_center: tuple[float, float],
-    right_projection_focal_px: float,
-    right_projection_center: tuple[float, float],
-) -> np.ndarray:
-    if len(right_points) >= 3 and len(left_points) >= 3:
-        src_points = np.float32(
-            [
-                _project_point_to_cylindrical(
-                    point,
-                    focal_px=right_projection_focal_px,
-                    center_x=right_projection_center[0],
-                    center_y=right_projection_center[1],
-                )
-                for point in right_points
-            ]
-        ).reshape(-1, 2)
-        dst_points = np.float32(
-            [
-                _project_point_to_cylindrical(
-                    point,
-                    focal_px=left_projection_focal_px,
-                    center_x=left_projection_center[0],
-                    center_y=left_projection_center[1],
-                )
-                for point in left_points
-            ]
-        ).reshape(-1, 2)
-        affine, _ = cv2.estimateAffinePartial2D(
-            src_points,
-            dst_points,
-            method=cv2.LMEDS,
-        )
-        if affine is not None:
-            return np.asarray(affine, dtype=np.float64).reshape(2, 3)
-
-    homography_array = np.asarray(homography, dtype=np.float64).reshape(3, 3)
-    return homography_array[:2, :].copy()
-
-
-def _estimate_virtual_center_rigid(
-    source_points: np.ndarray,
-    target_points: np.ndarray,
-) -> tuple[np.ndarray, float, float, float]:
-    source = np.asarray(source_points, dtype=np.float64).reshape(-1, 2)
-    target = np.asarray(target_points, dtype=np.float64).reshape(-1, 2)
-    if source.shape[0] != target.shape[0] or source.shape[0] < 1:
-        raise ValueError("virtual-center rigid solve requires paired points")
-    if source.shape[0] == 1:
-        translation = target[0] - source[0]
-        rigid = np.asarray(
-            [
-                [1.0, 0.0, float(translation[0])],
-                [0.0, 1.0, float(translation[1])],
-            ],
-            dtype=np.float64,
-        )
-        return rigid, 0.0, float(np.linalg.norm(translation)), 1.0
-
-    source_mean = np.mean(source, axis=0)
-    target_mean = np.mean(target, axis=0)
-    source_centered = source - source_mean
-    target_centered = target - target_mean
-    covariance = source_centered.T @ target_centered
-    u, _s, vt = np.linalg.svd(covariance)
-    rotation = vt.T @ u.T
-    if np.linalg.det(rotation) < 0.0:
-        vt[-1, :] *= -1.0
-        rotation = vt.T @ u.T
-    translation = target_mean - (rotation @ source_mean)
-    rigid = np.zeros((2, 3), dtype=np.float64)
-    rigid[:2, :2] = rotation
-    rigid[:, 2] = translation
-    rotation_deg = float(np.degrees(np.arctan2(rotation[1, 0], rotation[0, 0])))
-    translation_px = float(np.linalg.norm(translation))
-    return rigid, rotation_deg, translation_px, 1.0
-
-
-def _match_backend_priority(match_backend: str) -> list[str]:
-    requested = str(match_backend or "").strip().lower()
-    if requested in {"orb", "orb-only"}:
-        return ["orb"]
-    if requested in {"sift", "sift-primary", "classic", "auto", ""}:
-        return ["sift", "orb"]
-    return ["sift", "orb"]
-
-
-def _detect_matches_for_backend_raw(
+def _detect_and_match_classic_raw(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
-    backend: str,
-) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
+) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch]]:
     gray_left = cv2.cvtColor(left, cv2.COLOR_BGR2GRAY)
     gray_right = cv2.cvtColor(right, cv2.COLOR_BGR2GRAY)
-    requested_backend = str(config.match_backend or "").strip().lower()
-
-    if backend == "sift":
-        sift_factory = getattr(cv2, "SIFT_create", None)
-        if sift_factory is None:
-            raise StitchingFailure(ErrorCode.OVERLAP_LOW, "sift detector unavailable")
-        detector = sift_factory(nfeatures=max(0, int(config.max_features)))
-        norm_type = cv2.NORM_L2
-        backend_name = "sift-primary"
-    else:
-        detector = cv2.ORB_create(nfeatures=max(0, int(config.max_features)))
-        norm_type = cv2.NORM_HAMMING
-        backend_name = "orb" if requested_backend in {"orb", "orb-only"} else "orb-fallback"
-
+    detector = cv2.ORB_create(nfeatures=config.max_features)
     keypoints_left, descriptors_left = detector.detectAndCompute(gray_left, None)
     keypoints_right, descriptors_right = detector.detectAndCompute(gray_right, None)
     if descriptors_left is None or descriptors_right is None:
         raise StitchingFailure(ErrorCode.OVERLAP_LOW, "descriptor extraction failed")
-
-    matcher = cv2.BFMatcher(norm_type, crossCheck=False)
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=False)
     knn_matches = matcher.knnMatch(descriptors_left, descriptors_right, k=2)
     good_matches: list[CvDMatch] = []
     for pair in knn_matches:
@@ -1121,46 +583,7 @@ def _detect_matches_for_backend_raw(
         m, n = pair
         if m.distance < config.ratio_test * n.distance:
             good_matches.append(m)
-    if not good_matches:
-        raise StitchingFailure(ErrorCode.OVERLAP_LOW, f"{backend_name} produced no matches")
-    return keypoints_left, keypoints_right, good_matches, backend_name
-
-
-def _detect_and_match_feature_raw(
-    left: np.ndarray,
-    right: np.ndarray,
-    config: NativeCalibrationConfig,
-    *,
-    minimum_match_count: int | None = None,
-) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
-    for backend in _match_backend_priority(config.match_backend):
-        try:
-            keypoints_left, keypoints_right, good_matches, backend_name = _detect_matches_for_backend_raw(
-                left,
-                right,
-                config,
-                backend,
-            )
-        except StitchingFailure:
-            continue
-        if minimum_match_count is None or len(good_matches) >= int(minimum_match_count):
-            return keypoints_left, keypoints_right, good_matches, backend_name
-
-    raise StitchingFailure(ErrorCode.OVERLAP_LOW, "feature matching failed with SIFT and ORB backends")
-
-
-def _detect_and_match_classic_raw(
-    left: np.ndarray,
-    right: np.ndarray,
-    config: NativeCalibrationConfig,
-) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch]]:
-    keypoints_left, keypoints_right, matches, _backend_name = _detect_and_match_feature_raw(
-        left,
-        right,
-        config,
-        minimum_match_count=8,
-    )
-    return keypoints_left, keypoints_right, matches
+    return keypoints_left, keypoints_right, good_matches
 
 
 def _guidance_threshold_px(config: NativeCalibrationConfig, seed_model: str) -> float:
@@ -1213,53 +636,18 @@ def _build_assisted_matches(
     return keypoints_left_auto, keypoints_right_auto, filtered_auto_matches, "assisted", seed_model, backend_name
 
 
-def _build_manual_matches(
-    left_points: list[tuple[float, float]],
-    right_points: list[tuple[float, float]],
-) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str, str, str]:
-    pair_count = min(len(left_points), len(right_points))
-    if pair_count < 4:
-        raise StitchingFailure(
-            ErrorCode.HOMOGRAPHY_FAIL,
-            f"manual correspondence pairs below threshold: {pair_count} < 4",
-        )
-
-    keypoints_left: list[CvKeyPoint] = []
-    keypoints_right: list[CvKeyPoint] = []
-    matches: list[CvDMatch] = []
-    for index, (left_pt, right_pt) in enumerate(zip(left_points[:pair_count], right_points[:pair_count])):
-        keypoints_left.append(cv2.KeyPoint(float(left_pt[0]), float(left_pt[1]), 1.0))
-        keypoints_right.append(cv2.KeyPoint(float(right_pt[0]), float(right_pt[1]), 1.0))
-        matches.append(cv2.DMatch(index, index, 0, 0.0))
-    return keypoints_left, keypoints_right, matches, "manual", "manual_pairs", "manual_points"
-
-
-def _manual_candidate_config(
-    config: NativeCalibrationConfig,
-    *,
-    pair_count: int,
-) -> NativeCalibrationConfig:
-    manual_min_inliers = max(4, min(int(pair_count), 6))
-    manual_min_matches = max(4, min(int(pair_count), int(config.min_matches)))
-    return replace(
-        config,
-        min_inliers=manual_min_inliers,
-        min_matches=manual_min_matches,
-    )
-
-
 def _detect_auto_matches(
     left: np.ndarray,
     right: np.ndarray,
     config: NativeCalibrationConfig,
 ) -> tuple[list[CvKeyPoint], list[CvKeyPoint], list[CvDMatch], str]:
-    keypoints_left, keypoints_right, matches, backend_name = _detect_and_match_feature_raw(
-        left,
-        right,
-        config,
-        minimum_match_count=int(config.min_matches),
-    )
-    return keypoints_left, keypoints_right, matches, backend_name
+    keypoints_left, keypoints_right, matches = _detect_and_match_classic_raw(left, right, config)
+    if len(matches) < int(config.min_matches):
+        raise StitchingFailure(
+            ErrorCode.OVERLAP_LOW,
+            f"matches below threshold: {len(matches)} < {int(config.min_matches)}",
+        )
+    return keypoints_left, keypoints_right, matches, "classic"
 
 
 def _validate_calibration_quality(
@@ -1416,221 +804,6 @@ def _clamp_unit(value: float) -> float:
     return max(0.0, min(1.0, float(value)))
 
 
-def _score_virtual_center_candidate(
-    *,
-    mean_error_px: float,
-    p95_error_px: float,
-    rigid_rotation_deg: float,
-    rigid_translation_px: float,
-    crop_ratio: float,
-    right_edge_scale_drift: float,
-    mask_tilt_deg: float,
-    output_resolution: tuple[int, int],
-) -> float:
-    width = max(1, int(output_resolution[0]))
-    height = max(1, int(output_resolution[1]))
-    translation_limit = max(8.0, float(max(width, height)) * 0.015)
-    mean_term = _clamp_unit(1.0 - (float(mean_error_px) / 6.0))
-    p95_term = _clamp_unit(1.0 - (float(p95_error_px) / 12.0))
-    rotation_term = _clamp_unit(1.0 - (abs(float(rigid_rotation_deg)) / 5.0))
-    translation_term = _clamp_unit(1.0 - (float(rigid_translation_px) / translation_limit))
-    crop_term = _clamp_unit((float(crop_ratio) - 0.45) / 0.30)
-    scale_term = _clamp_unit(1.0 - (abs(float(right_edge_scale_drift) - 1.0) / 0.20))
-    tilt_term = _clamp_unit(1.0 - (abs(float(mask_tilt_deg)) / 8.0))
-    residual_term = (rotation_term * 0.50) + (translation_term * 0.50)
-    visual_term = (crop_term * 0.45) + (scale_term * 0.35) + (tilt_term * 0.20)
-    return float((mean_term * 0.50) + (p95_term * 0.15) + (residual_term * 0.10) + (visual_term * 0.25))
-
-
-def _solve_virtual_center_rectilinear(
-    *,
-    left_points: list[list[float]] | list[tuple[float, float]],
-    right_points: list[list[float]] | list[tuple[float, float]],
-    left_shape: tuple[int, int] | tuple[int, int, int],
-    right_shape: tuple[int, int] | tuple[int, int, int],
-    output_resolution: tuple[int, int],
-) -> _VirtualCenterRectilinearSolution:
-    if len(left_points) != len(right_points) or len(left_points) < 3:
-        raise ValueError("virtual-center solve requires at least three paired inlier points")
-
-    left_default_focal_px, left_projection_center = _default_runtime_projection_params(left_shape)
-    right_default_focal_px, right_projection_center = _default_runtime_projection_params(right_shape)
-    output_height = max(1, int(output_resolution[1]))
-    output_width = max(1, int(output_resolution[0]))
-    virtual_default_focal_px, virtual_center = _default_runtime_projection_params((output_height, output_width))
-    scale_candidates = (0.70, 0.80, 0.90, 1.00, 1.10, 1.25, 1.40)
-    best_solution: _VirtualCenterRectilinearSolution | None = None
-
-    for scale in scale_candidates:
-        left_focal_px = float(left_default_focal_px * scale)
-        right_focal_px = float(right_default_focal_px * scale)
-        virtual_focal_px = float(virtual_default_focal_px * scale)
-        left_rays = np.asarray(
-            [
-                _point_to_rectilinear_ray(
-                    point,
-                    focal_px=left_focal_px,
-                    center_x=left_projection_center[0],
-                    center_y=left_projection_center[1],
-                )
-                for point in left_points
-            ],
-            dtype=np.float64,
-        ).reshape(-1, 3)
-        right_rays = np.asarray(
-            [
-                _point_to_rectilinear_ray(
-                    point,
-                    focal_px=right_focal_px,
-                    center_x=right_projection_center[0],
-                    center_y=right_projection_center[1],
-                )
-                for point in right_points
-            ],
-            dtype=np.float64,
-        ).reshape(-1, 3)
-        right_to_left_rotation = _solve_rotation_kabsch(right_rays, left_rays)
-        left_to_virtual_rotation, right_to_virtual_rotation = _midpoint_virtual_rotations(right_to_left_rotation)
-        left_to_virtual_rotation, right_to_virtual_rotation, virtual_roll_correction_deg = _lock_virtual_roll(
-            left_to_virtual_rotation,
-            right_to_virtual_rotation,
-        )
-
-        left_virtual_points: list[tuple[float, float]] = []
-        right_virtual_points: list[tuple[float, float]] = []
-        for left_ray, right_ray in zip(left_rays, right_rays, strict=False):
-            left_virtual = _project_ray_to_virtual_rectilinear(
-                left_to_virtual_rotation @ left_ray,
-                focal_px=virtual_focal_px,
-                center_x=virtual_center[0],
-                center_y=virtual_center[1],
-            )
-            right_virtual = _project_ray_to_virtual_rectilinear(
-                right_to_virtual_rotation @ right_ray,
-                focal_px=virtual_focal_px,
-                center_x=virtual_center[0],
-                center_y=virtual_center[1],
-            )
-            if left_virtual is None or right_virtual is None:
-                continue
-            left_virtual_points.append(left_virtual)
-            right_virtual_points.append(right_virtual)
-
-        if len(left_virtual_points) < 3:
-            continue
-
-        left_virtual_array = np.asarray(left_virtual_points, dtype=np.float64).reshape(-1, 2)
-        right_virtual_array = np.asarray(right_virtual_points, dtype=np.float64).reshape(-1, 2)
-        rigid_matrix, rigid_rotation_deg, rigid_translation_px, rigid_scale = _estimate_virtual_center_rigid(
-            right_virtual_array,
-            left_virtual_array,
-        )
-        right_virtual_h = np.concatenate(
-            [right_virtual_array, np.ones((right_virtual_array.shape[0], 1), dtype=np.float64)],
-            axis=1,
-        )
-        aligned_right_virtual = (rigid_matrix @ right_virtual_h.T).T
-        errors = np.linalg.norm(aligned_right_virtual - left_virtual_array, axis=1)
-        mean_error_px = float(np.mean(errors)) if errors.size else 9999.0
-        p95_error_px = float(np.percentile(errors, 95.0)) if errors.size else 9999.0
-        left_map_x, left_map_y = _build_rectilinear_inverse_map(
-            source_shape=left_shape,
-            output_resolution=(output_width, output_height),
-            focal_px=left_focal_px,
-            center=(float(left_projection_center[0]), float(left_projection_center[1])),
-            virtual_focal_px=virtual_focal_px,
-            virtual_center=(float(virtual_center[0]), float(virtual_center[1])),
-            virtual_to_source_rotation=np.linalg.inv(left_to_virtual_rotation),
-        )
-        right_map_x, right_map_y = _build_rectilinear_inverse_map(
-            source_shape=right_shape,
-            output_resolution=(output_width, output_height),
-            focal_px=right_focal_px,
-            center=(float(right_projection_center[0]), float(right_projection_center[1])),
-            virtual_focal_px=virtual_focal_px,
-            virtual_center=(float(virtual_center[0]), float(virtual_center[1])),
-            virtual_to_source_rotation=np.linalg.inv(right_to_virtual_rotation),
-        )
-        left_mask = cv2.remap(
-            np.full((int(left_shape[0]), int(left_shape[1])), 255, dtype=np.uint8),
-            left_map_x,
-            left_map_y,
-            interpolation=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        right_mask = cv2.remap(
-            np.full((int(right_shape[0]), int(right_shape[1])), 255, dtype=np.uint8),
-            right_map_x,
-            right_map_y,
-            interpolation=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        right_mask = cv2.warpAffine(
-            right_mask,
-            np.asarray(rigid_matrix, dtype=np.float32).reshape(2, 3),
-            (output_width, output_height),
-            flags=cv2.INTER_NEAREST,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=0,
-        )
-        final_map_x, final_map_y = _compose_affine_inverse_map(
-            right_map_x,
-            right_map_y,
-            np.asarray(rigid_matrix, dtype=np.float64),
-        )
-        valid_mask = ((left_mask > 0) | (right_mask > 0)).astype(np.uint8)
-        crop_x, crop_y, crop_w, crop_h = _largest_valid_rect(valid_mask)
-        crop_ratio = float((crop_w * crop_h) / max(1, output_width * output_height))
-        right_edge_scale_drift = _right_edge_scale_drift(final_map_x, final_map_y)
-        mask_tilt_deg = _valid_mask_tilt_deg(valid_mask)
-        candidate_score = _score_virtual_center_candidate(
-            mean_error_px=mean_error_px,
-            p95_error_px=p95_error_px,
-            rigid_rotation_deg=rigid_rotation_deg,
-            rigid_translation_px=rigid_translation_px,
-            crop_ratio=crop_ratio,
-            right_edge_scale_drift=right_edge_scale_drift,
-            mask_tilt_deg=mask_tilt_deg,
-            output_resolution=(output_width, output_height),
-        )
-        candidate = _VirtualCenterRectilinearSolution(
-            left_projection_focal_px=left_focal_px,
-            left_projection_center=(float(left_projection_center[0]), float(left_projection_center[1])),
-            right_projection_focal_px=right_focal_px,
-            right_projection_center=(float(right_projection_center[0]), float(right_projection_center[1])),
-            virtual_focal_px=virtual_focal_px,
-            virtual_center=(float(virtual_center[0]), float(virtual_center[1])),
-            left_to_virtual_rotation=np.asarray(left_to_virtual_rotation, dtype=np.float64).reshape(3, 3),
-            right_to_virtual_rotation=np.asarray(right_to_virtual_rotation, dtype=np.float64).reshape(3, 3),
-            rigid_matrix=np.asarray(rigid_matrix, dtype=np.float64).reshape(2, 3),
-            mean_error_px=mean_error_px,
-            p95_error_px=p95_error_px,
-            rigid_rotation_deg=rigid_rotation_deg,
-            rigid_translation_px=rigid_translation_px,
-            rigid_scale=rigid_scale,
-            candidate_score=candidate_score,
-            crop_ratio=crop_ratio,
-            right_edge_scale_drift=right_edge_scale_drift,
-            virtual_roll_correction_deg=virtual_roll_correction_deg,
-            mask_tilt_deg=mask_tilt_deg,
-        )
-        if (
-            best_solution is None
-            or candidate.candidate_score > best_solution.candidate_score
-            or (
-                abs(candidate.candidate_score - best_solution.candidate_score) <= 1e-9
-                and candidate.mean_error_px < best_solution.mean_error_px
-            )
-        ):
-            best_solution = candidate
-
-    if best_solution is None:
-        raise ValueError("virtual-center rectilinear solve failed to produce a valid candidate")
-    return best_solution
-
-
 def _mean_reprojection_error(
     homography: np.ndarray,
     keypoints_left: list[CvKeyPoint],
@@ -1721,20 +894,6 @@ def _compute_visual_metrics(
     return visual_score, luma_diff, edge_diff_mean, ghosting
 
 
-def _is_output_geometry_plan_failure(exc: StitchingFailure) -> bool:
-    if exc.code != ErrorCode.HOMOGRAPHY_FAIL:
-        return False
-    detail = str(exc.detail or "").strip().lower()
-    return any(
-        token in detail
-        for token in (
-            "output geometry too large",
-            "output pixel count too large",
-            "invalid output geometry",
-        )
-    )
-
-
 def _build_candidate(
     *,
     left: np.ndarray,
@@ -1756,14 +915,7 @@ def _build_candidate(
             raise
         homography, inlier_mask = _estimate_affine_homography(keypoints_left, keypoints_right, matches, config)
         transform_model = "affine_fallback"
-    try:
-        plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
-    except StitchingFailure as exc:
-        if transform_model != "homography" or not _is_output_geometry_plan_failure(exc):
-            raise
-        homography, inlier_mask = _estimate_affine_homography(keypoints_left, keypoints_right, matches, config)
-        transform_model = "affine_geometry_fallback"
-        plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+    plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
     inliers_count = int(inlier_mask.ravel().sum())
     match_count = int(len(matches))
     inlier_ratio = float(inliers_count / float(max(1, match_count)))
@@ -1871,185 +1023,24 @@ def _write_debug_outputs(
     cv2.imwrite(str(config.debug_dir / "native_calibration_preview.jpg"), stitched)
 
 
-def save_native_calibration_artifacts(
-    config: NativeCalibrationConfig,
-    result: dict[str, Any],
-) -> dict[str, Any]:
-    homography = np.asarray(result.get("homography_matrix"), dtype=np.float64).reshape(3, 3)
-    left = np.asarray(result.get("left_frame"), dtype=np.uint8)
-    right = np.asarray(result.get("right_frame"), dtype=np.uint8)
-    stitched = np.asarray(result.get("stitched_preview_frame"), dtype=np.uint8)
-    inlier_preview = np.asarray(result.get("inlier_preview_frame"), dtype=np.uint8)
-    metadata = dict(result.get("metadata") or {})
-    left_inlier_points = list(result.get("left_inlier_points") or [])
-    right_inlier_points = list(result.get("right_inlier_points") or [])
-    distortion_reference = str(result.get("distortion_reference") or metadata.get("distortion_reference") or "raw")
-    geometry_file = runtime_geometry_artifact_path(config.output_path)
-    output_resolution = (int(result["output_resolution"][0]), int(result["output_resolution"][1]))
-    seam_transition_px = max(48, int(round(min(output_resolution[0], output_resolution[1]) * 0.04)))
-
-    _write_debug_outputs(config, left, right, stitched, inlier_preview)
-    _save_homography_file(
-        config.output_path,
-        homography,
-        metadata,
-        distortion_reference=distortion_reference,
-    )
-    metadata["runtime_geometry_schema_version"] = RUNTIME_GEOMETRY_SCHEMA_VERSION
-    metadata["runtime_geometry_file"] = str(geometry_file)
-
-    geometry_artifact: dict[str, Any]
-    try:
-        virtual_center_solution = _solve_virtual_center_rectilinear(
-            left_points=left_inlier_points,
-            right_points=right_inlier_points,
-            left_shape=left.shape,
-            right_shape=right.shape,
-            output_resolution=output_resolution,
-        )
-    except Exception as exc:
-        metadata["runtime_geometry_model"] = "cylindrical-affine"
-        metadata["runtime_geometry_warp_model"] = "warpPerspective"
-        metadata["runtime_geometry_fallback_reason"] = str(exc)
-        left_projection_focal_px, left_projection_center = _default_runtime_projection_params(left.shape)
-        right_projection_focal_px, right_projection_center = _default_runtime_projection_params(right.shape)
-        geometry_artifact = build_runtime_geometry_artifact(
-            source_homography_file=config.output_path,
-            geometry_file=geometry_file,
-            homography=homography,
-            metadata=metadata,
-            distortion_reference=distortion_reference,
-            left_resolution=(int(left.shape[1]), int(left.shape[0])),
-            right_resolution=(int(right.shape[1]), int(right.shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(result["inliers_count"]),
-            inlier_ratio=float(result["inlier_ratio"]),
-            left_inlier_points=left_inlier_points,
-            right_inlier_points=right_inlier_points,
-            geometry_model="cylindrical-affine",
-            alignment_model="affine",
-            alignment_matrix=_estimate_runtime_alignment_affine(
-                right_inlier_points,
-                left_inlier_points,
-                homography,
-                left_projection_focal_px=left_projection_focal_px,
-                left_projection_center=left_projection_center,
-                right_projection_focal_px=right_projection_focal_px,
-                right_projection_center=right_projection_center,
-            ),
-            projection_left_focal_px=left_projection_focal_px,
-            projection_left_center=left_projection_center,
-            projection_right_focal_px=right_projection_focal_px,
-            projection_right_center=right_projection_center,
-            seam_transition_px=seam_transition_px,
-        )
-    else:
-        metadata["runtime_geometry_model"] = "virtual-center-rectilinear"
-        metadata["runtime_geometry_warp_model"] = "virtual-center-remap"
-        metadata["virtual_center_mean_error_px"] = float(virtual_center_solution.mean_error_px)
-        metadata["virtual_center_p95_error_px"] = float(virtual_center_solution.p95_error_px)
-        metadata["virtual_center_scale"] = float(virtual_center_solution.rigid_scale)
-        metadata["virtual_center_rotation_deg"] = float(virtual_center_solution.rigid_rotation_deg)
-        metadata["virtual_center_translation_px"] = float(virtual_center_solution.rigid_translation_px)
-        metadata["virtual_center_candidate_score"] = float(virtual_center_solution.candidate_score)
-        metadata["virtual_center_crop_ratio"] = float(virtual_center_solution.crop_ratio)
-        metadata["virtual_center_right_edge_scale_drift"] = float(virtual_center_solution.right_edge_scale_drift)
-        metadata["virtual_center_roll_correction_deg"] = float(virtual_center_solution.virtual_roll_correction_deg)
-        metadata["virtual_center_mask_tilt_deg"] = float(virtual_center_solution.mask_tilt_deg)
-        geometry_artifact = build_runtime_geometry_artifact(
-            source_homography_file=config.output_path,
-            geometry_file=geometry_file,
-            homography=homography,
-            metadata=metadata,
-            distortion_reference=distortion_reference,
-            left_resolution=(int(left.shape[1]), int(left.shape[0])),
-            right_resolution=(int(right.shape[1]), int(right.shape[0])),
-            output_resolution=output_resolution,
-            inliers_count=int(result["inliers_count"]),
-            inlier_ratio=float(result["inlier_ratio"]),
-            left_inlier_points=left_inlier_points,
-            right_inlier_points=right_inlier_points,
-            geometry_model="virtual-center-rectilinear",
-            warp_model="virtual-center-remap",
-            alignment_model="rigid",
-            alignment_matrix=virtual_center_solution.rigid_matrix,
-            projection_model="rectilinear",
-            projection_left_focal_px=virtual_center_solution.left_projection_focal_px,
-            projection_left_center=virtual_center_solution.left_projection_center,
-            projection_right_focal_px=virtual_center_solution.right_projection_focal_px,
-            projection_right_center=virtual_center_solution.right_projection_center,
-            virtual_camera={
-                "model": "rectilinear",
-                "focal_px": float(virtual_center_solution.virtual_focal_px),
-                "center": [
-                    float(virtual_center_solution.virtual_center[0]),
-                    float(virtual_center_solution.virtual_center[1]),
-                ],
-                "output_resolution": [int(output_resolution[0]), int(output_resolution[1])],
-                "midpoint_alpha": float(virtual_center_solution.midpoint_alpha),
-                "left_to_virtual_rotation": np.asarray(
-                    virtual_center_solution.left_to_virtual_rotation,
-                    dtype=np.float64,
-                ).reshape(3, 3).tolist(),
-                "right_to_virtual_rotation": np.asarray(
-                    virtual_center_solution.right_to_virtual_rotation,
-                    dtype=np.float64,
-                ).reshape(3, 3).tolist(),
-            },
-            seam_transition_px=seam_transition_px,
-        )
-    save_runtime_geometry_artifact(geometry_file, geometry_artifact)
-    _save_calibration_inliers_file(
-        Path(config.inliers_output_path),
-        homography=homography,
-        distortion_reference=distortion_reference,
-        left_resolution=(int(left.shape[1]), int(left.shape[0])),
-        right_resolution=(int(right.shape[1]), int(right.shape[0])),
-        output_resolution=output_resolution,
-        inliers_count=int(result["inliers_count"]),
-        inlier_ratio=float(result["inlier_ratio"]),
-        left_points=left_inlier_points,
-        right_points=right_inlier_points,
-    )
-    result["homography_file"] = str(config.output_path)
-    result["geometry_file"] = str(geometry_file)
-    result["geometry_schema_version"] = RUNTIME_GEOMETRY_SCHEMA_VERSION
-    result["geometry_model"] = str(geometry_artifact.get("geometry", {}).get("model") or "cylindrical-affine")
-    result["inliers_file"] = str(config.inliers_output_path)
-    result["debug_dir"] = str(config.debug_dir)
-    result["runtime_geometry_file"] = str(geometry_file)
-    return result
-
-
-def calibrate_native_homography_from_frames(
-    config: NativeCalibrationConfig,
-    left_raw: np.ndarray,
-    right_raw: np.ndarray,
-    *,
-    left_points: list[tuple[float, float]] | None = None,
-    right_points: list[tuple[float, float]] | None = None,
-    prompt_for_points: bool = False,
-    review_required: bool | None = None,
-    save_outputs: bool = False,
-) -> dict[str, Any]:
-    left, right, distortion_metadata = _resolve_calibration_distortion(left_raw, right_raw, config)
+def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
+    left, right = _capture_pair(config)
     requested_mode = str(config.calibration_mode).lower().strip()
-    left_points_local = list(left_points or [])
-    right_points_local = list(right_points or [])
+    left_points: list[tuple[float, float]] = []
+    right_points: list[tuple[float, float]] = []
     left_overlap_hint, right_overlap_hint = _estimate_overlap_hints(left, right, config)
-    if prompt_for_points and requested_mode in {"assisted", "manual"} and not left_points_local:
-        left_points_local, right_points_local = _AssistedCalibrationUi(
+    if requested_mode in {"assisted", "manual"}:
+        left_points, right_points = _AssistedCalibrationUi(
             left,
             right,
             left_overlap_hint=left_overlap_hint,
             right_overlap_hint=right_overlap_hint,
         ).run()
-    if len(left_points_local) != len(right_points_local):
-        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "manual point counts must match")
 
     candidates: list[_CalibrationCandidate] = []
     failures: list[str] = []
 
+    # Baseline auto path is always preserved and evaluated first.
     try:
         auto_kp_left, auto_kp_right, auto_matches, auto_backend_name = _detect_auto_matches(left, right, config)
         candidates.append(
@@ -2069,37 +1060,15 @@ def calibrate_native_homography_from_frames(
     except StitchingFailure as exc:
         failures.append(f"auto:{exc.code.value}:{exc.detail}")
 
-    if left_points_local:
-        try:
-            manual_kp_left, manual_kp_right, manual_matches, manual_mode, manual_seed_model, manual_backend_name = _build_manual_matches(
-                left_points_local,
-                right_points_local,
-            )
-            candidates.append(
-                _build_candidate(
-                    left=left,
-                    right=right,
-                    keypoints_left=manual_kp_left,
-                    keypoints_right=manual_kp_right,
-                    matches=manual_matches,
-                    calibration_mode=manual_mode,
-                    seed_guidance_model=manual_seed_model,
-                    backend_name=manual_backend_name,
-                    config=_manual_candidate_config(config, pair_count=len(manual_matches)),
-                    enforce_quality_gate=False,
-                )
-            )
-        except StitchingFailure as exc:
-            failures.append(f"manual:{exc.code.value}:{exc.detail}")
-
-    if left_points_local:
+    # Assisted/manual points only propose an improvement candidate; they never replace auto unless better.
+    if left_points:
         try:
             assisted_kp_left, assisted_kp_right, assisted_matches, assisted_mode, seed_guidance_model, assisted_backend_name = _build_assisted_matches(
                 left,
                 right,
                 config,
-                left_points_local,
-                right_points_local,
+                left_points,
+                right_points,
             )
             candidates.append(
                 _build_candidate(
@@ -2125,16 +1094,9 @@ def calibrate_native_homography_from_frames(
         raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "no valid calibration candidate")
 
     auto_candidate = next((item for item in candidates if item.calibration_mode == "auto"), None)
-    manual_candidate = next((item for item in candidates if item.calibration_mode == "manual"), None)
-    assisted_candidate = next((item for item in candidates if item.calibration_mode == "assisted"), None)
     best_candidate = max(candidates, key=lambda item: item.score)
     score_margin = 0.03
-    if requested_mode in {"assisted", "manual"} and left_points_local:
-        if manual_candidate is not None:
-            best_candidate = manual_candidate
-        elif assisted_candidate is not None:
-            best_candidate = assisted_candidate
-    elif auto_candidate is not None and best_candidate is not auto_candidate:
+    if auto_candidate is not None and best_candidate is not auto_candidate:
         if float(best_candidate.score) < float(auto_candidate.score) + score_margin:
             best_candidate = auto_candidate
     homography = best_candidate.homography
@@ -2147,6 +1109,7 @@ def calibrate_native_homography_from_frames(
     seed_guidance_model = best_candidate.seed_guidance_model
 
     plan = _prepare_warp_plan(left.shape[:2], right.shape[:2], homography, config)
+
     warped_right = cv2.warpPerspective(
         right,
         plan.homography_adjusted,
@@ -2170,24 +1133,16 @@ def calibrate_native_homography_from_frames(
         f"score={best_candidate.score:.3f}  match={best_candidate.match_score:.3f}  geom={best_candidate.geometry_score:.3f}  visual={best_candidate.visual_score:.3f}",
         f"matches={len(matches)}  inliers={inliers_count}  inlier_ratio={best_candidate.inlier_ratio:.3f}  repr_err={best_candidate.mean_reprojection_error:.2f}px",
         f"output={plan.width}x{plan.height}  luma_diff={best_candidate.overlap_luma_diff:.3f}  edge_diff={best_candidate.overlap_edge_diff:.3f}  ghost={best_candidate.ghosting_score:.3f}",
-        f"manual_points={min(len(left_points_local), len(right_points_local))}  backend={best_candidate.backend_name}",
+        f"manual_points={min(len(left_points), len(right_points))}  backend={best_candidate.backend_name}",
         "CONFIRM saves this homography and launches runtime. CANCEL stops here.",
     ]
-    use_review = bool(config.review_required) if review_required is None else bool(review_required)
-    if use_review:
-        if not _CalibrationReviewUi(
-            inlier_preview=inlier_preview,
-            stitched_preview=stitched,
-            summary_lines=review_lines,
-        ).run():
-            raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration review cancelled by user")
-
-    left_inlier_points, right_inlier_points = _extract_inlier_points(
-        keypoints_left,
-        keypoints_right,
-        matches,
-        inlier_mask,
-    )
+    if not _CalibrationReviewUi(
+        inlier_preview=inlier_preview,
+        stitched_preview=stitched,
+        summary_lines=review_lines,
+    ).run():
+        raise StitchingFailure(ErrorCode.HOMOGRAPHY_FAIL, "calibration review cancelled by user")
+    _write_debug_outputs(config, left, right, stitched, inlier_preview)
     metadata = {
         "source": "native_runtime_calibration",
         "calibration_mode_requested": str(config.calibration_mode),
@@ -2196,7 +1151,7 @@ def calibrate_native_homography_from_frames(
         "right_rtsp": config.right_rtsp,
         "rtsp_transport": config.rtsp_transport,
         "process_scale": float(config.process_scale),
-        "manual_points_count": int(min(len(left_points_local), len(right_points_local))),
+        "manual_points_count": int(min(len(left_points), len(right_points))),
         "match_backend_requested": str(config.match_backend),
         "match_backend_effective": best_candidate.backend_name,
         "selected_candidate": calibration_mode_effective,
@@ -2219,7 +1174,6 @@ def calibrate_native_homography_from_frames(
         "right_resolution": [int(right.shape[1]), int(right.shape[0])],
         "output_resolution": [int(plan.width), int(plan.height)],
         "debug_dir": str(config.debug_dir),
-        **distortion_metadata,
         "candidates": [
             {
                 "name": item.calibration_mode,
@@ -2243,13 +1197,13 @@ def calibrate_native_homography_from_frames(
             for item in candidates
         ],
     }
-    result = {
+    _save_homography_file(config.output_path, homography, metadata)
+    return {
         "homography_file": str(config.output_path),
-        "inliers_file": str(config.inliers_output_path),
         "debug_dir": str(config.debug_dir),
         "matches_count": int(len(matches)),
         "inliers_count": inliers_count,
-        "manual_points_count": int(min(len(left_points_local), len(right_points_local))),
+        "manual_points_count": int(min(len(left_points), len(right_points))),
         "calibration_mode": calibration_mode_effective,
         "seed_guidance_model": seed_guidance_model,
         "candidate_failures": failures,
@@ -2262,175 +1216,7 @@ def calibrate_native_homography_from_frames(
         "mean_reprojection_error": float(best_candidate.mean_reprojection_error),
         "output_resolution": [int(plan.width), int(plan.height)],
         "match_backend": best_candidate.backend_name,
-        "distortion_reference": str(distortion_metadata.get("distortion_reference") or "raw"),
-        "left_distortion_source": str(distortion_metadata.get("left_distortion_source") or "off"),
-        "right_distortion_source": str(distortion_metadata.get("right_distortion_source") or "off"),
-        "homography_matrix": homography,
-        "metadata": metadata,
-        "left_frame": left,
-        "right_frame": right,
-        "stitched_preview_frame": stitched,
-        "inlier_preview_frame": inlier_preview,
-        "left_inlier_points": left_inlier_points,
-        "right_inlier_points": right_inlier_points,
-        "review_lines": review_lines,
     }
-    if save_outputs:
-        save_native_calibration_artifacts(config, result)
-    return result
-
-
-def calibrate_native_homography(config: NativeCalibrationConfig) -> dict:
-    left_raw, right_raw = _capture_pair(config)
-    return calibrate_native_homography_from_frames(
-        config,
-        left_raw,
-        right_raw,
-        prompt_for_points=True,
-        review_required=bool(config.review_required),
-        save_outputs=True,
-    )
-
-
-def backup_homography_file(path: Path) -> Path | None:
-    file_path = Path(path)
-    if not file_path.exists():
-        return None
-    timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
-    backup_path = file_path.with_name(f"{file_path.stem}.bak_{timestamp}{file_path.suffix}")
-    shutil.copy2(file_path, backup_path)
-    return backup_path
-
-
-def find_latest_homography_backup(
-    output_path: Path,
-    *,
-    distortion_reference: str,
-) -> Path | None:
-    file_path = Path(output_path)
-    candidates = sorted(
-        file_path.parent.glob(f"{file_path.stem}.bak_*{file_path.suffix}"),
-        key=lambda item: item.name,
-        reverse=True,
-    )
-    target_reference = str(distortion_reference or "").strip().lower()
-    for candidate in candidates:
-        if load_homography_distortion_reference(candidate) == target_reference:
-            return candidate
-    return None
-
-
-def ensure_runtime_raw_homography(
-    *,
-    left_rtsp: str,
-    right_rtsp: str,
-    output_path: Path,
-    inliers_output_path: Path,
-    debug_dir: Path,
-    rtsp_transport: str,
-    rtsp_timeout_sec: float,
-    warmup_frames: int,
-    process_scale: float,
-    backup_existing: bool = True,
-) -> tuple[str, Path | None, dict[str, Any] | None, list[str]]:
-    messages: list[str] = []
-    file_path = Path(output_path)
-    current_reference = load_homography_distortion_reference(file_path)
-    if current_reference == "raw":
-        messages.append("Active homography already uses raw reference.")
-        return current_reference, None, None, messages
-
-    raw_backup = find_latest_homography_backup(file_path, distortion_reference="raw")
-    if raw_backup is not None:
-        backup_path = backup_homography_file(file_path) if backup_existing and file_path.exists() else None
-        shutil.copy2(raw_backup, file_path)
-        messages.append(f"Restored raw homography from backup {raw_backup}")
-        if backup_path is not None:
-            messages.append(f"Backed up current homography -> {backup_path}")
-        return "raw", backup_path, {"restored_from": str(raw_backup)}, messages
-
-    result, backup_path = ensure_runtime_distortion_homography(
-        left_rtsp=str(left_rtsp),
-        right_rtsp=str(right_rtsp),
-        output_path=file_path,
-        inliers_output_path=Path(inliers_output_path),
-        debug_dir=Path(debug_dir),
-        rtsp_transport=str(rtsp_transport),
-        rtsp_timeout_sec=max(1.0, float(rtsp_timeout_sec)),
-        warmup_frames=max(1, int(warmup_frames)),
-        process_scale=max(0.1, float(process_scale)),
-        distortion_mode="off",
-        use_saved_distortion=False,
-        distortion_auto_save=False,
-        left_distortion_file=Path(DEFAULT_NATIVE_LEFT_DISTORTION_FILE),
-        right_distortion_file=Path(DEFAULT_NATIVE_RIGHT_DISTORTION_FILE),
-        distortion_lens_model_hint=DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT,
-        distortion_horizontal_fov_deg=None,
-        distortion_vertical_fov_deg=None,
-        distortion_camera_model=DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL,
-        backup_existing=backup_existing,
-    )
-    updated_reference = str(result.get("distortion_reference") or load_homography_distortion_reference(file_path) or current_reference)
-    if updated_reference == "raw":
-        messages.append(
-            "Generated new raw homography "
-            f"(matches={int(result.get('matches_count') or 0)} "
-            f"inliers={int(result.get('inliers_count') or 0)} "
-            f"score={float(result.get('candidate_score') or 0.0):.3f})"
-        )
-    else:
-        messages.append(f"Raw homography preparation completed, but reference remains {updated_reference}")
-    return updated_reference, backup_path, result, messages
-
-
-def ensure_runtime_distortion_homography(
-    *,
-    left_rtsp: str,
-    right_rtsp: str,
-    output_path: Path,
-    inliers_output_path: Path | None,
-    debug_dir: Path,
-    rtsp_transport: str,
-    rtsp_timeout_sec: float,
-    warmup_frames: int,
-    process_scale: float,
-    distortion_mode: str,
-    use_saved_distortion: bool,
-    distortion_auto_save: bool,
-    left_distortion_file: Path,
-    right_distortion_file: Path,
-    distortion_lens_model_hint: str,
-    distortion_horizontal_fov_deg: float | None,
-    distortion_vertical_fov_deg: float | None,
-    distortion_camera_model: str,
-    backup_existing: bool = True,
-) -> tuple[dict[str, Any], Path | None]:
-    backup_path = backup_homography_file(output_path) if backup_existing else None
-    config = NativeCalibrationConfig(
-        left_rtsp=str(left_rtsp),
-        right_rtsp=str(right_rtsp),
-        output_path=Path(output_path),
-        inliers_output_path=Path(inliers_output_path) if inliers_output_path is not None else Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE),
-        debug_dir=Path(debug_dir),
-        rtsp_transport=str(rtsp_transport),
-        rtsp_timeout_sec=max(1.0, float(rtsp_timeout_sec)),
-        warmup_frames=max(1, int(warmup_frames)),
-        process_scale=max(0.1, float(process_scale)),
-        calibration_mode="auto",
-        match_backend="classic",
-        distortion_mode=str(distortion_mode),
-        use_saved_distortion=bool(use_saved_distortion),
-        distortion_auto_save=bool(distortion_auto_save),
-        left_distortion_file=Path(left_distortion_file),
-        right_distortion_file=Path(right_distortion_file),
-        distortion_lens_model_hint=str(distortion_lens_model_hint or "auto"),
-        distortion_horizontal_fov_deg=distortion_horizontal_fov_deg,
-        distortion_vertical_fov_deg=distortion_vertical_fov_deg,
-        distortion_camera_model=str(distortion_camera_model or ""),
-        review_required=False,
-    )
-    result = calibrate_native_homography(config)
-    return result, backup_path
 
 
 def run_native_calibration(args: argparse.Namespace) -> int:
@@ -2446,7 +1232,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         left_rtsp=str(args.left_rtsp),
         right_rtsp=str(args.right_rtsp),
         output_path=Path(args.out),
-        inliers_output_path=Path(DEFAULT_NATIVE_CALIBRATION_INLIERS_FILE),
         debug_dir=Path(args.debug_dir),
         rtsp_transport=str(args.rtsp_transport),
         rtsp_timeout_sec=max(1.0, float(args.rtsp_timeout_sec)),
@@ -2456,24 +1241,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         assisted_reproj_threshold=max(1.0, float(args.assisted_reproj_threshold)),
         assisted_max_auto_matches=max(0, int(args.assisted_max_auto_matches)),
         match_backend=str(args.match_backend),
-        distortion_mode=str(args.distortion_mode),
-        use_saved_distortion=bool(args.use_saved_distortion),
-        distortion_auto_save=bool(args.distortion_auto_save),
-        left_distortion_file=Path(str(args.left_distortion_file)),
-        right_distortion_file=Path(str(args.right_distortion_file)),
-        distortion_lens_model_hint=str(getattr(args, "distortion_lens_model_hint", DEFAULT_NATIVE_DISTORTION_LENS_MODEL_HINT)),
-        distortion_horizontal_fov_deg=(
-            float(args.distortion_horizontal_fov_deg)
-            if getattr(args, "distortion_horizontal_fov_deg", None) is not None
-            else None
-        ),
-        distortion_vertical_fov_deg=(
-            float(args.distortion_vertical_fov_deg)
-            if getattr(args, "distortion_vertical_fov_deg", None) is not None
-            else None
-        ),
-        distortion_camera_model=str(getattr(args, "distortion_camera_model", DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL) or DEFAULT_NATIVE_DISTORTION_CAMERA_MODEL),
-        review_required=not bool(getattr(args, "skip_review", False)),
         min_matches=max(8, int(args.min_matches)),
         min_inliers=max(6, int(args.min_inliers)),
         ratio_test=float(args.ratio_test),
@@ -2489,8 +1256,6 @@ def run_native_calibration(args: argparse.Namespace) -> int:
     output_width, output_height = result["output_resolution"]
     print(
         f"homography_saved={result['homography_file']} "
-        f"geometry_saved={result['geometry_file']} "
-        f"inliers_saved={result['inliers_file']} "
         f"output={output_width}x{output_height} "
         f"matches={result['matches_count']} "
         f"inliers={result['inliers_count']} "
@@ -2499,11 +1264,24 @@ def run_native_calibration(args: argparse.Namespace) -> int:
         f"seed_model={result['seed_guidance_model']} "
         f"model={result['transform_model']} "
         f"backend={result['match_backend']} "
-        f"geometry_schema={result['geometry_schema_version']} "
-        f"geometry_model={result.get('geometry_model', 'cylindrical-affine')} "
-        f"distortion_ref={result['distortion_reference']} "
-        f"distortion=({result['left_distortion_source']},{result['right_distortion_source']}) "
         f"score={result['candidate_score']:.3f} "
         f"repr_err={result['mean_reprojection_error']:.2f}"
     )
+    if bool(getattr(args, "launch_runtime", False)):
+        repo_root = Path(__file__).resolve().parent.parent
+        runtime_command = [
+            sys.executable,
+            "-m",
+            "stitching.cli",
+            "native-runtime",
+            "--no-output-ui",
+        ]
+        print(f"launching_runtime={' '.join(runtime_command)}")
+        completed = subprocess.run(
+            runtime_command,
+            cwd=str(repo_root),
+            env=os.environ.copy(),
+            check=False,
+        )
+        return int(completed.returncode)
     return 0

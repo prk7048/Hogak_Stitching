@@ -1,5 +1,5 @@
 numpy>=1.26
 opencv-python>=4.10
-gradio>=5.0
+pydantic>=2.12
 fastapi>=0.110
 uvicorn>=0.30
